@@ -1,0 +1,7 @@
+CompileFlags:
+  Add:
+    - -I../OpenRGB/Controllers/LianLiWirelessController
+    - -I../OpenRGB/dependencies
+    - -I../OpenRGB/dependencies/tinyuz
+    - -I../OpenRGB/dependencies/HDiffPatch
+    - -std=c++17
