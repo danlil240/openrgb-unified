@@ -15,8 +15,6 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
-#include <stdexcept>
-#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -278,10 +276,13 @@ static void TestCodec()
     CHECK(!LianLiWirelessCodec::Decompress(garbage, sizeof(garbage), out, sizeof(out)),
           "malformed compressed input rejected");
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(LLW_YUZ_CROSSCHECK)
     /*---------------------------------------------------------*\
     | Independent decode via the vendor yuz.dll when present —  |
     | validates wire compatibility, not just self-consistency.  |
+    | Off by default: the dynamic-load pattern gets the test    |
+    | binary flagged by Smart App Control. Build with           |
+    | /DLLW_YUZ_CROSSCHECK to enable.                           |
     \*---------------------------------------------------------*/
     HMODULE yuz = LoadLibraryW(L"C:\\Program Files\\Lian-Li\\L-Connect 3\\yuz.dll");
     if(yuz)
