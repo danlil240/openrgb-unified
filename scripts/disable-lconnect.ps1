@@ -31,13 +31,13 @@ foreach ($svc in $services) {
     }
 }
 
-$task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$task = Get-ScheduledTask | Where-Object TaskName -eq $taskName
 if ($task) {
     if ($Enable) {
-        Enable-ScheduledTask -TaskName $taskName | Out-Null
+        $task | Enable-ScheduledTask | Out-Null
         Write-Host "Task '$taskName' enabled"
     } else {
-        Disable-ScheduledTask -TaskName $taskName | Out-Null
+        $task | Disable-ScheduledTask | Out-Null
         Write-Host "Task '$taskName' disabled"
     }
 } else {
