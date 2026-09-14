@@ -10,6 +10,7 @@
 #include "LianLiWirelessProtocol.h"
 #include "LianLiWirelessCodec.h"
 #include "LianLiWirelessRuntime.h"
+#include "LianLiWirelessService.h"
 
 #include <cstdio>
 #include <cstring>
@@ -544,6 +545,71 @@ static void TestRuntimeChannelRefresh()
     }
 }
 
+/*-------------------------------------------------------------*\
+|| 12. Lost -> re-sighting resumes pending upload                ||
+\*-------------------------------------------------------------*/
+static void TestRuntimeLostRecovery()
+{
+    FakeClock clk;
+    FakeLink  link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.poll_fn = [] { return MakeDiscovery(); };   /* wrong effect */
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() == WirelessState::Uploading, "uploading while sighted");
+
+    /* device vanishes past the lost deadline */
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 10000);
+    CHECK(rt.State() == WirelessState::Lost, "sustained absence -> Lost");
+
+    /* returns still reporting the old effect -> resume uploading */
+    int sends_before = link.send_calls;
+    link.poll_fn = [] { return MakeDiscovery(); };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() == WirelessState::Uploading,
+          "re-sighting with stale effect resumes uploading");
+    CHECK(link.send_calls > sends_before, "upload resent after Lost");
+}
+
+/*-------------------------------------------------------------*\
+|| 13. Service: group routing, status, convergence               ||
+\*-------------------------------------------------------------*/
+static void TestService()
+{
+    FakeClock clk;
+    FakeLink  link;
+    LianLiWirelessService svc(link, clk);
+
+    CHECK(svc.AddGroup(MAC_TARGET, 3), "service tracks group");
+    CHECK(!svc.AddGroup(MAC_TARGET, 3), "duplicate group rejected");
+    CHECK(svc.Groups().size() == 1, "one group listed");
+
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    svc.SetDesired(MAC_TARGET, up);
+    svc.SetDesired(MAC_FOREIGN, up);          /* unknown MAC ignored */
+
+    link.poll_fn = [&] {
+        return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+                             link.rgb_sends > 0 ? up->EffectId().data() : nullptr);
+    };
+    for(int i = 0; i < 30; i++) { clk.Advance(100); svc.StepAll(); }
+
+    LianLiWirelessService::GroupStatus st;
+    CHECK(svc.GetStatus(MAC_TARGET, st), "status available");
+    CHECK(st.state == WirelessState::Holding && st.confirmed,
+          "service converged to confirmed");
+    CHECK(st.have_sighting && st.latest.mac == MAC_TARGET,
+          "status carries latest sighting");
+    CHECK(!svc.GetStatus(MAC_FOREIGN, st), "unknown group has no status");
+
+    svc.RemoveGroup(MAC_TARGET);
+    CHECK(!svc.GetStatus(MAC_TARGET, st), "removed group drops status");
+    CHECK(svc.Groups().empty(), "group list empty after removal");
+}
+
 int main()
 {
     TestProtocol();
@@ -557,6 +623,8 @@ int main()
     TestRuntimeRestoreFailure();
     TestRuntimeNewestWins();
     TestRuntimeChannelRefresh();
+    TestRuntimeLostRecovery();
+    TestService();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

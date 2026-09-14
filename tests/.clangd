@@ -4,4 +4,5 @@ CompileFlags:
     - -I../OpenRGB/dependencies
     - -I../OpenRGB/dependencies/tinyuz
     - -I../OpenRGB/dependencies/HDiffPatch
+    - -I../OpenRGB/dependencies/libusb-1.0.27/include
     - -std=c++17

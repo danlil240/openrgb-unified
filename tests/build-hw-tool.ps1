@@ -1,9 +1,10 @@
-# Builds and runs the offline Lian Li wireless protocol tests.
-# Uses MSVC Build Tools (cl) only — no Qt, no hardware.
+# Builds the on-hardware Lian Li wireless check tool.
+# Links against the repo's bundled libusb-1.0.27 (VS2019/MS64).
 $ErrorActionPreference = 'Stop'
 $root   = Split-Path -Parent $PSScriptRoot
 $ctrl   = Join-Path $root 'OpenRGB\Controllers\LianLiWirelessController'
 $vendor = Join-Path $root 'OpenRGB\dependencies'
+$libusb = Join-Path $vendor 'libusb-1.0.27'
 $out    = Join-Path $PSScriptRoot 'out'
 New-Item -ItemType Directory -Force $out | Out-Null
 
@@ -14,10 +15,11 @@ if (-not $vs) { throw 'MSVC Build Tools not found' }
 $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
 
 $sources = @(
-    "$PSScriptRoot\lianli_protocol_test.cpp",
+    "$PSScriptRoot\lianli_hw_tool.cpp",
     "$ctrl\LianLiWirelessProtocol.cpp",
     "$ctrl\LianLiWirelessCodec.cpp",
     "$ctrl\LianLiWirelessRuntime.cpp",
+    "$ctrl\LianLiWirelessTransport.cpp",
     "$ctrl\LianLiWirelessService.cpp",
     "$vendor\tinyuz\compress\tuz_enc.cpp",
     "$vendor\tinyuz\compress\tuz_enc_private\tuz_enc_clip.cpp",
@@ -30,9 +32,10 @@ $sources = @(
 
 $srcArgs = ($sources | ForEach-Object { "`"$_`"" }) -join ' '
 $outFwd = $out -replace '\\','/'
-$cmd = "call `"$vcvars`" >nul 2>&1 && cl /nologo /EHsc /O2 /std:c++17 /DNDEBUG /D_IS_USED_MULTITHREAD=0 /I`"$ctrl`" /I`"$vendor`" /I`"$vendor\tinyuz`" /I`"$vendor\HDiffPatch`" /Fo`"$outFwd/`" /Fe:`"$outFwd/lianli_protocol_test.exe`" $srcArgs"
+$libFwd = (Join-Path $libusb 'VS2019\MS64\dll') -replace '\\','/'
+$cmd = "call `"$vcvars`" >nul 2>&1 && cl /nologo /EHsc /O2 /std:c++17 /DNDEBUG /D_IS_USED_MULTITHREAD=0 /I`"$ctrl`" /I`"$vendor`" /I`"$vendor\tinyuz`" /I`"$vendor\HDiffPatch`" /I`"$libusb\include`" /Fo`"$outFwd/`" /Fe:`"$outFwd/lianli_hw_tool.exe`" $srcArgs /link /LIBPATH:`"$libFwd`" libusb-1.0.lib"
 cmd /c $cmd
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 
-& "$out\lianli_protocol_test.exe"
-exit $LASTEXITCODE
+Copy-Item (Join-Path $libusb 'VS2019\MS64\dll\libusb-1.0.dll') $out -Force
+Write-Host "built $out\lianli_hw_tool.exe"
