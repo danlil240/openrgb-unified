@@ -1,0 +1,11 @@
+{
+    "Id" : "org.openrgb.DesktopLightingStudio",
+    "Name" : "Desktop Lighting Studio",
+    "VendorId" : "openrgb",
+    "Version" : "0.1.0",
+    "VersionStr" : "0.1.0-stage0",
+    "Url" : "https://github.com/danlil240/openrgb-unified",
+    "Commit" : "",
+    "Description" : "3D desk scene with mapped real-world lighting (Stage 0 probe)",
+    "OpenRGBPluginAPIVersion" : 5
+}

@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/studio">
+        <file alias="StudioScene.qml">StudioScene.qml</file>
+    </qresource>
+</RCC>

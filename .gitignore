@@ -4,3 +4,9 @@ build/
 build-test/
 tests/out/
 __pycache__/
+plugins/*/build/
+plugins/*/out/
+plugins/*/.qmake.stash
+plugins/*/Makefile
+vendor/effects-plugin/
+vendor/visual-map-plugin/
