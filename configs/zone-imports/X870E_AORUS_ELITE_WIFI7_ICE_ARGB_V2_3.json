@@ -1,0 +1,14 @@
+{
+  "vendor": "Gigabyte",
+  "device": "X870E AORUS ELITE WIFI7 ICE - ARGB_V2_3 (top-GPU fan)",
+  "segments": [
+    {
+      "name": "Top GPU Fan",
+      "type": 3,
+      "start_idx": 0,
+      "leds_count": 8,
+      "matrix_map": {"height": 0, "width": 0, "map": []},
+      "flags": 0
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "vendor": "Gigabyte",
+  "device": "X870E AORUS ELITE WIFI7 ICE - ARGB_V2_1 (C500 case fans x4, mirrored splitter)",
+  "segments": [
+    {
+      "name": "Case Fans (x4 mirrored)",
+      "type": 3,
+      "start_idx": 0,
+      "leds_count": 8,
+      "matrix_map": {"height": 0, "width": 0, "map": []},
+      "flags": 0
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "vendor": "Gigabyte",
+  "device": "X870E AORUS ELITE WIFI7 ICE - ARGB_V2_2 (GAMING 360 ICE: 3 radiator fans mirrored + pump)",
+  "segments": [
+    {
+      "name": "Radiator Fans (x3 mirrored)",
+      "type": 3,
+      "start_idx": 0,
+      "leds_count": 8,
+      "matrix_map": {"height": 0, "width": 0, "map": []},
+      "flags": 0
+    },
+    {
+      "name": "Pump",
+      "type": 3,
+      "start_idx": 8,
+      "leds_count": 8,
+      "matrix_map": {"height": 0, "width": 0, "map": []},
+      "flags": 0
+    }
+  ]
+}
