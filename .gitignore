@@ -3,3 +3,4 @@ build/
 *.user
 build-test/
 tests/out/
+__pycache__/

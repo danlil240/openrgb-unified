@@ -92,14 +92,27 @@ struct FakeLink : IWirelessLink
     std::function<std::vector<uint8_t>()> poll_fn;
     bool fail_polls   = false;
     bool fail_sends   = false;
+    bool fail_master  = false;
+    bool fail_rgb     = false;
+    Mac master_mac   = MAC_MASTER;
+    int master_reads = 0;
+    int poll_calls   = 0;
+    uint64_t generation = 1;
+    uint64_t ConnectionGeneration() const { return generation; }
     int  send_calls   = 0;
     int  clock_sends  = 0;      /* receiver==0xFF chunks          */
     int  rgb_sends    = 0;      /* receiver!=0xFF chunks          */
     std::vector<std::array<UsbChunk, USB_CHUNKS_PER_PACKET>> sent;
 
-    bool ReadMasterMac(Mac& out) override { out = MAC_MASTER; return true; }
+    bool ReadMasterMac(Mac& out) override
+    {
+        master_reads++;
+        out = master_mac;
+        return !fail_master;
+    }
     bool PollDiscovery(std::vector<uint8_t>& out) override
     {
+        poll_calls++;
         if(fail_polls) return false;
         out = poll_fn ? poll_fn() : std::vector<uint8_t>{};
         return true;
@@ -108,6 +121,7 @@ struct FakeLink : IWirelessLink
     {
         send_calls++;
         if(fail_sends) return false;
+        if(fail_rgb && c[0][3] != BROADCAST_RECEIVER) return false;
         sent.push_back(c);
         if(c[0][3] == BROADCAST_RECEIVER) clock_sends++; else rgb_sends++;
         return true;
@@ -611,6 +625,199 @@ static void TestService()
     CHECK(svc.Groups().empty(), "group list empty after removal");
 }
 
+/* Transport outages must recover through the same runtime used by OpenRGB. */
+static void TestTransportReconnect()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto first = std::make_shared<RgbUpload>(MakeUpload(0x30));
+    auto newest = std::make_shared<RgbUpload>(MakeUpload(0x70));
+    rt.SetDesired(first);
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? first->EffectId().data() : nullptr); };
+    RunFor(rt, clk, 2000);
+    CHECK(rt.Confirmed(), "reconnect fixture initially holds desired lighting");
+
+    link.fail_polls = true;         /* receiver drops out during sleep */
+    RunFor(rt, clk, 2000);
+    CHECK(rt.State() == WirelessState::Failed, "transport outage is reported during backoff");
+    CHECK(!rt.Confirmed() && rt.Latest() == nullptr, "outage invalidates cached device confirmation");
+    int reads_before = link.master_reads;
+    int polls_before = link.poll_calls;
+    int sends_before = link.send_calls;
+    int rgb_before = link.rgb_sends;
+    size_t packets_before = link.sent.size();
+    rt.SetDesired(newest);          /* profile changed while disconnected */
+    link.fail_polls = false;
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > rgb_before ? newest->EffectId().data() : nullptr, 9, 2); };
+    RunFor(rt, clk, 1000);
+    CHECK(link.master_reads == reads_before && link.poll_calls == polls_before
+          && link.send_calls == sends_before, "reconnect backoff performs no USB operations");
+    RunFor(rt, clk, 6000);
+    CHECK(link.master_reads > reads_before, "reconnect re-reads transmitter identity");
+    CHECK(rt.Confirmed(), "same runtime restores newest desired effect after reconnect");
+    CHECK(std::strlen(rt.LastError()) == 0, "confirmed recovery clears stale failure message");
+    CHECK(rt.Latest() && rt.Latest()->channel == 9 && rt.Latest()->receiver == 2,
+          "reconnect uses new discovery addressing");
+    for(size_t i = packets_before; i < link.sent.size(); i++)
+    {
+        const auto& c = link.sent[i];
+        if(c[0][3] == BROADCAST_RECEIVER || c[0][2] != 9) continue;
+        std::array<uint8_t, 4> id = { c[0][18], c[0][19], c[0][20], c[0][21] };
+        CHECK(id == newest->EffectId(), "no superseded profile replayed after reconnect");
+    }
+    link.fail_polls = true;
+    RunFor(rt, clk, 2000);
+    rt.Cancel();
+    reads_before = link.master_reads; polls_before = link.poll_calls; sends_before = link.send_calls;
+    RunFor(rt, clk, 20000);
+    CHECK(rt.State() == WirelessState::Cancelled && link.master_reads == reads_before
+          && link.poll_calls == polls_before && link.send_calls == sends_before,
+          "cancel during backoff prevents later recovery attempts");
+}
+
+static void TestMasterReadRecovery()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.fail_master = true;
+    RunFor(rt, clk, 10000);
+    CHECK(link.master_reads > 3 && link.master_reads <= 12,
+          "long outage retries master reads with bounded attempts and delay");
+    CHECK(link.rgb_sends == 0, "no RGB while transmitter identity is unavailable");
+    link.fail_master = false;
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? up->EffectId().data() : nullptr); };
+    RunFor(rt, clk, 6000);
+    CHECK(rt.Confirmed(), "runtime recovers when transmitter becomes readable");
+}
+
+static void TestTransmitRecovery()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? up->EffectId().data() : nullptr); };
+    RunFor(rt, clk, 2000);
+    link.fail_sends = true;
+    RunFor(rt, clk, 3000);
+    CHECK(rt.State() == WirelessState::Failed && !rt.Confirmed(),
+          "keep-alive transport failure invalidates confirmation");
+    int rgb_before = link.rgb_sends;
+    link.fail_sends = false;
+    link.poll_fn = [] { return std::vector<uint8_t>{}; };
+    RunFor(rt, clk, 4000);
+    CHECK(link.rgb_sends == rgb_before, "reopened USB without fresh target cannot send RGB");
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > rgb_before ? up->EffectId().data() : nullptr); };
+    size_t packets_before = link.sent.size();
+    RunFor(rt, clk, 6000);
+    CHECK(rt.Confirmed(), "keep-alive failure can recover and restore lighting");
+    CHECK(link.sent.size() > packets_before && link.sent[packets_before][0][3] == BROADCAST_RECEIVER,
+          "returning fan receives initial keep-alive before any RGB upload");
+}
+
+static void TestBriefOutageRevalidatesIdentity()
+{
+    for(bool tx_failure : { false, true })
+    {
+        FakeClock clk; FakeLink link;
+        WirelessRuntime rt(link, clk);
+        rt.SetTarget(MAC_TARGET, 3);
+        rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload()));
+        link.poll_fn = [] { return MakeDiscovery(); };
+        RunFor(rt, clk, 2000);
+        link.fail_polls = !tx_failure;
+        link.fail_sends = tx_failure;
+        clk.Advance(1000); rt.Tick(); /* exactly one failed operation */
+        int rgb_before = link.rgb_sends;
+        int reads_before = link.master_reads;
+        link.fail_polls = link.fail_sends = false;
+        link.master_mac = MAC_FOREIGN;
+        /* Cached RF table still reports the old binding after USB reopens. */
+        RunFor(rt, clk, 5000);
+        CHECK(link.master_reads > reads_before, "one transport failure forces identity revalidation");
+        CHECK(rt.State() == WirelessState::ForeignMaster && link.rgb_sends == rgb_before,
+              "brief outage cannot resume writes through a replacement transmitter");
+    }
+}
+
+static void TestRgbFailureBudget()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    rt.SetDesired(up);
+    link.poll_fn = [&] { return MakeDiscovery(MAC_TARGET, MAC_MASTER,
+        link.rgb_sends > 0 ? up->EffectId().data() : nullptr); };
+    link.fail_rgb = true;
+    RunFor(rt, clk, 4000);
+    CHECK(rt.State() == WirelessState::Failed,
+          "successful keep-alives cannot erase RGB transport failure budget");
+    link.fail_rgb = false;
+    RunFor(rt, clk, 6000);
+    CHECK(rt.Confirmed(), "RGB-only transport failures recover after backoff");
+}
+
+static void TestChangedTransmitterOnReconnect()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime rt(link, clk);
+    rt.SetTarget(MAC_TARGET, 3);
+    rt.SetDesired(std::make_shared<RgbUpload>(MakeUpload()));
+    link.poll_fn = [] { return MakeDiscovery(); };
+    RunFor(rt, clk, 1000);
+    link.fail_polls = true;
+    RunFor(rt, clk, 2000);
+    int rgb_before = link.rgb_sends;
+    link.fail_polls = false;
+    link.master_mac = MAC_FOREIGN;
+    link.poll_fn = [] { return MakeDiscovery(MAC_TARGET, MAC_FOREIGN); };
+    RunFor(rt, clk, 10000);
+    CHECK(rt.State() == WirelessState::ForeignMaster, "replacement transmitter requires explicit rediscovery");
+    CHECK(link.rgb_sends == rgb_before, "recovery does not transfer ownership to another transmitter");
+}
+
+static void TestSharedLinkReconnect()
+{
+    FakeClock clk; FakeLink link;
+    WirelessRuntime a(link, clk), b(link, clk);
+    a.SetTarget(MAC_TARGET, 3);
+    b.SetTarget(MAC_FOREIGN, 3);      /* second group on the same transmitter */
+    auto up = std::make_shared<RgbUpload>(MakeUpload());
+    a.SetDesired(up); b.SetDesired(up);
+    link.poll_fn = [&] {
+        auto response = MakeDiscovery(MAC_TARGET, MAC_MASTER, up->EffectId().data());
+        auto second = MakeDiscovery(MAC_FOREIGN, MAC_MASTER, up->EffectId().data());
+        response[1] = 2;
+        response.insert(response.end(), second.begin() + 4, second.end());
+        return response;
+    };
+    for(int i = 0; i < 20; i++) { clk.Advance(100); a.Tick(); b.Tick(); }
+    CHECK(a.Confirmed() && b.Confirmed(), "both groups hold lighting on shared USB pair");
+    link.fail_polls = true;
+    clk.Advance(1000); a.Tick();
+    ++link.generation;             /* real link closes both handles on hard failure */
+    link.fail_polls = false;
+    link.master_mac = MAC_FOREIGN;
+    int sends_before = link.send_calls;
+    b.Tick();
+    CHECK(link.send_calls == sends_before && !b.Confirmed(),
+          "shared-link invalidation stops peer keep-alive/RGB before any reopen");
+    RunFor(b, clk, 2000);
+    CHECK(b.State() == WirelessState::ForeignMaster && link.send_calls == sends_before,
+          "peer rechecks identity instead of silently using reopened pair");
+}
+
 int main()
 {
     TestProtocol();
@@ -626,6 +833,13 @@ int main()
     TestRuntimeChannelRefresh();
     TestRuntimeLostRecovery();
     TestService();
+    TestTransportReconnect();
+    TestMasterReadRecovery();
+    TestTransmitRecovery();
+    TestChangedTransmitterOnReconnect();
+    TestBriefOutageRevalidatesIdentity();
+    TestRgbFailureBudget();
+    TestSharedLinkReconnect();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
