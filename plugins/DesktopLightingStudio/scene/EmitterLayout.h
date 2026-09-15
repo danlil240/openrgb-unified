@@ -25,7 +25,8 @@ namespace layout
 \*---------------------------------------------------------*/
 std::vector<Emitter> Ring(unsigned int n, float radius,
                           float start_angle_deg, bool reversed,
-                          const std::string& group, int addr_base = 0);
+                          const std::string& group, int addr_base = 0,
+                          float face_y = 0.0f);
 
 /*---------------------------------------------------------*\
 || Strip — n emitters spaced along +X from `origin`.       |

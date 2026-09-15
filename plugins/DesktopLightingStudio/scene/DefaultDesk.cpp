@@ -139,12 +139,19 @@ SceneDocument BuildDefaultDesk()
     \*-----------------------------------------------------*/
     const float RING_R = 0.052f;
 
+    /* Ring emitters sit on the light-bearing face, not the
+       mid-plane: a dot at local y=0 is sealed inside the opaque
+       body mesh (fan half-thickness 14 mm, pump 22.5 mm — both
+       exceed the 5.5 mm dot radius) and can never be seen.    */
+    const float FAN_FACE_Y  = 0.016f;
+    const float PUMP_FACE_Y = 0.024f;
+
     /* ARGB_V2_1 — four case fans on one mirrored 8-LED ring.
        Logical owner + 3 linked copies: bottom intake x3, rear exhaust. */
     {
         SceneObject f0 = Device("case_fans", "Case fans (x4 shared)", "fan_body",
                                 "argb_v2_1", { 0.38f, 0.075f, 0.05f }, { 0, 0, 0 });
-        f0.emitters = layout::Ring(8, RING_R, 0.0f, false, "case_fans");
+        f0.emitters = layout::Ring(8, RING_R, 0.0f, false, "case_fans", 0, FAN_FACE_Y);
         doc.objects.push_back(f0);
         doc.objects.push_back(Linked("case_fan_b1", "Case fan (mirror)", "fan_body",
                                      "case_fans", { 0.47f, 0.075f, 0.05f }, { 0, 0, 0 }));
@@ -160,7 +167,7 @@ SceneDocument BuildDefaultDesk()
     {
         SceneObject rad = Device("rad_fans", "Radiator fans (x3 shared)", "fan_body",
                                  "argb_v2_2", { 0.38f, 0.42f, -0.10f }, { 0, 0, 0 });
-        rad.emitters = layout::Ring(8, RING_R, 0.0f, false, "rad_fans", 0);
+        rad.emitters = layout::Ring(8, RING_R, 0.0f, false, "rad_fans", 0, FAN_FACE_Y);
         doc.objects.push_back(rad);
         doc.objects.push_back(Linked("rad_fan_m1", "Radiator fan (mirror)", "fan_body",
                                      "rad_fans", { 0.47f, 0.42f, -0.10f }, { 0, 0, 0 }));
@@ -169,7 +176,7 @@ SceneDocument BuildDefaultDesk()
 
         SceneObject pump = Device("pump", "Cooler pump", "pump_body",
                                   "argb_v2_2", { 0.47f, 0.28f, -0.08f }, { 0, 0, 0 });
-        pump.emitters = layout::Ring(8, 0.020f, 0.0f, false, "pump", 8);
+        pump.emitters = layout::Ring(8, 0.020f, 0.0f, false, "pump", 8, PUMP_FACE_Y);
         doc.objects.push_back(pump);
 
         doc.object_colors["rad_fans"] = MakeSceneColor(0, 140, 200);
@@ -180,7 +187,7 @@ SceneDocument BuildDefaultDesk()
     {
         SceneObject top = Device("gpu_top_fan", "Top GPU fan", "fan_body",
                                  "argb_v2_3", { 0.47f, 0.24f, -0.05f }, { 0, 0, 0 });
-        top.emitters = layout::Ring(8, RING_R, 0.0f, false, "gpu_top_fan");
+        top.emitters = layout::Ring(8, RING_R, 0.0f, false, "gpu_top_fan", 0, FAN_FACE_Y);
         doc.objects.push_back(top);
         doc.object_colors["gpu_top_fan"] = MakeSceneColor(0, 180, 160);
     }
@@ -194,7 +201,7 @@ SceneDocument BuildDefaultDesk()
         SceneObject fan = Device(id, "SL Wireless fan " + std::to_string(i + 1),
                                  "fan_body", id,
                                  { 0.40f + 0.09f * (float)i, 0.14f, 0.05f }, { 0, 0, 0 });
-        fan.emitters = layout::Ring(40, RING_R, 0.0f, false, id);
+        fan.emitters = layout::Ring(40, RING_R, 0.0f, false, id, 0, FAN_FACE_Y);
         doc.objects.push_back(fan);
         doc.object_colors[id] = MakeSceneColor(0, 180, 160);
     }
@@ -231,11 +238,14 @@ SceneDocument BuildDefaultDesk()
         const char* names[3] = { "Right", "Middle", "Left" };
         for(int i = 0; i < 3; i++)
         {
+            /* Fans hang just below the card's bottom edge (gpu_body
+               ends at y=0.175) — at y=0.185 they were sealed inside
+               the opaque box. Emitters face down like the hardware. */
             SceneObject fan = Device(fans[i], std::string("GPU ") + names[i] + " fan",
                                      "fan_body", fans[i],
-                                     { 0.40f + 0.07f * (float)i, 0.185f, -0.13f },
+                                     { 0.40f + 0.07f * (float)i, 0.158f, -0.13f },
                                      { 0, 0, 0 });
-            fan.emitters = layout::Ring(8, 0.04f, 0.0f, false, fans[i]);
+            fan.emitters = layout::Ring(8, 0.04f, 0.0f, false, fans[i], 0, -FAN_FACE_Y);
             fan.verified = false;
             doc.objects.push_back(fan);
         }

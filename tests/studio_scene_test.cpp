@@ -86,6 +86,10 @@ static void TestRing()
     CHECK(Near(rot[0].local_pos.x, 0.0f) && Near(rot[0].local_pos.z, -0.05f), "ring start angle");
     CHECK(rot[0].address == 4, "ring address base");
 
+    auto face = layout::Ring(8, 0.05f, 0.0f, false, "g", 0, 0.016f);
+    CHECK(Near(face[0].local_pos.y, 0.016f) && Near(face[4].local_pos.y, 0.016f),
+          "ring face lift");
+
     /* all emitters on the circle */
     for(const auto& e : ring)
     {
@@ -274,6 +278,29 @@ static void TestDefaultDesk()
     /* unverified GPU fans refuse nothing here but carry the flag */
     const SceneObject* gf = FindObject(doc, "gpu_fan_r");
     CHECK(gf != nullptr && !gf->verified, "gpu fans unverified");
+
+    /* Fan/pump emitters must sit on a face, not the mid-plane —
+       dots at |y| < body half-thickness are sealed inside the
+       opaque mesh and render as an unlit (black) body.        */
+    bool faces_clear = true;
+    for(const SceneObject& o : doc.objects)
+    {
+        const float half = (o.geometry == "fan_body")  ? 0.014f
+                         : (o.geometry == "pump_body") ? 0.0225f
+                                                     : 0.0f;
+        if(half == 0.0f)
+        {
+            continue;
+        }
+        for(const Emitter& e : o.emitters)
+        {
+            if(std::fabs(e.local_pos.y) <= half)
+            {
+                faces_clear = false;
+            }
+        }
+    }
+    CHECK(faces_clear, "fan/pump emitters clear the body face");
 
     /* every Device binding id exists */
     bool all_bound = true;

@@ -15,7 +15,8 @@ namespace layout
 
 std::vector<Emitter> Ring(unsigned int n, float radius,
                           float start_angle_deg, bool reversed,
-                          const std::string& group, int addr_base)
+                          const std::string& group, int addr_base,
+                          float face_y)
 {
     constexpr float DEG = 3.14159265358979323846f / 180.0f;
     std::vector<Emitter> out;
@@ -29,7 +30,7 @@ std::vector<Emitter> Ring(unsigned int n, float radius,
         const float ang  = (start_angle_deg + step * (360.0f / (float)n)) * DEG;
 
         Emitter e;
-        e.local_pos = { radius * std::cos(ang), 0.0f, -radius * std::sin(ang) };
+        e.local_pos = { radius * std::cos(ang), face_y, -radius * std::sin(ang) };
         e.group     = group;
         e.address   = (int)addr_base + (int)i;
         out.push_back(e);

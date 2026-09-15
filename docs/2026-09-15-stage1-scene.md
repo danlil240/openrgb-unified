@@ -51,8 +51,10 @@ and the output adapter writes from the same document.
 - `Emitter` — one addressable LED: local position, `group` id, address
   within its bound zone, `mirror_of` for linked copies.
 - `EmitterLayout` — parametric generators: `Ring(n, radius, start_angle,
-  reversed)`, `Strip(n, spacing)`, `Matrix(rows, cols, pitch)`, and
-  `KeyboardMatrix` driven by the zone's matrix map.
+  reversed, face_y)`, `Strip(n, spacing)`, `Matrix(rows, cols, pitch)`,
+  and `KeyboardMatrix` driven by the zone's matrix map. `face_y` lifts a
+  ring onto the light-bearing face so emitter dots aren't sealed inside
+  the opaque body mesh.
 - `SceneObject` — id, kind (`decor`, `device`, `linked`), transform,
   `binding` ref, `verified` flag (false → no writes, ever), emitters.
 - `DeviceBinding` — persistent identity: controller name + vendor +
