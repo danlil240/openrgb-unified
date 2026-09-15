@@ -94,7 +94,17 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         quick_widget->engine()->addImportPath(plugin_dir + "/qml");
     }
 
-    quick_widget->setSource(QUrl(QStringLiteral("qrc:/studio/StudioScene.qml")));
+    /* Prefer the loose QML file beside the plugin (editable without a
+       rebuild); fall back to the embedded copy. */
+    const QString file_scene = plugin_dir + "/ui/StudioScene.qml";
+    if(QFileInfo::exists(file_scene))
+    {
+        quick_widget->setSource(QUrl::fromLocalFile(file_scene));
+    }
+    else
+    {
+        quick_widget->setSource(QUrl(QStringLiteral("qrc:/studio/StudioScene.qml")));
+    }
 
     /*-----------------------------------------------------*\
     | Device-inspection bar (Stage 0 measurements)          |

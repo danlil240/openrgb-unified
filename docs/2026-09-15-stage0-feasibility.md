@@ -63,12 +63,22 @@ under `tests\`. Empirically, the same bytes copied with PowerShell
 loadable file. Deploy only through `build-plugin.bat`; never copy the
 plugin DLL with PowerShell.
 
-**Remaining probe issue:** the plugin loads and its controls work, but the
-`View3D` rendered black while the QML 2D overlay was fine (the "picked:"
-label proved QML + input worked). MSAA on `QQuickWidget`'s offscreen
-target is a suspect — the scene was switched to `SceneEnvironment.NoAA`,
-and the tab now logs `sceneGraphError` and a `grabFramebuffer` lit-pixel
-count so the render state is visible in the results box.
+**Fixed black View3D:** the plugin loaded and controls worked, but the
+`View3D` rendered black while the QML 2D overlay was fine. Root cause was
+a scene bug, not a platform issue: Qt Quick 3D built-in primitives
+(`#Cube`/`#Sphere`/`#Cylinder`) are **100 units** in size, so the authored
+scales produced a 1400-unit-wide desk with the camera inside solid
+geometry — everything clipped/culled to black. All scales are now in
+meters (÷100). The tab loads `ui/StudioScene.qml` from the plugin dir when
+present (edit + restart to iterate without rebuilding the DLL); the qrc
+copy is the fallback. `grabFramebuffer` returns an empty image in this
+host's `QQuickWidget` mode, so the fb probe is not a reliable indicator —
+visible rendering is.
+
+**Stage 0 probe verified working:** plugin loads (API-5, metadata probe
+passes), Enable works, Studio tab appears, `View3D` renders, orbit/pick
+work, device list enumerates all 7 controllers via the plugin API, and
+zone flash + `UpdateZoneLEDs` latency measurement are available in-tab.
 
 ## Existing-plugin reuse comparison
 

@@ -36,13 +36,14 @@ Rectangle {
             color: "#7070ff"
         }
 
-        // Desk surface (1.4 m x 0.7 m)
+        // Desk surface (1.4 m x 0.7 m); #Cube is 100 units - scale is
+        // world size / 100
         Model {
             objectName: "desk"
             pickable: true
             source: "#Cube"
             position: Qt.vector3d(0, -0.01, 0.1)
-            scale: Qt.vector3d(14, 0.2, 7)
+            scale: Qt.vector3d(0.014, 0.0002, 0.007)
             materials: PrincipledMaterial { baseColor: "#4a3b32" }
         }
 
@@ -52,7 +53,7 @@ Rectangle {
             pickable: true
             source: "#Cube"
             position: Qt.vector3d(0.48, 0.225, -0.05)
-            scale: Qt.vector3d(2.1, 4.5, 4.6)
+            scale: Qt.vector3d(0.0021, 0.0045, 0.0046)
             materials: PrincipledMaterial {
                 baseColor: "#e8e8ec"
                 opacity: 0.35
@@ -69,7 +70,7 @@ Rectangle {
                 source: "#Cylinder"
                 position: Qt.vector3d(0.37, 0.10 + index * 0.125, 0.06)
                 eulerRotation.x: 90
-                scale: Qt.vector3d(0.6, 0.15, 0.6)
+                scale: Qt.vector3d(0.0012, 0.00015, 0.0012)
                 materials: PrincipledMaterial {
                     baseColor: "#202028"
                     emissiveFactor: Qt.vector3d(0.2, 0.9, 1.0)
@@ -83,7 +84,7 @@ Rectangle {
             pickable: true
             source: "#Cube"
             position: Qt.vector3d(-0.15, 0.02, 0.28)
-            scale: Qt.vector3d(3.6, 0.25, 1.3)
+            scale: Qt.vector3d(0.0036, 0.00025, 0.0013)
             materials: PrincipledMaterial {
                 baseColor: "#1c1c22"
                 emissiveFactor: Qt.vector3d(0.05, 0.15, 0.35)
@@ -96,7 +97,7 @@ Rectangle {
             pickable: true
             source: "#Cube"
             position: Qt.vector3d(-0.15, 0.036, 0.28)
-            scale: Qt.vector3d(3.4, 0.03, 1.1)
+            scale: Qt.vector3d(0.0034, 0.00003, 0.0011)
             materials: PrincipledMaterial {
                 baseColor: "#101018"
                 emissiveFactor: Qt.vector3d(0.3, 0.1, 0.8)
@@ -109,7 +110,7 @@ Rectangle {
             pickable: true
             source: "#Sphere"
             position: Qt.vector3d(0.22, 0.025, 0.30)
-            scale: Qt.vector3d(0.7, 0.35, 1.0)
+            scale: Qt.vector3d(0.0007, 0.00035, 0.001)
             materials: PrincipledMaterial {
                 baseColor: "#22222a"
                 emissiveFactor: Qt.vector3d(0.6, 0.05, 0.05)
@@ -124,7 +125,7 @@ Rectangle {
                 pickable: true
                 source: "#Cube"
                 position: Qt.vector3d(0.415 + index * 0.03, 0.33, 0.02)
-                scale: Qt.vector3d(0.12, 0.5, 0.04)
+                scale: Qt.vector3d(0.00012, 0.0005, 0.00004)
                 materials: PrincipledMaterial {
                     baseColor: "#18181f"
                     emissiveFactor: Qt.vector3d(0.9, 0.5, 0.1)

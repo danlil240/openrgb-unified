@@ -40,6 +40,11 @@ if not exist "%PLUGIN_DST%" mkdir "%PLUGIN_DST%"
 :: PowerShell.
 xcopy /y /e /i out\* "%PLUGIN_DST%\" >nul
 
+:: Loose QML next to the plugin lets the tab iterate on the scene
+:: without rebuilding the DLL (and without producing a new unsigned
+:: binary that Smart App Control would need to re-evaluate).
+xcopy /y /e /i ui "%PLUGIN_DST%\ui\" >nul
+
 :: Plugin dependencies must live next to OpenRGB.exe - Windows does
 :: not search the plugin's own folder when resolving them.
 set "EXE_DIR=%~dp0..\..\OpenRGB\OpenRGB Windows 64-bit"
