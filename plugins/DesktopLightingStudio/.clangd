@@ -15,3 +15,5 @@ CompileFlags:
     - -IC:/Users/daniel/tools/openrgb-unified/OpenRGB/RGBController
     - -IC:/Users/daniel/tools/openrgb-unified/OpenRGB/dependencies/json
     - -std=c++17
+    - -fms-compatibility-version=19.44
+    - -fms-extensions
