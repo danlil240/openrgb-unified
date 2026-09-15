@@ -104,6 +104,25 @@ struct DeviceBinding
     unsigned int zone_leds = 0;         /* expected count, 0 = unchecked */
 };
 
+/*---------------------------------------------------------*\
+||| EffectState — which preset drives the scene and how.   |
+||| Persisted with the document so a saved scene is also   |
+||| the startup scene.                                      |
+\*---------------------------------------------------------*/
+struct EffectState
+{
+    std::string  preset;                    /* "" = none             */
+    unsigned int seed = 0;                  /* remix seed            */
+    float        speed = 1.0f;              /* global rate           */
+    float        intensity = 1.0f;
+    bool         playing = false;
+};
+
+/* One evaluated frame: owner object id -> per-emitter colors.
+   Produced by EffectEngine; consumed by the preview and the
+   output adapter so both show the same colors. */
+typedef std::map<std::string, std::vector<SceneColor>> FrameColors;
+
 struct SceneDocument
 {
     int                                 version = 1;
@@ -115,6 +134,7 @@ struct SceneDocument
     /* object id -> emitter index -> color (painted overrides)        */
     std::map<std::string, std::map<int, SceneColor>> emitter_colors;
     float                               brightness = 1.0f;
+    EffectState                         effect;
 };
 
 const SceneObject* FindObject(const SceneDocument& doc, const std::string& id);

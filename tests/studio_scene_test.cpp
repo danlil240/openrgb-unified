@@ -13,6 +13,9 @@
 #include "scene/SceneJson.h"
 #include "scene/BindingResolver.h"
 #include "scene/DefaultDesk.h"
+#include "effects/EffectTypes.h"
+#include "effects/EffectEngine.h"
+#include "effects/Presets.h"
 
 #include <cmath>
 #include <cstdio>
@@ -286,6 +289,304 @@ static void TestDefaultDesk()
     CHECK(all_bound, "all device objects have bindings");
 }
 
+/*---------------------------------------------------------*\
+||| Stage 2 — effects engine                                 |
+\*---------------------------------------------------------*/
+static studio::SceneObject OneLedDevice(const std::string& id, float x)
+{
+    using namespace studio;
+    SceneObject o;
+    o.id   = id;
+    o.kind = ObjectKind::Device;
+    o.geometry = "test_body";
+    o.transform.position = { x, 0.0f, 0.0f };
+    o.verified = true;
+    Emitter e; e.local_pos = { 0, 0, 0 }; e.group = id; e.address = 0;
+    o.emitters.push_back(e);
+    return o;
+}
+
+static int RedOf(studio::SceneColor c) { return (int)(c & 0xFF); }
+
+static void TestPaletteAndBlend()
+{
+    using namespace studio;
+
+    Palette p = MakePalette({ MakeSceneColor(0, 0, 0), MakeSceneColor(255, 255, 255) });
+    CHECK(Near(p.Sample(0.0f).r, 0.0f), "palette stop 0");
+    CHECK(Near(p.Sample(0.5f).r, 1.0f), "palette stop 1");
+    CHECK(Near(p.Sample(0.25f).r, 0.5f), "palette midpoint");
+    /* wraps: u = 1.25 lands back on the 0.5 segment */
+    CHECK(Near(p.Sample(1.5f).r, p.Sample(0.5f).r), "palette wraps");
+    CHECK(p.stops.empty() == false && Palette{}.Sample(0.3f).r == 0.0f,
+          "empty palette safe");
+
+    const ColorF black = ToColorF(0), white = ToColorF(MakeSceneColor(255, 255, 255));
+    const ColorF mid { 0.5f, 0.5f, 0.5f, 1.0f };
+    ColorF half = white; half.a = 0.5f;       /* white at 50% coverage */
+
+    ColorF r = BlendOver(black, half, BlendMode::Replace);
+    CHECK(Near(r.r, 0.5f), "blend replace");
+    r = BlendOver(black, half, BlendMode::Add);
+    CHECK(Near(r.r, 0.5f), "blend add");
+    r = BlendOver(white, half, BlendMode::Add);
+    CHECK(Near(r.r, 1.0f), "blend add clamps");
+    r = BlendOver(mid, half, BlendMode::Screen);
+    CHECK(Near(r.r, 0.75f), "blend screen");   /* 1-(0.5)(0.5) */
+    ColorF zero; zero.a = 0.0f;
+    r = BlendOver(white, zero, BlendMode::Add);
+    CHECK(Near(r.r, 1.0f), "blend zero coverage keeps dst");
+}
+
+static void TestWaveSpatial()
+{
+    using namespace studio;
+
+    /* Linear ramp black->white->black over 1 m along +X. */
+    EffectLayer wave;
+    wave.primitive = "wave";
+    wave.direction = { 1.0f, 0.0f, 0.0f };
+    wave.scale     = 1.0f;
+    wave.speed     = 0.0f;
+    wave.density   = 0.0f;          /* full coverage, pure color sweep */
+    wave.palette   = MakePalette({
+        { 0.0f, ToColorF(MakeSceneColor(0, 0, 0))     },
+        { 0.5f, ToColorF(MakeSceneColor(255, 255, 255)) },
+        { 1.0f, ToColorF(MakeSceneColor(0, 0, 0))     },
+    });
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("near", 0.125f));
+    doc.objects.push_back(OneLedDevice("mid",  0.25f));
+    doc.objects.push_back(OneLedDevice("far",  0.45f));
+    doc.objects.push_back(OneLedDevice("wrap", 1.125f));  /* same u as near (exact) */
+
+    EffectEngine engine;
+    engine.SetLayers({ wave });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+
+    /* gate property: a wave crossing devices lands in spatial order */
+    CHECK(RedOf(frame["near"][0]) < RedOf(frame["mid"][0]),  "wave order near<mid");
+    CHECK(RedOf(frame["mid"][0])  < RedOf(frame["far"][0]),  "wave order mid<far");
+    CHECK(frame["wrap"][0] == frame["near"][0],              "wave periodic wrap");
+
+    /* determinism: same t -> identical frame; later t -> phase moves */
+    FrameColors again;
+    engine.Evaluate(doc, 0.0, again);
+    CHECK(again == frame, "engine deterministic at fixed t");
+
+    EffectLayer moving = wave; moving.speed = 0.1f;
+    engine.SetLayers({ moving });
+    FrameColors moved;
+    engine.Evaluate(doc, 0.0, moved);
+    engine.Evaluate(doc, 1.0, frame);
+    CHECK(frame["near"][0] != moved["near"][0], "wave advances with t");
+}
+
+static void TestPulseCometSpin()
+{
+    using namespace studio;
+
+    /* pulse: coverage peaks half a spacing ahead of the wavefront */
+    EffectLayer pulse;
+    pulse.primitive = "pulse";
+    pulse.origin    = { 0, 0, 0 };
+    pulse.scale     = 0.5f;         /* spacing (m) */
+    pulse.speed     = 0.2f;
+    pulse.density   = 1.0f;
+    pulse.palette   = MakePalette({ MakeSceneColor(255, 255, 255) });
+    pulse.opacity   = 1.0f;
+
+    SceneDocument doc;
+    /* t=0: wavefront at 0 -> peak coverage at d = 0.25 (u=0.5) */
+    doc.objects.push_back(OneLedDevice("front", 0.25f));
+    doc.objects.push_back(OneLedDevice("trough", 0.50f));
+
+    EffectEngine engine;
+    engine.SetLayers({ pulse });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(RedOf(frame["front"][0]) > 200 && RedOf(frame["trough"][0]) < 30,
+          "pulse ring position");
+
+    /* comet: head bright, tail decays, beyond tail is dark */
+    EffectLayer comet;
+    comet.primitive = "comet";
+    comet.path = { { 0, 0, 0 }, { 1.0f, 0, 0 } };   /* 2 m closed loop  */
+    comet.speed   = 0.5f;                           /* m/s              */
+    comet.scale   = 0.4f;                           /* tail length (m)  */
+    comet.palette = MakePalette({ MakeSceneColor(255, 255, 255),
+                                  MakeSceneColor(0, 0, 0) });
+    comet.opacity = 1.0f;
+
+    SceneDocument cdoc;
+    cdoc.objects.push_back(OneLedDevice("head", 0.5f));    /* t=1s: head at 0.5 */
+    cdoc.objects.push_back(OneLedDevice("tail", 0.42f));   /* 0.08 behind head  */
+    cdoc.objects.push_back(OneLedDevice("dark", 1.4f));    /* >tail behind      */
+
+    engine.SetLayers({ comet });
+    engine.Evaluate(cdoc, 1.0, frame);
+    CHECK(RedOf(frame["head"][0]) > 200, "comet head bright");
+    CHECK(RedOf(frame["tail"][0]) > 10
+          && RedOf(frame["tail"][0]) < RedOf(frame["head"][0]), "comet tail fades");
+    CHECK(RedOf(frame["dark"][0]) == 0, "comet beyond tail dark");
+
+    /* spin: N spokes periodic — emitters 2pi/N apart share a color */
+    EffectLayer spin;
+    spin.primitive = "spin";
+    spin.space     = CoordSpace::Local;
+    spin.scale     = 2.0f;          /* two spokes */
+    spin.speed     = 0.0f;
+    spin.palette   = MakePalette({ MakeSceneColor(255, 255, 255),
+                                   MakeSceneColor(0, 0, 0) });
+    spin.opacity   = 1.0f;
+
+    SceneObject ring;
+    ring.id   = "ring"; ring.kind = ObjectKind::Device; ring.verified = true;
+    ring.geometry = "fan_body";
+    ring.emitters = layout::Ring(8, 0.05f, 0.0f, false, "ring");
+
+    SceneDocument sdoc;
+    sdoc.objects.push_back(ring);
+    engine.SetLayers({ spin });
+    engine.Evaluate(sdoc, 0.0, frame);
+    CHECK(frame["ring"].size() == 8, "spin fills ring");
+    CHECK(frame["ring"][0] == frame["ring"][4], "spin spoke periodicity");
+    CHECK(frame["ring"][0] != frame["ring"][2], "spin spoke contrast");
+}
+
+static void TestNoiseAndMasks()
+{
+    using namespace studio;
+
+    /* noise determinism + range */
+    const Vec3 p { 1.25f, -0.5f, 3.75f };
+    const float n1 = Noise3(p, 7), n2 = Noise3(p, 7);
+    CHECK(n1 == n2, "noise deterministic");
+    CHECK(n1 >= 0.0f && n1 <= 1.0f, "noise range");
+    bool differs = false;
+    for(unsigned int s = 0; s < 8 && !differs; s++)
+    {
+        differs = !Near(Noise3(p, s), n1);
+    }
+    CHECK(differs, "noise varies by seed");
+
+    /* mask matching: id, geometry, emitter group */
+    EffectLayer L; L.primitive = "static";
+    L.palette = MakePalette({ MakeSceneColor(255, 0, 0) });
+    L.targets = { "kbd", "fan_body", "ring_group" };
+
+    SceneObject kbd; kbd.id = "kbd";      kbd.geometry = "keyboard_body";
+    SceneObject fan; fan.id = "rear_fan"; fan.geometry = "fan_body";
+    SceneObject oth; oth.id = "pump";     oth.geometry = "pump_body";
+    Emitter e; e.group = "ring_group"; Emitter oe; oe.group = "other";
+
+    CHECK(LayerMatches(L, kbd, oe),  "mask by object id");
+    CHECK(LayerMatches(L, fan, oe),  "mask by geometry");
+    CHECK(LayerMatches(L, oth, e),   "mask by emitter group");
+    CHECK(!LayerMatches(L, oth, oe), "mask rejects unmatched");
+    L.targets.clear();
+    CHECK(LayerMatches(L, oth, oe),  "empty mask matches all");
+}
+
+static void TestEngineMirrorAndJson()
+{
+    using namespace studio;
+
+    /* Linked copies never get frame entries — they read the owner. */
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("owner", 0.0f));
+    SceneObject copy;
+    copy.id = "copy"; copy.kind = ObjectKind::Linked; copy.mirror_of = "owner";
+    Emitter ce; ce.local_pos = { 0.5f, 0, 0 }; ce.group = "copy"; ce.address = -1;
+    copy.emitters.push_back(ce);
+    doc.objects.push_back(copy);
+    doc.object_colors["owner"] = MakeSceneColor(9, 9, 9);
+
+    EffectLayer solid; solid.primitive = "static";
+    solid.palette = MakePalette({ MakeSceneColor(100, 0, 0) });
+
+    EffectEngine engine;
+    engine.SetLayers({ solid });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(frame.count("owner") == 1 && frame.count("copy") == 0,
+          "mirror copies own no frame entries");
+    CHECK(frame["owner"][0] == MakeSceneColor(100, 0, 0), "static layer color");
+
+    /* untargeted object keeps painted color via fallback (no entry) */
+    solid.targets = { "owner" };
+    doc.objects.push_back(OneLedDevice("other", 0.2f));
+    doc.object_colors["other"] = MakeSceneColor(1, 2, 3);
+    engine.SetLayers({ solid });
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(frame.count("other") == 0, "untargeted object has no frame entry");
+
+    /* effect state survives the JSON round trip */
+    doc.effect.preset = "aurora"; doc.effect.seed = 4242;
+    doc.effect.speed = 1.5f; doc.effect.intensity = 0.6f; doc.effect.playing = true;
+    SceneDocument back;
+    CHECK(FromJson(ToJson(doc), back), "effect json parses");
+    CHECK(back.effect.preset == "aurora" && back.effect.seed == 4242
+          && Near(back.effect.speed, 1.5f) && Near(back.effect.intensity, 0.6f)
+          && back.effect.playing, "effect state round-trips");
+}
+
+static void TestPresetsAndRemix()
+{
+    using namespace studio;
+
+    CHECK(PresetList().size() == 6, "six presets registered");
+    for(const PresetInfo& p : PresetList())
+    {
+        const auto layers = BuildPreset(p.id, 1);
+        CHECK(!layers.empty(), "preset builds layers");
+    }
+    CHECK(BuildPreset("nope", 0).empty(), "unknown preset -> empty");
+
+    /* remix reproducibility: same seed = same params, new seed varies */
+    const auto a1 = BuildPreset("aurora", 42);
+    const auto a2 = BuildPreset("aurora", 42);
+    const auto b  = BuildPreset("aurora", 43);
+    CHECK(a1.size() == a2.size(), "remix same layer count");
+    bool same = true, varies = false;
+    for(size_t i = 0; i < a1.size() && i < a2.size(); i++)
+    {
+        same &= a1[i].speed == a2[i].speed && a1[i].scale == a2[i].scale
+             && a1[i].phase == a2[i].phase && a1[i].seed == a2[i].seed;
+    }
+    for(size_t i = 0; i < a1.size() && i < b.size(); i++)
+    {
+        varies |= a1[i].speed != b[i].speed || a1[i].scale != b[i].scale
+               || a1[i].phase != b[i].phase || a1[i].seed != b[i].seed
+               || a1[i].direction.x != b[i].direction.x;
+    }
+    CHECK(same,   "same seed reproduces layers");
+    CHECK(varies, "new seed varies params");
+
+    /* global params scale speed + cap intensity */
+    auto layers = BuildPreset("portal", 7);
+    ApplyGlobalParams(layers, 2.0f, 0.5f);
+    bool ok = true;
+    for(const EffectLayer& L : layers)
+    {
+        ok &= L.opacity <= 0.5f + 1e-6f;
+    }
+    CHECK(ok, "intensity caps layer opacity");
+
+    /* every preset evaluates without touching hardware */
+    SceneDocument doc = BuildDefaultDesk();
+    EffectEngine engine;
+    FrameColors frame;
+    for(const PresetInfo& p : PresetList())
+    {
+        engine.SetLayers(BuildPreset(p.id, 3));
+        engine.Evaluate(doc, 1.25, frame);
+        CHECK(!frame.empty(), "preset produces a frame");
+    }
+}
+
 int main()
 {
     TestTransform();
@@ -295,6 +596,12 @@ int main()
     TestJsonRoundTrip();
     TestResolver();
     TestDefaultDesk();
+    TestPaletteAndBlend();
+    TestWaveSpatial();
+    TestPulseCometSpin();
+    TestNoiseAndMasks();
+    TestEngineMirrorAndJson();
+    TestPresetsAndRemix();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

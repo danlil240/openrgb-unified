@@ -117,6 +117,14 @@ nlohmann::json ToJson(const SceneDocument& doc)
     }
     j["emitter_colors"] = ecolors;
 
+    j["effect"] = {
+        {"preset",    doc.effect.preset},
+        {"seed",      doc.effect.seed},
+        {"speed",     doc.effect.speed},
+        {"intensity", doc.effect.intensity},
+        {"playing",   doc.effect.playing},
+    };
+
     return j;
 }
 
@@ -225,6 +233,16 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc)
                 }
             }
         }
+    }
+
+    const nlohmann::json effect = j.value("effect", nlohmann::json::object());
+    if(effect.is_object())
+    {
+        out.effect.preset    = effect.value("preset", std::string());
+        out.effect.seed      = effect.value("seed", 0u);
+        out.effect.speed     = effect.value("speed", 1.0f);
+        out.effect.intensity = effect.value("intensity", 1.0f);
+        out.effect.playing   = effect.value("playing", false);
     }
 
     doc = out;

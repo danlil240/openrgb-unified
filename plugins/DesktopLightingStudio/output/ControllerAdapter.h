@@ -46,18 +46,21 @@ public:
     /* Write every mapped emitter of `object` (and objects sharing its
        resolved zone) to hardware. Returns a human-readable status;
        empty string = success. Refuses unverified objects and zones
-       without per-LED color. */
-    std::string PushObject(const SceneDocument& doc, const std::string& object_id);
+       without per-LED color. When `frame` is non-null, its per-emitter
+       colors override the painted scene colors. */
+    std::string PushObject(const SceneDocument& doc, const std::string& object_id,
+                           const FrameColors* frame = nullptr);
 
     /* Write all resolved zones touched by the document. */
-    std::string PushAll(const SceneDocument& doc);
+    std::string PushAll(const SceneDocument& doc, const FrameColors* frame = nullptr);
 
     const std::vector<ControllerSnapshot>& Snapshot() const { return snapshot; }
 
 private:
     /* Build the color buffer for one resolved zone: every verified
        Device object bound to it contributes its emitters. */
-    std::string PushZone(const SceneDocument& doc, const std::string& binding_id);
+    std::string PushZone(const SceneDocument& doc, const std::string& binding_id,
+                         const FrameColors* frame);
 
     /* Switch the zone (or device, when per-zone modes aren't supported)
        into a mode with MODE_FLAG_HAS_PER_LED_COLOR. Called lazily from

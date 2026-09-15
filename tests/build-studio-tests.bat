@@ -13,6 +13,9 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    "%STUDIO%\scene\SceneJson.cpp" ^
    "%STUDIO%\scene\BindingResolver.cpp" ^
    "%STUDIO%\scene\DefaultDesk.cpp" ^
+   "%STUDIO%\effects\EffectTypes.cpp" ^
+   "%STUDIO%\effects\EffectEngine.cpp" ^
+   "%STUDIO%\effects\Presets.cpp" ^
    /Fo:out\ /Fe:out\studio_scene_test.exe
 if errorlevel 1 exit /b %errorlevel%
 out\studio_scene_test.exe

@@ -13,6 +13,7 @@
 #include <QWidget>
 #include <vector>
 
+class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -58,4 +59,14 @@ private:
     QPushButton*            color_btn       = nullptr;
     QSlider*                brightness_slider = nullptr;
     QCheckBox*              live_check      = nullptr;
+
+    /* Stage 2 — scene cards + playback strip */
+    QButtonGroup*           preset_group    = nullptr;
+    QPushButton*            play_btn        = nullptr;
+    QPushButton*            stop_btn        = nullptr;
+    QPushButton*            remix_btn       = nullptr;
+    QSlider*                speed_slider    = nullptr;
+    QSlider*                intensity_slider = nullptr;
+    QLabel*                 speed_label     = nullptr;
+    QLabel*                 intensity_label = nullptr;
 };

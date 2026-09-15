@@ -129,7 +129,8 @@ static SceneColor ScaleColor(SceneColor c, float brightness)
 }
 
 std::string ControllerAdapter::PushZone(const SceneDocument& doc,
-                                        const std::string& binding_id)
+                                        const std::string& binding_id,
+                                        const FrameColors* frame)
 {
     RGBControllerInterface* ctrl = ControllerFor(binding_id);
     if(ctrl == nullptr)
@@ -166,9 +167,17 @@ std::string ControllerAdapter::PushZone(const SceneDocument& doc,
             {
                 continue;
             }
+            SceneColor c = EmitterColor(doc, obj.id, (int)e);
+            if(frame != nullptr)
+            {
+                const auto fit = frame->find(obj.id);
+                if(fit != frame->end() && e < fit->second.size())
+                {
+                    c = fit->second[e];
+                }
+            }
             writes.emplace_back(zs.start_idx + (unsigned int)addr,
-                                ScaleColor(EmitterColor(doc, obj.id, (int)e),
-                                           doc.brightness));
+                                ScaleColor(c, doc.brightness));
         }
     }
 
@@ -236,7 +245,8 @@ bool ControllerAdapter::EnsurePerLedMode(RGBControllerInterface* ctrl,
 }
 
 std::string ControllerAdapter::PushObject(const SceneDocument& doc,
-                                          const std::string& object_id)
+                                          const std::string& object_id,
+                                          const FrameColors* frame)
 {
     const SceneObject* owner = OutputOwner(doc, object_id);
     if(owner == nullptr || owner->kind != ObjectKind::Device || owner->binding.empty())
@@ -247,15 +257,16 @@ std::string ControllerAdapter::PushObject(const SceneDocument& doc,
     {
         return "unverified — writes disabled";
     }
-    return PushZone(doc, owner->binding);
+    return PushZone(doc, owner->binding, frame);
 }
 
-std::string ControllerAdapter::PushAll(const SceneDocument& doc)
+std::string ControllerAdapter::PushAll(const SceneDocument& doc,
+                                       const FrameColors* frame)
 {
     std::string problems;
     for(const DeviceBinding& b : doc.bindings)
     {
-        const std::string err = PushZone(doc, b.id);
+        const std::string err = PushZone(doc, b.id, frame);
         if(!err.empty() && err.find("no mapped emitters") == std::string::npos)
         {
             problems += b.id + ": " + err + "\n";

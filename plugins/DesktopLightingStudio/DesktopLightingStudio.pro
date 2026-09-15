@@ -28,7 +28,10 @@ HEADERS += \
     scene/EmitterLayout.h \
     scene/SceneJson.h \
     scene/BindingResolver.h \
-    scene/DefaultDesk.h
+    scene/DefaultDesk.h \
+    effects/EffectTypes.h \
+    effects/EffectEngine.h \
+    effects/Presets.h
 
 SOURCES += \
     plugin/DesktopLightingStudio.cpp \
@@ -39,7 +42,10 @@ SOURCES += \
     scene/EmitterLayout.cpp \
     scene/SceneJson.cpp \
     scene/BindingResolver.cpp \
-    scene/DefaultDesk.cpp
+    scene/DefaultDesk.cpp \
+    effects/EffectTypes.cpp \
+    effects/EffectEngine.cpp \
+    effects/Presets.cpp
 
 RESOURCES += \
     ui/studio.qrc

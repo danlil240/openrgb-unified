@@ -19,8 +19,13 @@
 
 #include "../scene/SceneTypes.h"
 #include "../output/ControllerAdapter.h"
+#include "../effects/EffectEngine.h"
+
+#include <atomic>
 
 class OpenRGBPluginAPIInterface;
+class QElapsedTimer;
+class QTimer;
 class QUndoStack;
 
 namespace studio
@@ -38,6 +43,11 @@ class SceneBridge : public QObject
     Q_PROPERTY(bool canRedo READ canRedo NOTIFY undoChanged)
     Q_PROPERTY(QColor paintColor READ paintColor WRITE setPaintColor NOTIFY paintColorChanged)
     Q_PROPERTY(QString statusText READ statusText NOTIFY statusChanged)
+    Q_PROPERTY(bool playing READ playing NOTIFY playingChanged)
+    Q_PROPERTY(QString activePreset READ activePreset NOTIFY presetChanged)
+    Q_PROPERTY(int effectSpeedPct READ effectSpeedPct NOTIFY effectParamsChanged)
+    Q_PROPERTY(int effectIntensityPct READ effectIntensityPct NOTIFY effectParamsChanged)
+    Q_PROPERTY(QVariantList presetList READ presetList CONSTANT)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -52,6 +62,13 @@ public:
     bool            canRedo() const;
     QColor          paintColor() const { return paint_color; }
     QString         statusText() const { return status; }
+
+    /* Stage 2 — effect playback */
+    bool            playing() const { return playing_state; }
+    QString         activePreset() const { return QString::fromStdString(doc.effect.preset); }
+    int             effectSpeedPct() const;
+    int             effectIntensityPct() const;
+    QVariantList    presetList() const;
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -75,6 +92,14 @@ public slots:
     bool loadScene();
     void resetScene();
 
+    /* Stage 2 — effect playback */
+    void playPreset(const QString& presetId);
+    void setPlaying(bool on);
+    void stopEffect();
+    void remix();
+    void setEffectSpeedPct(int pct);
+    void setEffectIntensityPct(int pct);
+
 signals:
     void sceneChanged();
     void emittersChanged(const QString& objectId);
@@ -86,6 +111,9 @@ signals:
     void paintColorChanged();
     void statusChanged();
     void statusMessage(const QString& text);      /* -> results box        */
+    void playingChanged();
+    void presetChanged();
+    void effectParamsChanged();
 
 private:
     friend class SceneColorCommand;
@@ -101,6 +129,12 @@ private:
     void pushLive(const std::string& object_id);
     void pushLiveAll();
 
+    /* Stage 2 playback */
+    void rebuildEffect();                  /* layers from doc.effect      */
+    void tick();                           /* evaluate + repaint + push   */
+    void schedulePush();                   /* newest-frame coalesced push */
+    void emitFrameChanged();               /* emittersChanged for frame   */
+
     void rebuildMatrixLayouts();
     void setStatus(const QString& text);
 
@@ -115,6 +149,18 @@ private:
     QColor                      paint_color = Qt::white;
     QString                     status;
     QMutex                      io_mutex;
+
+    /* Stage 2 playback state. `frame` holds the last evaluated effect
+       colors (owner id -> per-emitter); it stays valid while paused so
+       preview and hardware keep the frozen frame. */
+    EffectEngine                engine;
+    FrameColors                 frame;
+    QTimer*                     play_timer  = nullptr;
+    QElapsedTimer*              play_clock  = nullptr;
+    double                      play_t      = 0.0;
+    bool                        playing_state = false;
+    std::atomic<bool>           push_in_flight { false };
+    std::atomic<bool>           push_again     { false };
 };
 
 } /* namespace studio */

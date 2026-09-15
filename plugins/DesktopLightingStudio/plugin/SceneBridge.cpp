@@ -6,13 +6,16 @@
 
 #include "SceneBridge.h"
 
+#include <QElapsedTimer>
 #include <QThread>
+#include <QTimer>
 #include <QUndoCommand>
 #include <QUndoStack>
 
 #include "../scene/DefaultDesk.h"
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneJson.h"
+#include "../effects/Presets.h"
 #include "OpenRGBPluginInterface.h"
 
 #include <cmath>
@@ -83,11 +86,26 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     , adapter(plugin_api)
     , undo_stack(new QUndoStack(this))
 {
+    play_timer = new QTimer(this);
+    play_timer->setInterval(33);
+    connect(play_timer, &QTimer::timeout, this, &SceneBridge::tick);
+    play_clock = new QElapsedTimer();
+
     doc = BuildDefaultDesk();
     refreshDevices();
 }
 
-SceneBridge::~SceneBridge() = default;
+SceneBridge::~SceneBridge()
+{
+    /* Detached push workers hold `this` — give an in-flight write a
+       moment to finish before the bridge is torn down. */
+    play_timer->stop();
+    for(int i = 0; i < 50 && push_in_flight.load(); i++)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    delete play_clock;
+}
 
 int  SceneBridge::brightnessPct() const { return (int)std::lround(doc.brightness * 100.0f); }
 bool SceneBridge::canUndo() const       { return undo_stack->canUndo(); }
@@ -99,6 +117,14 @@ static QString Hex(SceneColor c)
         .arg(c & 0xFF, 2, 16, QLatin1Char('0'))
         .arg((c >> 8) & 0xFF, 2, 16, QLatin1Char('0'))
         .arg((c >> 16) & 0xFF, 2, 16, QLatin1Char('0'));
+}
+
+static SceneColor ScaleScene(SceneColor c, float brightness)
+{
+    const unsigned int r = (unsigned int)((c & 0xFF) * brightness) & 0xFF;
+    const unsigned int g = (unsigned int)(((c >> 8) & 0xFF) * brightness) & 0xFF;
+    const unsigned int b = (unsigned int)(((c >> 16) & 0xFF) * brightness) & 0xFF;
+    return (b << 16) | (g << 8) | r;
 }
 
 static QString KindName(ObjectKind kind)
@@ -177,14 +203,22 @@ QVariantList SceneBridge::emittersOf(const QString& objectId) const
         owner = obj;
     }
 
+    /* While an effect frame exists it owns the preview — same colors
+       the live push writes, brightness-scaled like the output path. */
+    const auto fit = frame.find(owner->id);
+    const bool has_frame = (fit != frame.end());
+
     for(size_t i = 0; i < owner->emitters.size(); i++)
     {
         const Emitter& e = owner->emitters[i];
+        SceneColor c = (has_frame && i < fit->second.size())
+                     ? fit->second[i]
+                     : EmitterColor(doc, owner->id, (int)i);
         QVariantMap m;
         m["x"] = e.local_pos.x;
         m["y"] = e.local_pos.y;
         m["z"] = e.local_pos.z;
-        m["c"] = Hex(EmitterColor(doc, owner->id, (int)i));
+        m["c"] = Hex(ScaleScene(c, doc.brightness));
         m["i"] = (int)i;
         out.push_back(m);
     }
@@ -297,7 +331,7 @@ void SceneBridge::setLive(bool on)
     emit liveChanged();
     if(on)
     {
-        pushLiveAll();
+        schedulePush();
     }
 }
 
@@ -326,7 +360,12 @@ void SceneBridge::redo() { undo_stack->redo(); emit undoChanged(); }
 
 void SceneBridge::refreshDevices()
 {
-    adapter.Refresh(doc);
+    /* io_mutex keeps a push worker from reading the controller list
+       mid-refresh. */
+    {
+        QMutexLocker lock(&io_mutex);
+        adapter.Refresh(doc);
+    }
     rebuildMatrixLayouts();
     emit sceneChanged();
 }
@@ -360,18 +399,34 @@ bool SceneBridge::loadScene()
     }
     undo_stack->clear();
     emit undoChanged();
+
+    /* A saved scene carries its effect state — loading restores the
+       preset and resumes playback if it was playing (startup scene). */
+    frame.clear();
+    rebuildEffect();
+    emit presetChanged();
+    emit effectParamsChanged();
     refreshDevices();
+    if(doc.effect.playing)
+    {
+        setPlaying(true);
+    }
     setStatus(QStringLiteral("scene loaded (%1 objects)").arg((int)doc.objects.size()));
     if(live_output)
     {
-        pushLiveAll();
+        schedulePush();
     }
     return true;
 }
 
 void SceneBridge::resetScene()
 {
+    setPlaying(false);
     doc = BuildDefaultDesk();
+    frame.clear();
+    engine.SetLayers({});
+    emit presetChanged();
+    emit effectParamsChanged();
     undo_stack->clear();
     emit undoChanged();
     refreshDevices();
@@ -381,6 +436,203 @@ void SceneBridge::resetScene()
 /*---------------------------------------------------------*\
 || Core ops (undo commands call these)                       |
 \*---------------------------------------------------------*/
+/*---------------------------------------------------------*\
+||| Stage 2 — effect playback                                |
+|||                                                           |
+|||   The engine is pure: the bridge owns time (play_t) and  |
+|||   evaluates on the UI thread each tick (~300 emitters).  |
+|||   Live pushes run on one worker with newest-frame        |
+|||   coalescing — a slow wireless group can never build a   |
+|||   backlog or freeze the editor.                          |
+\*---------------------------------------------------------*/
+int SceneBridge::effectSpeedPct() const     { return (int)std::lround(doc.effect.speed * 100.0f); }
+int SceneBridge::effectIntensityPct() const { return (int)std::lround(doc.effect.intensity * 100.0f); }
+
+QVariantList SceneBridge::presetList() const
+{
+    QVariantList out;
+    for(const PresetInfo& p : PresetList())
+    {
+        QVariantMap m;
+        m["id"]          = QString::fromStdString(p.id);
+        m["name"]        = QString::fromStdString(p.name);
+        m["description"] = QString::fromStdString(p.description);
+        out.push_back(m);
+    }
+    return out;
+}
+
+void SceneBridge::rebuildEffect()
+{
+    std::vector<EffectLayer> layers;
+    if(!doc.effect.preset.empty())
+    {
+        layers = BuildPreset(doc.effect.preset, doc.effect.seed);
+        ApplyGlobalParams(layers, doc.effect.speed, doc.effect.intensity);
+    }
+    engine.SetLayers(layers);
+}
+
+void SceneBridge::playPreset(const QString& presetId)
+{
+    const std::string id = presetId.toStdString();
+    if(FindPreset(id) == nullptr)
+    {
+        setStatus(QStringLiteral("unknown preset %1").arg(presetId));
+        return;
+    }
+    if(doc.effect.preset != id)
+    {
+        doc.effect.preset = id;
+        doc.effect.seed   = 0;
+        play_t            = 0.0;
+        emit presetChanged();
+    }
+    rebuildEffect();
+    setPlaying(true);
+}
+
+void SceneBridge::setPlaying(bool on)
+{
+    if(playing_state == on)
+    {
+        return;
+    }
+    playing_state      = on;
+    doc.effect.playing = on;
+    if(on)
+    {
+        if(engine.Empty())
+        {
+            rebuildEffect();
+        }
+        play_clock->start();
+        play_timer->start();
+        tick();     /* evaluate immediately — don't wait 33 ms */
+    }
+    else
+    {
+        play_timer->stop();
+    }
+    emit playingChanged();
+}
+
+void SceneBridge::stopEffect()
+{
+    setPlaying(false);
+    doc.effect.preset.clear();
+    frame.clear();
+    engine.SetLayers({});
+    emit presetChanged();
+    /* Return preview + hardware to the painted scene. */
+    for(const SceneObject& o : doc.objects)
+    {
+        emit emittersChanged(QString::fromStdString(o.id));
+    }
+    schedulePush();
+}
+
+void SceneBridge::remix()
+{
+    if(doc.effect.preset.empty())
+    {
+        return;
+    }
+    /* A fresh seed re-rolls every bounded random choice in the
+       preset; the seed persists with the scene, so a remix is
+       reproducible. */
+    doc.effect.seed = HashU32(doc.effect.seed ^ 0x5D15A5E9u) + 1u;
+    rebuildEffect();
+    setPlaying(true);
+    setStatus(QStringLiteral("remix seed %1").arg(doc.effect.seed));
+    emit presetChanged();
+}
+
+void SceneBridge::setEffectSpeedPct(int pct)
+{
+    doc.effect.speed = qBound(10, pct, 400) / 100.0f;
+    rebuildEffect();
+    emit effectParamsChanged();
+}
+
+void SceneBridge::setEffectIntensityPct(int pct)
+{
+    doc.effect.intensity = qBound(0, pct, 100) / 100.0f;
+    rebuildEffect();
+    emit effectParamsChanged();
+}
+
+void SceneBridge::tick()
+{
+    if(!playing_state)
+    {
+        return;
+    }
+    if(play_clock->isValid())
+    {
+        play_t += play_clock->nsecsElapsed() / 1e9;
+    }
+    play_clock->restart();
+
+    engine.Evaluate(doc, play_t, frame);
+    emitFrameChanged();
+    schedulePush();
+}
+
+void SceneBridge::emitFrameChanged()
+{
+    for(const auto& kv : frame)
+    {
+        emit emittersChanged(QString::fromStdString(kv.first));
+        for(const SceneObject& o : doc.objects)
+        {
+            if(o.kind == ObjectKind::Linked && o.mirror_of == kv.first)
+            {
+                emit emittersChanged(QString::fromStdString(o.id));
+            }
+        }
+    }
+}
+
+/* Newest-frame push: one worker in flight, at most one pending
+   request. Intermediate ticks while the worker is busy collapse
+   into a single follow-up push of the latest frame. */
+void SceneBridge::schedulePush()
+{
+    if(!live_output || api == nullptr)
+    {
+        return;
+    }
+    if(push_in_flight.exchange(true))
+    {
+        push_again = true;
+        return;
+    }
+    const SceneDocument doc_copy   = doc;
+    const FrameColors   frame_copy = frame;
+    const bool          use_frame  = !frame.empty() && !doc.effect.preset.empty();
+    std::thread([this, doc_copy, frame_copy, use_frame]()
+    {
+        std::string err;
+        {
+            QMutexLocker lock(&io_mutex);
+            err = adapter.PushAll(doc_copy, use_frame ? &frame_copy : nullptr);
+        }
+        push_in_flight = false;
+        if(push_again.exchange(false))
+        {
+            QMetaObject::invokeMethod(this, [this]() { schedulePush(); },
+                                      Qt::QueuedConnection);
+        }
+        if(!err.empty())
+        {
+            const QString msg = QString::fromStdString(err);
+            QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
+                                      Qt::QueuedConnection);
+        }
+    }).detach();
+}
+
 void SceneBridge::applyObjectColor(const std::string& owner_id, SceneColor color)
 {
     doc.object_colors[owner_id] = color;
@@ -392,7 +644,9 @@ void SceneBridge::applyObjectColor(const std::string& owner_id, SceneColor color
             emit emittersChanged(QString::fromStdString(o.id));
         }
     }
-    pushLive(owner_id);
+    /* With an effect frame up, the frame owns the output — the painted
+       base under it flows through the next push anyway. */
+    if(frame.empty()) { pushLive(owner_id); } else { schedulePush(); }
 }
 
 void SceneBridge::applyEmitterColor(const std::string& owner_id, int index, SceneColor color)
@@ -406,7 +660,7 @@ void SceneBridge::applyEmitterColor(const std::string& owner_id, int index, Scen
             emit emittersChanged(QString::fromStdString(o.id));
         }
     }
-    pushLive(owner_id);
+    if(frame.empty()) { pushLive(owner_id); } else { schedulePush(); }
 }
 
 void SceneBridge::applyBrightness(float brightness)
@@ -417,7 +671,7 @@ void SceneBridge::applyBrightness(float brightness)
     {
         emit emittersChanged(QString::fromStdString(o.id));
     }
-    pushLiveAll();
+    if(frame.empty()) { pushLiveAll(); } else { schedulePush(); }
 }
 
 /*---------------------------------------------------------*\

@@ -11,6 +11,8 @@
 #include "StudioTab.h"
 #include "SceneBridge.h"
 
+#include <QAbstractButton>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -25,6 +27,7 @@
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QThread>
 #include <QTimer>
@@ -159,6 +162,59 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     scene_row->addWidget(reset_btn);
 
     /*-----------------------------------------------------*\
+    | Scene strip (Stage 2) — preset cards + playback        |
+    \*-----------------------------------------------------*/
+    QWidget*     fx_bar = new QWidget(this);
+    QHBoxLayout* fx_row = new QHBoxLayout(fx_bar);
+    fx_row->setContentsMargins(8, 4, 8, 4);
+
+    fx_row->addWidget(new QLabel(QStringLiteral("Scene"), fx_bar));
+
+    preset_group = new QButtonGroup(fx_bar);
+    preset_group->setExclusive(true);
+    const QVariantList presets = bridge->presetList();
+    for(int i = 0; i < presets.size(); i++)
+    {
+        const QVariantMap p = presets[i].toMap();
+        QPushButton* card = new QPushButton(p["name"].toString(), fx_bar);
+        card->setCheckable(true);
+        card->setToolTip(p["description"].toString());
+        card->setProperty("preset_id", p["id"]);
+        preset_group->addButton(card, i);
+        fx_row->addWidget(card);
+    }
+
+    play_btn  = new QPushButton(QStringLiteral("Play"), fx_bar);
+    stop_btn  = new QPushButton(QStringLiteral("Stop"), fx_bar);
+    remix_btn = new QPushButton(QStringLiteral("Remix"), fx_bar);
+    remix_btn->setToolTip(QStringLiteral("Re-roll this preset's random choices (seeded, reproducible)"));
+
+    fx_row->addWidget(play_btn);
+    fx_row->addWidget(stop_btn);
+    fx_row->addWidget(remix_btn);
+    fx_row->addStretch(1);
+
+    fx_row->addWidget(new QLabel(QStringLiteral("Speed"), fx_bar));
+    speed_slider = new QSlider(Qt::Horizontal, fx_bar);
+    speed_slider->setRange(10, 400);
+    speed_slider->setValue(100);
+    speed_slider->setMaximumWidth(110);
+    speed_label = new QLabel(QStringLiteral("100%"), fx_bar);
+    speed_label->setMinimumWidth(40);
+    fx_row->addWidget(speed_slider);
+    fx_row->addWidget(speed_label);
+
+    fx_row->addWidget(new QLabel(QStringLiteral("Intensity"), fx_bar));
+    intensity_slider = new QSlider(Qt::Horizontal, fx_bar);
+    intensity_slider->setRange(0, 100);
+    intensity_slider->setValue(100);
+    intensity_slider->setMaximumWidth(110);
+    intensity_label = new QLabel(QStringLiteral("100%"), fx_bar);
+    intensity_label->setMinimumWidth(40);
+    fx_row->addWidget(intensity_slider);
+    fx_row->addWidget(intensity_label);
+
+    /*-----------------------------------------------------*\
     | Device-inspection bar (Stage 0 measurements)          |
     \*-----------------------------------------------------*/
     QWidget*        bar     = new QWidget(this);
@@ -193,6 +249,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
 
     layout->addWidget(quick_widget, 1);
     layout->addWidget(scene_bar);
+    layout->addWidget(fx_bar);
     layout->addWidget(bar);
     layout->addWidget(results_box);
     layout->addWidget(status_label);
@@ -213,6 +270,71 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     connect(save_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::saveScene);
     connect(load_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::loadScene);
     connect(reset_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::resetScene);
+
+    /*-----------------------------------------------------*\
+    | Scene strip wiring                                    |
+    \*-----------------------------------------------------*/
+    connect(preset_group, &QButtonGroup::idClicked, this, [this](int id)
+    {
+        const QVariantList presets = bridge->presetList();
+        if(id >= 0 && id < presets.size())
+        {
+            bridge->playPreset(presets[id].toMap()["id"].toString());
+        }
+    });
+
+    connect(play_btn, &QPushButton::clicked, this, [this]()
+    {
+        if(bridge->playing())
+        {
+            bridge->setPlaying(false);
+        }
+        else if(bridge->activePreset().isEmpty())
+        {
+            const QVariantList presets = bridge->presetList();
+            if(!presets.isEmpty())
+            {
+                bridge->playPreset(presets.first().toMap()["id"].toString());
+            }
+        }
+        else
+        {
+            bridge->setPlaying(true);
+        }
+    });
+
+    connect(stop_btn,  &QPushButton::clicked, bridge, &studio::SceneBridge::stopEffect);
+    connect(remix_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::remix);
+
+    connect(speed_slider, &QSlider::valueChanged,
+            bridge, &studio::SceneBridge::setEffectSpeedPct);
+    connect(intensity_slider, &QSlider::valueChanged,
+            bridge, &studio::SceneBridge::setEffectIntensityPct);
+
+    auto sync_fx = [this]()
+    {
+        const QString active = bridge->activePreset();
+        const bool    is_playing = bridge->playing();
+        for(QAbstractButton* card : preset_group->buttons())
+        {
+            card->setChecked(is_playing && card->property("preset_id").toString() == active);
+        }
+        play_btn->setText(is_playing ? QStringLiteral("Pause") : QStringLiteral("Play"));
+        remix_btn->setEnabled(!active.isEmpty());
+
+        /* Sliders: block signals so programmatic sync can't re-enter. */
+        QSignalBlocker block_speed(speed_slider);
+        QSignalBlocker block_intensity(intensity_slider);
+        speed_slider->setValue(bridge->effectSpeedPct());
+        intensity_slider->setValue(bridge->effectIntensityPct());
+        speed_label->setText(QStringLiteral("%1%").arg(bridge->effectSpeedPct()));
+        intensity_label->setText(QStringLiteral("%1%").arg(bridge->effectIntensityPct()));
+    };
+
+    connect(bridge, &studio::SceneBridge::playingChanged,      this, sync_fx);
+    connect(bridge, &studio::SceneBridge::presetChanged,       this, sync_fx);
+    connect(bridge, &studio::SceneBridge::effectParamsChanged, this, sync_fx);
+    sync_fx();
 
     connect(bridge, &studio::SceneBridge::selectionChanged, this, [this]()
     {
