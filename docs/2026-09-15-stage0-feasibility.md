@@ -37,6 +37,14 @@ Probe contents:
 Runtime verification pending: launch of the locally built host and tab
 rendering/orbit/pick checks (see "Pending live checks").
 
+**Fixed load failure (first attempt):** the initially deployed DLL was skipped
+with `does not have an OpenRGBPluginAPIVersion field`. Root cause: an earlier
+build had baked a wrongly-nested `MetaData` object, and `metadata.json` is not
+tracked as a moc dependency, so incremental rebuilds kept the stale metadata.
+`build-plugin.bat` now deletes `build\moc` before `jom`, and a
+`tests/plugin_meta_check` probe (`QPluginLoader::metaData()` identical to
+PluginManager's check) confirms the deployed DLL unwraps to API version 5.
+
 ## Existing-plugin reuse comparison
 
 Both plugins are **GPL-2.0-only** (compatible: our plugin is a GPL OpenRGB

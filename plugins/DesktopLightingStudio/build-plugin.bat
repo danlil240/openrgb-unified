@@ -19,6 +19,10 @@ cd /d %~dp0
 qmake DesktopLightingStudio.pro CONFIG-=debug_and_release CONFIG+=release
 IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
+:: Force moc re-run: metadata.json is baked by moc but not tracked
+:: as a dependency, so edits would silently keep the old metadata.
+if exist build\moc rmdir /s /q build\moc
+
 jom
 IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
