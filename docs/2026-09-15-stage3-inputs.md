@@ -147,6 +147,11 @@ Verified this session (2026-09-15):
 - `plugins/DesktopLightingStudio/build-plugin.bat` — clean build,
   deployed via xcopy; deployed DLL passes the `LoadLibraryExW` +
   `ALTERED_SEARCH_PATH` probe (SAC verdict OK, deps resolve).
+- Host smoke (2026-09-15): plugin loads, Studio tab shows the Inputs
+  row (Audio/Sens, Keys, Screen/display, Decay) and the three
+  reactive preset cards; toggles respond. (First deploy attempt was
+  silently blocked by a running host holding the DLL — deploy now
+  fails loudly, `deploy-only.bat` covers the close→redeploy loop.)
 
 Build fixes needed along the way: `IMMDeviceEnumerator` exposes
 `Register/UnregisterEndpointNotificationCallback` (not
