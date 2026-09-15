@@ -28,6 +28,7 @@ HEADERS += \
     plugin/SceneBridge.h \
     output/ControllerAdapter.h \
     scene/SceneTypes.h \
+    scene/SceneGraph.h \
     scene/EmitterLayout.h \
     scene/SceneJson.h \
     scene/BindingResolver.h \
@@ -48,6 +49,7 @@ SOURCES += \
     plugin/SceneBridge.cpp \
     output/ControllerAdapter.cpp \
     scene/SceneTypes.cpp \
+    scene/SceneGraph.cpp \
     scene/EmitterLayout.cpp \
     scene/SceneJson.cpp \
     scene/BindingResolver.cpp \

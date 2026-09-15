@@ -12,13 +12,20 @@
 #include "SceneTypes.h"
 #include <nlohmann/json.hpp>
 
+#include <string>
+#include <vector>
+
 namespace studio
 {
 
 nlohmann::json ToJson(const SceneDocument& doc);
 
-/* Parse a document. Returns false on malformed input or a version
-   newer than the current schema (no silent downgrade). */
-bool FromJson(const nlohmann::json& j, SceneDocument& doc);
+/* Parse a document. Returns false on malformed input, a version
+   newer than the current schema (no silent downgrade), or a failed
+   graph validation (dangling/cyclic parent or mirror references);
+   `doc` stays untouched on failure and `errors`, when given,
+   collects the validation messages. */
+bool FromJson(const nlohmann::json& j, SceneDocument& doc,
+              std::vector<std::string>* errors = nullptr);
 
 } /* namespace studio */

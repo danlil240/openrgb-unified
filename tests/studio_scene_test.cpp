@@ -9,6 +9,7 @@
 \*---------------------------------------------------------*/
 
 #include "scene/SceneTypes.h"
+#include "scene/SceneGraph.h"
 #include "scene/EmitterLayout.h"
 #include "scene/SceneJson.h"
 #include "scene/BindingResolver.h"
@@ -151,7 +152,7 @@ static void TestJsonRoundTrip()
 
     SceneDocument back;
     CHECK(FromJson(ToJson(doc), back), "json round-trip parses");
-    CHECK(back.version == 1, "json version");
+    CHECK(back.version == 2, "json version");
     CHECK(back.objects.size() == doc.objects.size(), "json object count");
     CHECK(back.bindings.size() == doc.bindings.size(), "json binding count");
     CHECK(Near(back.brightness, 0.7f), "json brightness");
@@ -982,9 +983,523 @@ static void TestReactivePresets()
     CHECK(a == b, "reactive preset deterministic");
 }
 
+/*---------------------------------------------------------*\
+|| Task 1.1 — one transform graph: hierarchy, quaternions,  |
+|| validation, size_m vs scale.                             |
+\*---------------------------------------------------------*/
+static void TestRotationQuat()
+{
+    using namespace studio;
+
+    /* Identity + normalization */
+    Quat q0 = RotationQuat({ 0.0f, 0.0f, 0.0f });
+    CHECK(Near(q0.w, 1.0f) && Near(q0.x, 0.0f) && Near(q0.y, 0.0f)
+          && Near(q0.z, 0.0f), "quat: identity");
+    Quat q = RotationQuat({ 30.0f, 45.0f, 60.0f });
+    CHECK(Near(q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z, 1.0f, 1e-5f),
+          "quat: normalized");
+
+    /* Axis spot checks, same convention as TransformPoint (Rz*Ry*Rx) */
+    Vec3 v = RotateVec(RotationQuat({ 90, 0, 0 }), { 0, 1, 0 });
+    CHECK(Near(v.z, 1.0f) && Near(v.y, 0.0f, 1e-5f), "quat: rotX 90");
+    v = RotateVec(RotationQuat({ 0, 90, 0 }), { 1, 0, 0 });
+    CHECK(Near(v.z, -1.0f) && Near(v.x, 0.0f, 1e-5f), "quat: rotY 90");
+    v = RotateVec(RotationQuat({ 0, 0, 90 }), { 1, 0, 0 });
+    CHECK(Near(v.y, 1.0f) && Near(v.x, 0.0f, 1e-5f), "quat: rotZ 90");
+
+    /* Lock the composition order with hand-computed Rz*Ry*Rx results
+       for rot = {30, 45, 60}:
+       {1,0,0}: Rx leaves it; Ry45 -> {.7071,0,-.7071};
+                Rz60 -> {.3536, .6124, -.7071}
+       {0,0,1}: Rx30 -> {0,-.5,.866}; Ry45 -> {.6124,-.5,.6124};
+                Rz60 -> {.7392, .2803, .6124}                      */
+    q = RotationQuat({ 30, 45, 60 });
+    v = RotateVec(q, { 1, 0, 0 });
+    CHECK(Near(v.x, 0.3536f, 1e-3f) && Near(v.y, 0.6124f, 1e-3f)
+          && Near(v.z, -0.7071f, 1e-3f), "quat: mixed-order X");
+    v = RotateVec(q, { 0, 0, 1 });
+    CHECK(Near(v.x, 0.7392f, 1e-3f) && Near(v.y, 0.2803f, 1e-3f)
+          && Near(v.z, 0.6124f, 1e-3f), "quat: mixed-order Z");
+
+    /* The quaternion must equal the matrix path — one conversion
+       feeds both the QML node rotation and the core's transforms. */
+    Transform t;
+    t.rotation_deg = { 37.0f, -24.0f, 81.0f };
+    const Vec3 p { 0.31f, -0.17f, 0.42f };
+    const Vec3 via_q = RotateVec(RotationQuat(t.rotation_deg), p);
+    const Vec3 via_m = TransformPoint(t, p);
+    CHECK(Near(via_q.x, via_m.x, 1e-5f) && Near(via_q.y, via_m.y, 1e-5f)
+          && Near(via_q.z, via_m.z, 1e-5f), "quat == transform path");
+
+    /* LocalMatrix point application == TransformPoint. */
+    const Mat4 lm = LocalMatrix(t);
+    const Vec3 via_l = TransformPoint(lm, p);
+    CHECK(Near(via_l.x, via_m.x, 1e-5f) && Near(via_l.y, via_m.y, 1e-5f)
+          && Near(via_l.z, via_m.z, 1e-5f), "local matrix == transform");
+}
+
+static studio::SceneObject GroupObj(const std::string& id, const studio::Vec3& pos)
+{
+    studio::SceneObject o;
+    o.id = id;
+    o.kind = studio::ObjectKind::Group;
+    o.transform.position = pos;
+    return o;
+}
+
+static void TestWorldGraph()
+{
+    using namespace studio;
+
+    /* Translated group: child origin = parent pos + child local. */
+    SceneDocument doc;
+    doc.objects.push_back(GroupObj("grp", { 1.0f, 2.0f, 3.0f }));
+    SceneObject dev = OneLedDevice("dev", 0.1f);
+    dev.parent_id = "grp";
+    doc.objects.push_back(dev);
+
+    CHECK(ValidateSceneGraph(doc, nullptr), "graph: translated group valid");
+    {
+        const auto world = ResolveWorldMatrices(doc);
+        const Vec3 w = TransformPoint(world.at("dev"), { 0, 0, 0 });
+        CHECK(Near(w.x, 1.1f) && Near(w.y, 2.0f) && Near(w.z, 3.0f),
+              "graph: child inherits parent translation");
+    }
+
+    /* Scaled parent: the child's offset AND its emitters scale. */
+    FindObject(doc, "grp")->transform.scale = { 2, 2, 2 };
+    {
+        const auto world = ResolveWorldMatrices(doc);
+        const Vec3 w = TransformPoint(world.at("dev"), { 0, 0, 0 });
+        CHECK(Near(w.x, 1.0f + 2.0f * 0.1f) && Near(w.y, 2.0f),
+              "graph: parent scale scales child offset");
+        const Vec3 e = TransformPoint(world.at("dev"), { 0.05f, 0, 0 });
+        CHECK(Near(e.x, 1.0f + 2.0f * 0.15f), "graph: parent scale reaches emitter");
+    }
+
+    /* Rotated parent swings the child; child rotation composes on top.
+       grp pos {0.5,0.2,0} rot {0,90,0}; dev local {0.1,0,0} rot {90,0,0};
+       emitter {0,1,0}:  Rx90 -> {0,0,1}; +devT -> {0.1,0,1};
+       Ry90 -> {1,0,-0.1}; +grpT -> {1.5,0.2,-0.1}.               */
+    {
+        SceneDocument rdoc;
+        SceneObject g = GroupObj("grp", { 0.5f, 0.2f, 0.0f });
+        g.transform.rotation_deg = { 0, 90, 0 };
+        rdoc.objects.push_back(g);
+        SceneObject d = OneLedDevice("dev", 0.1f);
+        d.parent_id = "grp";
+        d.transform.rotation_deg = { 90, 0, 0 };
+        d.emitters[0].local_pos = { 0, 1, 0 };
+        rdoc.objects.push_back(d);
+
+        const auto world = ResolveWorldMatrices(rdoc);
+        const Vec3 w = TransformPoint(world.at("dev"), { 0, 1, 0 });
+        CHECK(Near(w.x, 1.5f) && Near(w.y, 0.2f) && Near(w.z, -0.1f),
+              "graph: composed parent+child rotation");
+    }
+
+    /* Deep nesting: g1{x=1} -> g2{y=1} -> dev{z=1}. */
+    {
+        SceneDocument deep;
+        SceneObject g1 = GroupObj("g1", { 1, 0, 0 });
+        SceneObject g2 = GroupObj("g2", { 0, 1, 0 });
+        g2.parent_id = "g1";
+        SceneObject d = OneLedDevice("dev", 0.0f);
+        d.parent_id = "g2";
+        d.transform.position = { 0, 0, 1 };
+        deep.objects = { g1, g2, d };
+        const auto world = ResolveWorldMatrices(deep);
+        const Vec3 w = TransformPoint(world.at("dev"), { 0, 0, 0 });
+        CHECK(Near(w.x, 1.0f) && Near(w.y, 1.0f) && Near(w.z, 1.0f),
+              "graph: nested groups compose");
+    }
+
+    /* Object order must not matter: child listed before parent. */
+    {
+        SceneDocument rev;
+        SceneObject d = OneLedDevice("dev", 0.1f);
+        d.parent_id = "grp";
+        rev.objects.push_back(d);
+        rev.objects.push_back(GroupObj("grp", { 1.0f, 0, 0 }));
+        const auto world = ResolveWorldMatrices(rev);
+        const Vec3 w = TransformPoint(world.at("dev"), { 0, 0, 0 });
+        CHECK(Near(w.x, 1.1f), "graph: order-independent resolution");
+
+        /* And TopologicalOrder still emits the parent first — the
+           bridge model needs that for the QML node map. */
+        const auto ord = TopologicalOrder(rev);
+        CHECK(ord.size() == 2 && ord[0]->id == "grp" && ord[1]->id == "dev",
+              "graph: topological order parents-first");
+    }
+}
+
+static void TestGraphValidation()
+{
+    using namespace studio;
+
+    std::vector<std::string> errs;
+
+    /* Missing parent is rejected. */
+    {
+        SceneDocument doc;
+        SceneObject d = OneLedDevice("dev", 0.0f);
+        d.parent_id = "ghost";
+        doc.objects.push_back(d);
+        CHECK(!ValidateSceneGraph(doc, &errs) && !errs.empty(),
+              "graph: dangling parent rejected");
+    }
+
+    /* Self-parent and a 2-cycle are rejected. */
+    {
+        SceneDocument doc;
+        SceneObject a = GroupObj("a", { 0, 0, 0 });
+        a.parent_id = "a";
+        doc.objects.push_back(a);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: self parent rejected");
+    }
+    {
+        SceneDocument doc;
+        SceneObject a = GroupObj("a", { 0, 0, 0 });
+        SceneObject b = GroupObj("b", { 0, 0, 0 });
+        a.parent_id = "b";
+        b.parent_id = "a";
+        doc.objects.push_back(a);
+        doc.objects.push_back(b);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: parent cycle rejected");
+    }
+
+    /* Resolution stays safe even on an invalid doc (cycle treated
+       as a root — validation is what keeps documents clean). */
+    {
+        SceneDocument doc;
+        SceneObject a = GroupObj("a", { 1, 0, 0 });
+        SceneObject b = GroupObj("b", { 0, 1, 0 });
+        a.parent_id = "b";
+        b.parent_id = "a";
+        doc.objects = { a, b };
+        const auto world = ResolveWorldMatrices(doc);
+        CHECK(world.count("a") == 1 && world.count("b") == 1,
+              "graph: cycle resolution terminates");
+    }
+
+    /* Mirrored output ownership: dangling mirror, chain, cycle,
+       missing mirror on a Linked object, mirror on a Decor. */
+    {
+        SceneDocument doc;
+        SceneObject c;
+        c.id = "c"; c.kind = ObjectKind::Linked; c.mirror_of = "ghost";
+        doc.objects.push_back(c);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: dangling mirror rejected");
+    }
+    {
+        SceneDocument doc;
+        SceneObject c;
+        c.id = "c"; c.kind = ObjectKind::Linked;   /* no mirror_of */
+        doc.objects.push_back(c);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: linked w/o mirror rejected");
+    }
+    {
+        SceneDocument doc;
+        doc.objects.push_back(OneLedDevice("owner", 0.0f));
+        SceneObject c1;
+        c1.id = "c1"; c1.kind = ObjectKind::Linked; c1.mirror_of = "owner";
+        SceneObject c2;
+        c2.id = "c2"; c2.kind = ObjectKind::Linked; c2.mirror_of = "c1";
+        doc.objects.push_back(c1);
+        doc.objects.push_back(c2);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: mirror chain rejected");
+    }
+    {
+        SceneDocument doc;
+        SceneObject c;
+        c.id = "c"; c.kind = ObjectKind::Linked; c.mirror_of = "c";  /* self */
+        doc.objects.push_back(c);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: self mirror rejected");
+    }
+    {
+        SceneDocument doc;
+        doc.objects.push_back(OneLedDevice("owner", 0.0f));
+        SceneObject d;
+        d.id = "d"; d.kind = ObjectKind::Decor; d.mirror_of = "owner";
+        doc.objects.push_back(d);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: mirror on non-linked rejected");
+    }
+
+    /* Dimensionless scale must be positive and finite. */
+    {
+        SceneDocument doc;
+        SceneObject d = OneLedDevice("dev", 0.0f);
+        d.transform.scale = { 0, 1, 1 };
+        doc.objects.push_back(d);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: zero scale rejected");
+    }
+    {
+        SceneDocument doc;
+        SceneObject d = OneLedDevice("dev", 0.0f);
+        d.transform.scale = { -1, 1, 1 };
+        doc.objects.push_back(d);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: negative scale rejected");
+    }
+    {
+        SceneDocument doc;
+        SceneObject d = OneLedDevice("dev", 0.0f);
+        d.transform.position = { std::nanf(""), 0, 0 };
+        doc.objects.push_back(d);
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: non-finite position rejected");
+    }
+
+    /* Duplicate ids rejected. */
+    {
+        SceneDocument doc;
+        doc.objects.push_back(OneLedDevice("dev", 0.0f));
+        doc.objects.push_back(OneLedDevice("dev", 1.0f));
+        CHECK(!ValidateSceneGraph(doc, nullptr), "graph: duplicate id rejected");
+    }
+
+    /* The default desk itself validates clean. */
+    {
+        SceneDocument doc = BuildDefaultDesk();
+        errs.clear();
+        CHECK(ValidateSceneGraph(doc, &errs) && errs.empty(),
+              "graph: default desk valid");
+    }
+}
+
+static void TestJsonHierarchy()
+{
+    using namespace studio;
+
+    /* parent_id / size_m / kind "group" round-trip. */
+    SceneDocument doc;
+    doc.objects.push_back(GroupObj("grp", { 1, 2, 3 }));
+    SceneObject d = OneLedDevice("dev", 0.1f);
+    d.parent_id = "grp";
+    d.size_m = { 0.3f, 0.05f, 0.13f };
+    doc.objects.push_back(d);
+
+    SceneDocument back;
+    CHECK(FromJson(ToJson(doc), back), "json: hierarchy parses");
+    const SceneObject* g = FindObject(back, "grp");
+    const SceneObject* c = FindObject(back, "dev");
+    CHECK(g != nullptr && g->kind == ObjectKind::Group, "json: group kind");
+    CHECK(c != nullptr && c->parent_id == "grp", "json: parent_id round-trip");
+    CHECK(c != nullptr && Near(c->size_m.x, 0.3f) && Near(c->size_m.z, 0.13f),
+          "json: size_m round-trip");
+
+    /* v1 migration: a version-1 file stored body dims in `scale`.
+       Decor gets them as size_m; devices reset to identity. */
+    {
+        nlohmann::json j;
+        j["version"] = 1;
+        j["objects"] = nlohmann::json::array();
+        j["objects"].push_back({
+            {"id", "shelf"}, {"kind", "decor"}, {"geometry", "desk"},
+            {"scale", { {"x", 1.4}, {"y", 0.04}, {"z", 0.75} }},
+        });
+        j["objects"].push_back({
+            {"id", "dev"}, {"kind", "device"}, {"binding", "b"},
+            {"scale", { {"x", 2.0}, {"y", 2.0}, {"z", 2.0} }},
+        });
+        SceneDocument m;
+        CHECK(FromJson(j, m), "json: v1 migrates");
+        const SceneObject* shelf = FindObject(m, "shelf");
+        const SceneObject* dev   = FindObject(m, "dev");
+        CHECK(shelf && Near(shelf->size_m.x, 1.4f) && Near(shelf->size_m.z, 0.75f)
+              && Near(shelf->transform.scale.x, 1.0f), "json: v1 decor scale -> size_m");
+        CHECK(dev && Near(dev->transform.scale.x, 1.0f)
+              && Near(dev->size_m.x, 0.0f), "json: v1 device scale reset");
+        CHECK(m.version == 2, "json: migrated doc is current version");
+    }
+
+    /* Invalid graphs are rejected on load, leaving the doc untouched. */
+    {
+        SceneDocument keep;
+        keep.objects.push_back(GroupObj("keep", { 0, 0, 0 }));
+        nlohmann::json j;
+        j["version"] = 2;
+        j["objects"] = nlohmann::json::array();
+        j["objects"].push_back({ {"id", "a"}, {"kind", "group"},
+                                 {"parent_id", "b"} });
+        j["objects"].push_back({ {"id", "b"}, {"kind", "group"},
+                                 {"parent_id", "a"} });
+        CHECK(!FromJson(j, keep), "json: parent cycle rejected");
+        CHECK(keep.objects.size() == 1 && keep.objects[0].id == "keep",
+              "json: rejected load leaves doc untouched");
+
+        j["objects"][0]["parent_id"] = "missing";
+        j["objects"][1]["parent_id"] = "";
+        CHECK(!FromJson(j, keep), "json: dangling parent rejected");
+    }
+}
+
+static void TestDefaultDeskGroups()
+{
+    using namespace studio;
+    SceneDocument doc = BuildDefaultDesk();
+    const auto world = ResolveWorldMatrices(doc);
+
+    /* Mouse parts became children of a "mouse" group; their world
+       placement is unchanged from the flat scene. */
+    const SceneObject* mouse = FindObject(doc, "mouse");
+    CHECK(mouse != nullptr && mouse->kind == ObjectKind::Group
+          && mouse->parent_id.empty(), "desk: mouse group exists");
+    for(const char* id : { "mouse_body", "mouse_wheel", "mouse_logo",
+                           "mouse_strip" })
+    {
+        const SceneObject* o = FindObject(doc, id);
+        CHECK(o != nullptr && o->parent_id == "mouse", "desk: mouse child");
+    }
+    {
+        const Vec3 w = TransformPoint(world.at("mouse_wheel"), { 0, 0, 0 });
+        CHECK(Near(w.x, 0.26f) && Near(w.y, 0.045f) && Near(w.z, 0.235f),
+              "desk: mouse wheel world preserved");
+        /* underglow led0: ring r=0.028 start 90 -> local {0,0,-0.028},
+           old world {0.26,0.012,0.275} + offset -> {0.26,0.012,0.247} */
+        const Vec3 s = TransformPoint(world.at("mouse_strip"),
+                                      { 0, 0, -0.028f });
+        CHECK(Near(s.x, 0.26f) && Near(s.y, 0.012f) && Near(s.z, 0.247f),
+              "desk: mouse strip world preserved");
+    }
+
+    /* Case + components under a "case" group, worlds preserved. */
+    const SceneObject* pc = FindObject(doc, "case");
+    CHECK(pc != nullptr && pc->kind == ObjectKind::Group
+          && pc->parent_id.empty(), "desk: case group exists");
+    for(const char* id : { "case_shell", "case_fans", "case_fan_b1",
+                           "case_fan_b2", "case_fan_rear", "rad_fans",
+                           "rad_fan_m1", "rad_fan_m2", "pump",
+                           "gpu_top_fan", "slw_fan_0", "slw_fan_1",
+                           "slw_fan_2", "dimm_0", "dimm_1", "gpu_body",
+                           "gpu_logo", "gpu_fan_r", "gpu_fan_m",
+                           "gpu_fan_l" })
+    {
+        const SceneObject* o = FindObject(doc, id);
+        CHECK(o != nullptr && o->parent_id == "case", "desk: case child");
+    }
+    {
+        /* rear exhaust: world pos {0.47,0.30,-0.30} rot {90,0,0};
+           emitter0 local {0.052,0.016,0} -> Rx90 -> {0.052,0,0.016} */
+        const Vec3 w = TransformPoint(world.at("case_fan_rear"),
+                                      { 0.052f, 0.016f, 0.0f });
+        CHECK(Near(w.x, 0.522f) && Near(w.y, 0.30f) && Near(w.z, -0.284f),
+              "desk: rear fan world preserved");
+        /* gpu_logo on the card's glass-facing edge: node local
+           {-0.03,-0.02,-0.02} under the case anchor -> {0.44,0.215,-0.12};
+           ry=90 turns strip led0 local {-0.03,0,0} into +z 0.03 ->
+           {0.44,0.215,-0.09} */
+        const Vec3 g = TransformPoint(world.at("gpu_logo"), { -0.03f, 0, 0 });
+        CHECK(Near(g.x, 0.44f) && Near(g.y, 0.215f) && Near(g.z, -0.09f),
+              "desk: gpu logo world preserved");
+    }
+
+    /* Mirrored copies still resolve their owner for output. */
+    CHECK(OutputOwner(doc, "case_fan_b1")->id == "case_fans",
+          "desk: mirrored child still shares output");
+
+    /* Decor bodies carry dimensions in size_m; transform.scale is
+       dimensionless identity. */
+    const SceneObject* desk = FindObject(doc, "desk");
+    CHECK(desk != nullptr && Near(desk->size_m.x, 1.4f)
+          && Near(desk->size_m.z, 0.75f)
+          && Near(desk->transform.scale.x, 1.0f), "desk: size_m split");
+}
+
+static void TestEngineWorldGraph()
+{
+    using namespace studio;
+
+    /* World-space effects must see resolved positions, not local ones:
+       a device child under a rotated+translated group gets the same
+       wave color as a root device at the same world X. */
+    EffectLayer wave;
+    wave.primitive = "wave";
+    wave.direction = { 1, 0, 0 };
+    wave.scale     = 1.0f;
+    wave.speed     = 0.0f;
+    wave.density   = 0.0f;
+    wave.palette   = MakePalette({
+        { 0.0f, ToColorF(MakeSceneColor(0, 0, 0))       },
+        { 0.5f, ToColorF(MakeSceneColor(255, 255, 255)) },
+        { 1.0f, ToColorF(MakeSceneColor(0, 0, 0))       },
+    });
+
+    SceneDocument doc;
+    SceneObject g = GroupObj("grp", { 0.3f, 0, 0 });
+    g.transform.rotation_deg = { 0, 90, 0 };
+    doc.objects.push_back(g);
+    SceneObject child = OneLedDevice("child", 0.0f);
+    child.parent_id = "grp";
+    child.transform.position = { -0.2f, 0, 0.05f };
+    /* world = 0.3 + Ry90*(-0.2,0,0.05) = {0.35, 0, 0.2} */
+    doc.objects.push_back(child);
+    doc.objects.push_back(OneLedDevice("rootref", 0.35f));  /* world x .35 */
+
+    EffectEngine engine;
+    engine.SetLayers({ wave });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame);
+    CHECK(frame.count("child") == 1 && frame.count("rootref") == 1,
+          "engine: grouped device evaluated");
+    CHECK(frame["child"][0] == frame["rootref"][0],
+          "engine: resolved world position drives wave");
+
+    /* A key ripple originates where the key's emitter actually is —
+       move the group and the resolved position moves with it. */
+    SceneDocument kdoc;
+    SceneObject kg = GroupObj("kgrp", { 0.5f, 0, 0 });
+    kdoc.objects.push_back(kg);
+    SceneObject kbd = OneLedDevice("kbd", 0.0f);
+    kbd.parent_id = "kgrp";
+    kdoc.objects.push_back(kbd);
+    kdoc.objects.push_back(OneLedDevice("spot", 0.8f));
+
+    EffectLayer rip;
+    rip.primitive = "ripple";
+    rip.source    = "key";
+    rip.speed     = 1.0f;
+    rip.scale     = 0.05f;
+    rip.density   = 1.0f;
+    rip.opacity   = 1.0f;
+    rip.palette   = MakePalette({ MakeSceneColor(255, 255, 255) });
+    engine.SetLayers({ rip });
+
+    auto world = ResolveWorldMatrices(kdoc);
+    Vec3 keypos = TransformPoint(world.at("kbd"), { 0, 0, 0 });
+    CHECK(Near(keypos.x, 0.5f), "key lookup: initial world");
+
+    InputState in;
+    InputEvent ev;
+    ev.source = "key"; ev.code = 0x51; ev.t = 0.0;
+    ev.strength = 1.0f; ev.has_pos = true;
+    ev.pos = keypos;
+    in.events.push_back(ev);
+    engine.Evaluate(kdoc, 0.0, frame, &in);
+    CHECK(MaxCh(frame["kbd"][0]) > 40 && MaxCh(frame["spot"][0]) < 5,
+          "key lookup: ripple at key emitter");
+
+    /* Move the group -> resolved key position follows -> a ripple
+       spawned there lights the moved key and whatever sits at the
+       new spot, not the stale position. */
+    FindObject(kdoc, "kgrp")->transform.position.x = 0.8f;
+    world = ResolveWorldMatrices(kdoc);
+    keypos = TransformPoint(world.at("kbd"), { 0, 0, 0 });
+    CHECK(Near(keypos.x, 0.8f), "key lookup: world follows group move");
+
+    in.events[0].pos = keypos;
+    engine.Evaluate(kdoc, 0.0, frame, &in);
+    CHECK(MaxCh(frame["kbd"][0]) > 40 && MaxCh(frame["spot"][0]) > 40,
+          "key lookup: ripple originates at moved keys");
+}
+
 int main()
 {
     TestTransform();
+    TestRotationQuat();
+    TestWorldGraph();
+    TestGraphValidation();
+    TestJsonHierarchy();
+    TestDefaultDeskGroups();
+    TestEngineWorldGraph();
     TestRing();
     TestStripAndMatrix();
     TestMirrorSemantics();

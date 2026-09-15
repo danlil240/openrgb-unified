@@ -5,11 +5,14 @@
 \*---------------------------------------------------------*/
 
 #include "SceneJson.h"
+#include "SceneGraph.h"
 
 namespace studio
 {
 
-static constexpr int SCENE_VERSION = 1;
+/* v1: flat object list; decor bodies carried their dimensions in
+   transform.scale. v2: parent_id hierarchy + size_m split. */
+static constexpr int SCENE_VERSION = 2;
 
 static nlohmann::json ToJson(const Vec3& v)
 {
@@ -34,6 +37,7 @@ static const char* KindName(ObjectKind kind)
     {
     case ObjectKind::Device: return "device";
     case ObjectKind::Linked: return "linked";
+    case ObjectKind::Group:  return "group";
     default:                 return "decor";
     }
 }
@@ -42,6 +46,7 @@ static ObjectKind KindFrom(const std::string& s)
 {
     if(s == "device") return ObjectKind::Device;
     if(s == "linked") return ObjectKind::Linked;
+    if(s == "group")  return ObjectKind::Group;
     return ObjectKind::Decor;
 }
 
@@ -84,9 +89,11 @@ nlohmann::json ToJson(const SceneDocument& doc)
             {"id",        o.id},
             {"label",     o.label},
             {"kind",      KindName(o.kind)},
+            {"parent_id", o.parent_id},
             {"position",  ToJson(o.transform.position)},
             {"rotation",  ToJson(o.transform.rotation_deg)},
             {"scale",     ToJson(o.transform.scale)},
+            {"size_m",    ToJson(o.size_m)},
             {"binding",   o.binding},
             {"mirror_of", o.mirror_of},
             {"geometry",  o.geometry},
@@ -128,7 +135,8 @@ nlohmann::json ToJson(const SceneDocument& doc)
     return j;
 }
 
-bool FromJson(const nlohmann::json& j, SceneDocument& doc)
+bool FromJson(const nlohmann::json& j, SceneDocument& doc,
+              std::vector<std::string>* errors)
 {
     if(!j.is_object())
     {
@@ -169,11 +177,32 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc)
         o.id                   = jo.value("id", std::string());
         o.label                = jo.value("label", o.id);
         o.kind                 = KindFrom(jo.value("kind", std::string("decor")));
+        o.parent_id            = jo.value("parent_id", std::string());
         o.transform.position   = Vec3From(jo.value("position", nlohmann::json::object()));
         o.transform.rotation_deg = Vec3From(jo.value("rotation", nlohmann::json::object()));
-        o.transform.scale      = Vec3From(jo.value("scale", nlohmann::json::object()));
-        if(o.transform.scale.x == 0.0f && o.transform.scale.y == 0.0f && o.transform.scale.z == 0.0f)
+        if(jo.contains("scale"))
         {
+            o.transform.scale  = Vec3From(jo["scale"]);
+        }
+        if(o.transform.scale.x == 0.0f && o.transform.scale.y == 0.0f
+           && o.transform.scale.z == 0.0f)
+        {
+            /* absent/all-zero scale tolerates to identity; validation
+               still rejects explicitly non-positive or non-finite
+               components. */
+            o.transform.scale = { 1.0f, 1.0f, 1.0f };
+        }
+        o.size_m               = Vec3From(jo.value("size_m", nlohmann::json::object()));
+        if(version < 2)
+        {
+            /* v1 stored body dimensions in `scale` for decor bodies
+               (devices used canonical QML sizes and emitters ignored
+               it). Migrate those dimensions to size_m; the field is
+               dimensionless now, so reset to identity. */
+            if(o.kind == ObjectKind::Decor)
+            {
+                o.size_m = o.transform.scale;
+            }
             o.transform.scale = { 1.0f, 1.0f, 1.0f };
         }
         o.binding              = jo.value("binding", std::string());
@@ -245,6 +274,14 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc)
         out.effect.playing   = effect.value("playing", false);
     }
 
+    /* Structural validation — cycles, dangling parent/mirror refs,
+       non-positive scale. A failed document leaves `doc` untouched. */
+    if(!ValidateSceneGraph(out, errors))
+    {
+        return false;
+    }
+
+    out.version = SCENE_VERSION;   /* migrated to the current schema */
     doc = out;
     return true;
 }

@@ -40,8 +40,11 @@ struct Vec3
 struct Transform
 {
     Vec3 position;
-    Vec3 rotation_deg;      /* euler XYZ, degrees                     */
-    Vec3 scale { 1.0f, 1.0f, 1.0f };
+    Vec3 rotation_deg;      /* euler XYZ, degrees; the ONLY rotation  */
+                            /* convention — converted once to a       */
+                            /* quaternion (SceneGraph) for both the   */
+                            /* renderer and the effects engine.       */
+    Vec3 scale { 1.0f, 1.0f, 1.0f };  /* dimensionless, must be > 0    */
 };
 
 /* world = T * Rxyz * S applied to local point */
@@ -68,6 +71,7 @@ enum class ObjectKind
     Decor,      /* render only — desk, case shell                  */
     Device,     /* bound to a real controller zone                 */
     Linked,     /* mirror copy of another object's emitter group   */
+    Group,      /* placement-only parent node — no body, no output */
 };
 
 struct SceneObject
@@ -75,7 +79,16 @@ struct SceneObject
     std::string             id;
     std::string             label;
     ObjectKind              kind = ObjectKind::Decor;
-    Transform               transform;
+    std::string             parent_id;      /* placement frame owner; "" */
+                                            /* = scene root. Placement   */
+                                            /* only — output ownership   */
+                                            /* is mirror_of, below.      */
+    Transform               transform;      /* local to parent frame     */
+    Vec3                    size_m;         /* body geometry dimensions  */
+                                            /* in meters (pre-scale);    */
+                                            /* {0,0,0} = geometry's      */
+                                            /* canonical size. Separate  */
+                                            /* from transform.scale.     */
     std::string             binding;        /* DeviceBinding id          */
     std::string             mirror_of;      /* source object id (Linked) */
     std::string             geometry;       /* decor/body mesh hint      */
@@ -125,7 +138,7 @@ typedef std::map<std::string, std::vector<SceneColor>> FrameColors;
 
 struct SceneDocument
 {
-    int                                 version = 1;
+    int                                 version = 2;
     std::string                         name;
     std::vector<DeviceBinding>          bindings;
     std::vector<SceneObject>            objects;

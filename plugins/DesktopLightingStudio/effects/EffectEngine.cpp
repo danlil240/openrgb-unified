@@ -6,6 +6,8 @@
 
 #include "EffectEngine.h"
 
+#include "../scene/SceneGraph.h"
+
 namespace studio
 {
 
@@ -17,6 +19,11 @@ void EffectEngine::Evaluate(const SceneDocument& doc, double t,
     {
         return;
     }
+
+    /* One transform graph for renderer and effects: world-space
+       primitives sample each emitter at its resolved position —
+       parent groups included — so a moved group moves its light. */
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
 
     for(const SceneObject& obj : doc.objects)
     {
@@ -37,7 +44,7 @@ void EffectEngine::Evaluate(const SceneDocument& doc, double t,
 
             EvalInput in;
             in.local   = e.local_pos;
-            in.world   = TransformPoint(obj.transform, e.local_pos);
+            in.world   = TransformPoint(world.at(obj.id), e.local_pos);
             in.object  = &obj;
             in.emitter = &e;
             in.t       = t;

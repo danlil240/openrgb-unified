@@ -9,6 +9,7 @@ set JSON=%~dp0..\OpenRGB\dependencies\json
 cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    studio_scene_test.cpp ^
    "%STUDIO%\scene\SceneTypes.cpp" ^
+   "%STUDIO%\scene\SceneGraph.cpp" ^
    "%STUDIO%\scene\EmitterLayout.cpp" ^
    "%STUDIO%\scene\SceneJson.cpp" ^
    "%STUDIO%\scene\BindingResolver.cpp" ^

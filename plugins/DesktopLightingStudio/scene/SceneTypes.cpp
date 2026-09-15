@@ -5,32 +5,17 @@
 \*---------------------------------------------------------*/
 
 #include "SceneTypes.h"
-
-#include <cmath>
+#include "SceneGraph.h"
 
 namespace studio
 {
 
-static Vec3 RotateDeg(const Vec3& p, const Vec3& rot_deg)
-{
-    constexpr float DEG = 3.14159265358979323846f / 180.0f;
-    const float cx = std::cos(rot_deg.x * DEG), sx = std::sin(rot_deg.x * DEG);
-    const float cy = std::cos(rot_deg.y * DEG), sy = std::sin(rot_deg.y * DEG);
-    const float cz = std::cos(rot_deg.z * DEG), sz = std::sin(rot_deg.z * DEG);
-
-    /* Rz * Ry * Rx column-vector convention */
-    Vec3 r;
-    r.x = (cy * cz) * p.x + (sx * sy * cz - cx * sz) * p.y + (cx * sy * cz + sx * sz) * p.z;
-    r.y = (cy * sz) * p.x + (sx * sy * sz + cx * cz) * p.y + (cx * sy * sz - sx * cz) * p.z;
-    r.z = (-sy)     * p.x + (sx * cy) * p.y               + (cx * cy) * p.z;
-    return r;
-}
-
+/* T * Rxyz * S — implemented through LocalMatrix so the quaternion
+   path (RotationQuat) is the single rotation convention for the
+   whole plugin. */
 Vec3 TransformPoint(const Transform& t, const Vec3& p)
 {
-    Vec3 scaled { p.x * t.scale.x, p.y * t.scale.y, p.z * t.scale.z };
-    Vec3 rotated = RotateDeg(scaled, t.rotation_deg);
-    return { rotated.x + t.position.x, rotated.y + t.position.y, rotated.z + t.position.z };
+    return TransformPoint(LocalMatrix(t), p);
 }
 
 const SceneObject* FindObject(const SceneDocument& doc, const std::string& id)

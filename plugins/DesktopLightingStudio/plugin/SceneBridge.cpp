@@ -14,6 +14,7 @@
 
 #include "../scene/DefaultDesk.h"
 #include "../scene/EmitterLayout.h"
+#include "../scene/SceneGraph.h"
 #include "../scene/SceneJson.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
@@ -156,6 +157,7 @@ static QString KindName(ObjectKind kind)
     {
     case ObjectKind::Device: return QStringLiteral("device");
     case ObjectKind::Linked: return QStringLiteral("linked");
+    case ObjectKind::Group:  return QStringLiteral("group");
     default:                 return QStringLiteral("decor");
     }
 }
@@ -163,22 +165,38 @@ static QString KindName(ObjectKind kind)
 QVariantList SceneBridge::objectList() const
 {
     QVariantList out;
-    for(const SceneObject& o : doc.objects)
+    /* Parents precede children: the QML delegate reparents through a
+       node map populated in model order. */
+    for(const SceneObject* po : TopologicalOrder(doc))
     {
+        const SceneObject& o = *po;
         QVariantMap m;
         m["id"]       = QString::fromStdString(o.id);
         m["label"]    = QString::fromStdString(o.label);
         m["kind"]     = KindName(o.kind);
         m["geometry"] = QString::fromStdString(o.geometry);
+        m["parentId"] = QString::fromStdString(o.parent_id);
         m["x"]  = o.transform.position.x;
         m["y"]  = o.transform.position.y;
         m["z"]  = o.transform.position.z;
         m["rx"] = o.transform.rotation_deg.x;
         m["ry"] = o.transform.rotation_deg.y;
         m["rz"] = o.transform.rotation_deg.z;
+        /* The stored XYZ degrees are converted once, here, into the
+           quaternion the QML node binds to `rotation` — same value
+           the core's world matrices use, so preview and effects can
+           never disagree about an object's orientation. */
+        const Quat q = RotationQuat(o.transform.rotation_deg);
+        m["qw"] = q.w;
+        m["qx"] = q.x;
+        m["qy"] = q.y;
+        m["qz"] = q.z;
         m["sx"] = o.transform.scale.x;
         m["sy"] = o.transform.scale.y;
         m["sz"] = o.transform.scale.z;
+        m["dx"] = o.size_m.x;
+        m["dy"] = o.size_m.y;
+        m["dz"] = o.size_m.z;
         m["visible"]  = o.visible;
         m["verified"] = o.verified;
         m["emitters"] = (int)o.emitters.size();
@@ -1210,6 +1228,11 @@ void SceneBridge::setRippleDecayPct(int pct)
 void SceneBridge::rebuildKeyLookup()
 {
     key_pos.clear();
+    /* Resolved world transforms — a keyboard that moved (or whose
+       parent group moved) ripples from where its keys actually are.
+       Any future transform-edit path must rerun this (refreshDevices
+       covers the rebuild for now). */
+    const std::map<std::string, Mat4> world = ResolveWorldMatrices(doc);
     for(const SceneObject& obj : doc.objects)
     {
         if(obj.kind != ObjectKind::Device || obj.layout != "matrix_map"
@@ -1223,7 +1246,7 @@ void SceneBridge::rebuildKeyLookup()
             if(vk >= 0)
             {
                 /* First emitter wins if two LEDs share a name. */
-                key_pos.emplace(vk, TransformPoint(obj.transform, e.local_pos));
+                key_pos.emplace(vk, TransformPoint(world.at(obj.id), e.local_pos));
             }
         }
     }

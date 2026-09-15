@@ -10,22 +10,40 @@ Rectangle {
     property string dbg: ""
     property real camYaw: cameraOrigin.eulerRotation.y
 
-    // Canonical body specs. Decor boxes take their world size from the
-    // object's transform.scale (meters); device bodies use fixed
-    // canonical sizes per geometry type. #Cube/#Cylinder/#Sphere are
-    // 100-unit primitives, so scale = meters / 100.
+    // Canonical body specs. size_m (obj.dx/dy/dz) carries authored
+    // body dimensions in meters — decor bodies require it; device
+    // bodies fall back to per-geometry canonical sizes when it is 0.
+    // #Cube/#Cylinder/#Sphere are 100-unit primitives, so scale =
+    // meters / 100. transform.scale stays dimensionless on the node.
+    function bodySize(obj, canonical) {
+        return obj.dx > 0 ? [obj.dx, obj.dy, obj.dz] : canonical
+    }
     function bodySpec(obj) {
         switch (obj.geometry) {
-        case "desk":          return { src: "#Cube",     size: [obj.sx, obj.sy, obj.sz], c: "#4a3b32" }
-        case "case_shell":    return { src: "#Cube",     size: [obj.sx, obj.sy, obj.sz], c: "#e8e8ec", ghost: true }
-        case "monitor":       return { src: "#Cube",     size: [obj.sx, obj.sy, obj.sz], c: "#0a0a0c" }
-        case "mouse_body":    return { src: "#Cube",     size: [obj.sx, obj.sy, obj.sz], c: "#22222a" }
-        case "gpu_body":      return { src: "#Cube",     size: [obj.sx, obj.sy, obj.sz], c: "#e8e8ec" }
-        case "keyboard_body": return { src: "#Cube",     size: [0.45, 0.03, 0.145],      c: "#1c1c22" }
-        case "fan_body":      return { src: "#Cylinder", size: [0.125, 0.028, 0.125],    c: "#202028" }
-        case "ram_body":      return { src: "#Cube",     size: [0.135, 0.045, 0.008],    c: "#18181f" }
-        case "pump_body":     return { src: "#Cylinder", size: [0.055, 0.045, 0.055],    c: "#22242c" }
+        case "desk":          return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#4a3b32" }
+        case "case_shell":    return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#e8e8ec", ghost: true }
+        case "monitor":       return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#0a0a0c" }
+        case "mouse_body":    return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#22222a" }
+        case "gpu_body":      return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#e8e8ec" }
+        case "keyboard_body": return { src: "#Cube",     size: bodySize(obj, [0.45, 0.03, 0.145]),  c: "#1c1c22" }
+        case "fan_body":      return { src: "#Cylinder", size: bodySize(obj, [0.125, 0.028, 0.125]), c: "#202028" }
+        case "ram_body":      return { src: "#Cube",     size: bodySize(obj, [0.135, 0.045, 0.008]), c: "#18181f" }
+        case "pump_body":     return { src: "#Cylinder", size: bodySize(obj, [0.055, 0.045, 0.055]), c: "#22242c" }
         default:              return null
+        }
+    }
+
+    // object id -> Node. The delegate reparents through this map so
+    // the QML node tree composes exactly like the core's resolved
+    // world matrices (parentWorld * local).
+    property var objNodes: ({})
+    function fixupParents() {
+        var objs = (typeof bridge !== "undefined") ? bridge.objectList : []
+        for (var i = 0; i < objs.length; i++) {
+            var n = objNodes[objs[i].id]
+            if (!n) continue
+            var p = (objs[i].parentId && objNodes[objs[i].parentId])
+            n.parent = p ? p : sceneRoot
         }
     }
 
@@ -70,9 +88,17 @@ Rectangle {
             color: "#9090b0"
         }
 
-        // Scene objects from the bridge
+        // Scene objects from the bridge — one Node per object,
+        // parented per parent_id under this scene root.
+        Node {
+            id: sceneRoot
+
         Repeater3D {
+            id: objRepeater
             model: (typeof bridge !== "undefined") ? bridge.objectList : []
+
+            // New model = new delegate set; drop stale node refs.
+            onModelChanged: root.objNodes = ({})
 
             delegate: Node {
                 id: objNode
@@ -100,10 +126,27 @@ Rectangle {
                 }
 
                 position: Qt.vector3d(obj.x, obj.y, obj.z)
-                eulerRotation: Qt.vector3d(obj.rx, obj.ry, obj.rz)
+                // One shared rotation convention: the core converts the
+                // stored XYZ degrees (Rz*Ry*Rx) into this quaternion —
+                // eulerRotation here would silently apply ZXY instead.
+                rotation: Qt.quaternion(obj.qw, obj.qx, obj.qy, obj.qz)
+                scale: Qt.vector3d(obj.sx, obj.sy, obj.sz)
                 visible: obj.visible
 
-                Component.onCompleted: reloadLayout()
+                Component.onCompleted: {
+                    root.objNodes[obj.id] = objNode
+                    var p = root.objNodes[obj.parentId]
+                    objNode.parent = p ? p : sceneRoot
+                    reloadLayout()
+                    // Last delegate done — repair any parent that was
+                    // created after its child.
+                    if (Object.keys(root.objNodes).length === objRepeater.count)
+                        root.fixupParents()
+                }
+                Component.onDestruction: {
+                    if (root.objNodes[obj.id] === objNode)
+                        delete root.objNodes[obj.id]
+                }
 
                 Connections {
                     target: (typeof bridge !== "undefined") ? bridge : null
@@ -188,6 +231,7 @@ Rectangle {
                     }
                 }
             }
+        }
         }
 
         OrbitCameraController {

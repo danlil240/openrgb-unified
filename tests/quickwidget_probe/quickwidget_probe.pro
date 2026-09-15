@@ -11,6 +11,7 @@ SOURCES += main.cpp \
     $$STUDIO/plugin/SceneBridge.cpp \
     $$STUDIO/output/ControllerAdapter.cpp \
     $$STUDIO/scene/SceneTypes.cpp \
+    $$STUDIO/scene/SceneGraph.cpp \
     $$STUDIO/scene/EmitterLayout.cpp \
     $$STUDIO/scene/SceneJson.cpp \
     $$STUDIO/scene/BindingResolver.cpp \

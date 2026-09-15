@@ -38,20 +38,30 @@ class FakeBridge : public QObject
 public:
     QVariantList objectList() const
     {
+        auto fill = [](QVariantMap& m) {
+            // New-role defaults: root object, identity rotation/scale.
+            m["parentId"]=""; m["qw"]=1.0; m["qx"]=0.0; m["qy"]=0.0; m["qz"]=0.0;
+            m["sx"]=1.0; m["sy"]=1.0; m["sz"]=1.0;
+            m["dx"]=0.0; m["dy"]=0.0; m["dz"]=0.0;
+        };
+
         QVariantMap desk;   desk["id"]="desk";   desk["label"]="Desk"; desk["kind"]="decor";
         desk["geometry"]="desk"; desk["x"]=0.0; desk["y"]=-0.02; desk["z"]=0.1;
-        desk["rx"]=0.0; desk["ry"]=0.0; desk["rz"]=0.0; desk["sx"]=1.4; desk["sy"]=0.04; desk["sz"]=0.75;
+        desk["rx"]=0.0; desk["ry"]=0.0; desk["rz"]=0.0;
         desk["visible"]=true; desk["verified"]=false; desk["emitters"]=0; desk["bound"]="none";
+        fill(desk); desk["dx"]=1.4; desk["dy"]=0.04; desk["dz"]=0.75;
 
         QVariantMap fan;    fan["id"]="case_fans"; fan["label"]="Case fans"; fan["kind"]="device";
         fan["geometry"]="fan_body"; fan["x"]=0.2; fan["y"]=0.1; fan["z"]=0.05;
-        fan["rx"]=90.0; fan["ry"]=0.0; fan["rz"]=0.0; fan["sx"]=1.0; fan["sy"]=1.0; fan["sz"]=1.0;
+        fan["rx"]=90.0; fan["ry"]=0.0; fan["rz"]=0.0;
         fan["visible"]=true; fan["verified"]=true; fan["emitters"]=8; fan["bound"]="ok";
+        fill(fan); fan["qx"]=0.70710678; fan["qw"]=0.70710678;  // +90 deg about X
 
         QVariantMap kbd;    kbd["id"]="keyboard"; kbd["label"]="G512"; kbd["kind"]="device";
         kbd["geometry"]="keyboard_body"; kbd["x"]=-0.1; kbd["y"]=0.02; kbd["z"]=0.25;
-        kbd["rx"]=0.0; kbd["ry"]=0.0; kbd["rz"]=0.0; kbd["sx"]=1.0; kbd["sy"]=1.0; kbd["sz"]=1.0;
+        kbd["rx"]=0.0; kbd["ry"]=0.0; kbd["rz"]=0.0;
         kbd["visible"]=true; kbd["verified"]=true; kbd["emitters"]=21; kbd["bound"]="ok";
+        fill(kbd);
 
         return { desk, fan, kbd };
     }
