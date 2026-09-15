@@ -87,6 +87,10 @@ void DesktopLightingStudio::ProfileManagerUpdated(unsigned int update_reason)
 void DesktopLightingStudio::ResourceManagerUpdated(unsigned int update_reason)
 {
     (void)update_reason;
+    if(tab != nullptr)
+    {
+        tab->OnDevicesChanged();
+    }
 }
 
 void DesktopLightingStudio::SettingsManagerUpdated(unsigned int update_reason)

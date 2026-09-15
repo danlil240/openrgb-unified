@@ -32,6 +32,10 @@ class StudioTab : public QWidget
 public:
     explicit StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent = nullptr);
 
+    /* Called by the plugin on device-list changes — re-resolves
+       scene bindings and refreshes the inspection bar. */
+    void        OnDevicesChanged();
+
 private slots:
     void        AppendResult(const QString& line);
 

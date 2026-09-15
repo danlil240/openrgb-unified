@@ -324,6 +324,13 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     RefreshControllers();
 }
 
+void StudioTab::OnDevicesChanged()
+{
+    /* Only re-resolve bindings — repopulating the inspection bar on
+       every resource signal would wipe the results box. */
+    bridge->refreshDevices();
+}
+
 void StudioTab::PickColor()
 {
     const QColor color = QColorDialog::getColor(Qt::white, this,
