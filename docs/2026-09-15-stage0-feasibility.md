@@ -63,6 +63,22 @@ under `tests\`. Empirically, the same bytes copied with PowerShell
 loadable file. Deploy only through `build-plugin.bat`; never copy the
 plugin DLL with PowerShell.
 
+**SAC verdicts are per-hash.** A blocked DLL stayed blocked even after
+re-copy; the working fix is to relink (`del out\*.dll` + `jom`), which
+embeds a new PE timestamp → new hash → fresh reputation verdict, then
+test-load before deploying:
+
+```powershell
+# signed host probes the verdict without launching OpenRGB
+[System.Runtime.InteropServices.NativeLibrary]::Load($dllPath)
+# throws "Application Control policy has blocked this file" (0x800711C7)
+# when blocked; returns a handle when allowed
+```
+
+Self-signed code signing does NOT satisfy SAC (reputation-based, not
+trust-chain). Roughly half of fresh hashes pass; repeat relink+test
+until allowed, then `xcopy` the exact passing bytes.
+
 **Fixed black View3D:** the plugin loaded and controls worked, but the
 `View3D` rendered black while the QML 2D overlay was fine. Root cause was
 a scene bug, not a platform issue: Qt Quick 3D built-in primitives
