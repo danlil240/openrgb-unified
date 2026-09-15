@@ -2,7 +2,7 @@
 || DesktopLightingStudio.cpp                                 |
 ||                                                           |
 ||   Desktop Lighting Studio — OpenRGB plugin (API 5)        |
-||   Stage 0 probe: Studio tab + Qt Quick 3D scene           |
+||   Stage 1: desk scene + bound devices + static color      |
 ||                                                           |
 ||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
@@ -15,8 +15,8 @@ OpenRGBPluginInfo DesktopLightingStudio::GetPluginInfo()
     OpenRGBPluginInfo info;
 
     info.Name           = "Desktop Lighting Studio";
-    info.Description    = "3D desk scene with mapped real-world lighting (Stage 0 probe)";
-    info.Version        = "0.1.0-stage0";
+    info.Description    = "3D desk scene with mapped real-world lighting";
+    info.Version        = "0.2.0-stage1";
     info.Commit         = "";
     info.URL            = "https://github.com/danlil240/openrgb-unified";
 

@@ -1,9 +1,8 @@
 #-----------------------------------------------------------
 # Desktop Lighting Studio — OpenRGB API-5 plugin
 #
-# Stage 0 probe: minimal Studio tab hosting a Qt Quick 3D
-# scene inside a QWidget, used to validate rendering,
-# picking, and packaged QML module loading in the host.
+# Stage 1: scene-model-driven desk view with bound devices,
+# emitter rendering, static color control, and live output.
 #-----------------------------------------------------------
 
 QT          += core gui widgets quick quickwidgets quick3d
@@ -22,11 +21,25 @@ INCLUDEPATH += \
 
 HEADERS += \
     plugin/DesktopLightingStudio.h \
-    plugin/StudioTab.h
+    plugin/StudioTab.h \
+    plugin/SceneBridge.h \
+    output/ControllerAdapter.h \
+    scene/SceneTypes.h \
+    scene/EmitterLayout.h \
+    scene/SceneJson.h \
+    scene/BindingResolver.h \
+    scene/DefaultDesk.h
 
 SOURCES += \
     plugin/DesktopLightingStudio.cpp \
-    plugin/StudioTab.cpp
+    plugin/StudioTab.cpp \
+    plugin/SceneBridge.cpp \
+    output/ControllerAdapter.cpp \
+    scene/SceneTypes.cpp \
+    scene/EmitterLayout.cpp \
+    scene/SceneJson.cpp \
+    scene/BindingResolver.cpp \
+    scene/DefaultDesk.cpp
 
 RESOURCES += \
     ui/studio.qrc

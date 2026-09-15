@@ -1,16 +1,18 @@
 /*---------------------------------------------------------*\
 || StudioTab.cpp                                             |
 ||                                                           |
-||   Studio tab widget — hosts a QQuickWidget running the    |
-||   Stage 0 Qt Quick 3D probe scene inside a QWidget tab,   |
-||   plus minimal device-inspection controls used to gather  |
-||   the Stage 0 capability/rate snapshot.                   |
+||   Studio tab widget — hosts a QQuickWidget running the   |
+||   desk scene (Stage 1) plus device-inspection controls   |
+||   kept from the Stage 0 probe for calibration.           |
 ||                                                           |
 ||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
 #include "StudioTab.h"
+#include "SceneBridge.h"
 
+#include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QElapsedTimer>
 #include <QFileInfo>
@@ -18,17 +20,20 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QSlider>
 #include <QThread>
 #include <QTimer>
-#include <QImage>
 #include <QVBoxLayout>
 
 #include <chrono>
 #include <thread>
+#include <QMutex>
+#include <QMutexLocker>
 
 #include "OpenRGBPluginInterface.h"
 
@@ -37,8 +42,8 @@
 #endif
 
 /*---------------------------------------------------------*\
-| Directory containing this plugin DLL. Packaged QML        |
-| modules are deployed beside it in a "qml" subfolder.      |
+|| Directory containing this plugin DLL. Packaged QML        |
+|| modules are deployed beside it in a "qml" subfolder.      |
 \*---------------------------------------------------------*/
 static QString PluginDirectory()
 {
@@ -57,6 +62,10 @@ static QString PluginDirectory()
 #endif
     return QString();
 }
+
+/* Serializes this tab's controller writes (flash/measure). The bridge's
+   live push uses its own mutex; stop other effect writers first. */
+static QMutex g_io_mutex;
 
 static const char* GraphicsApiName(QSGRendererInterface::GraphicsApi api)
 {
@@ -77,16 +86,19 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     : QWidget(parent)
     , api(plugin_api)
 {
+    bridge = new studio::SceneBridge(plugin_api, this);
+
     QVBoxLayout* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
     /*-----------------------------------------------------*\
-    | 3D probe viewport                                     |
+    | 3D desk viewport                                      |
     \*-----------------------------------------------------*/
     quick_widget = new QQuickWidget(this);
     quick_widget->setResizeMode(QQuickWidget::SizeRootObjectToView);
     quick_widget->setMinimumHeight(320);
+    quick_widget->rootContext()->setContextProperty("bridge", bridge);
 
     const QString plugin_dir = PluginDirectory();
     if(!plugin_dir.isEmpty())
@@ -107,6 +119,46 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     }
 
     /*-----------------------------------------------------*\
+    | Scene control row                                     |
+    \*-----------------------------------------------------*/
+    QWidget*     scene_bar  = new QWidget(this);
+    QHBoxLayout* scene_row  = new QHBoxLayout(scene_bar);
+    scene_row->setContentsMargins(8, 4, 8, 4);
+
+    selection_label = new QLabel(QStringLiteral("(nothing selected)"), scene_bar);
+    selection_label->setMinimumWidth(220);
+
+    color_btn = new QPushButton(QStringLiteral("Color…"), scene_bar);
+    color_btn->setEnabled(false);
+
+    brightness_slider = new QSlider(Qt::Horizontal, scene_bar);
+    brightness_slider->setRange(0, 100);
+    brightness_slider->setValue(100);
+    brightness_slider->setMaximumWidth(120);
+
+    live_check = new QCheckBox(QStringLiteral("Live output"), scene_bar);
+    QCheckBox* ghost_check = new QCheckBox(QStringLiteral("Ghost case"), scene_bar);
+
+    QPushButton* undo_btn = new QPushButton(QStringLiteral("Undo"), scene_bar);
+    QPushButton* redo_btn = new QPushButton(QStringLiteral("Redo"), scene_bar);
+    QPushButton* save_btn = new QPushButton(QStringLiteral("Save"), scene_bar);
+    QPushButton* load_btn = new QPushButton(QStringLiteral("Load"), scene_bar);
+    QPushButton* reset_btn = new QPushButton(QStringLiteral("Reset"), scene_bar);
+
+    scene_row->addWidget(selection_label);
+    scene_row->addWidget(color_btn);
+    scene_row->addWidget(new QLabel(QStringLiteral("Brightness"), scene_bar));
+    scene_row->addWidget(brightness_slider);
+    scene_row->addWidget(live_check);
+    scene_row->addWidget(ghost_check);
+    scene_row->addStretch(1);
+    scene_row->addWidget(undo_btn);
+    scene_row->addWidget(redo_btn);
+    scene_row->addWidget(save_btn);
+    scene_row->addWidget(load_btn);
+    scene_row->addWidget(reset_btn);
+
+    /*-----------------------------------------------------*\
     | Device-inspection bar (Stage 0 measurements)          |
     \*-----------------------------------------------------*/
     QWidget*        bar     = new QWidget(this);
@@ -118,6 +170,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     QPushButton* refresh_btn = new QPushButton(QStringLiteral("Refresh"), bar);
     QPushButton* flash_btn   = new QPushButton(QStringLiteral("Flash zone 4s"), bar);
     QPushButton* measure_btn = new QPushButton(QStringLiteral("Measure write latency"), bar);
+    QPushButton* bindings_btn = new QPushButton(QStringLiteral("Bindings"), bar);
 
     controller_combo->setMinimumWidth(260);
     zone_combo->setMinimumWidth(180);
@@ -127,6 +180,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     bar_row->addWidget(refresh_btn);
     bar_row->addWidget(flash_btn);
     bar_row->addWidget(measure_btn);
+    bar_row->addWidget(bindings_btn);
     bar_row->addStretch(1);
 
     results_box = new QPlainTextEdit(this);
@@ -138,14 +192,67 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     status_label->setStyleSheet("QLabel { background: #18181c; color: #9a9aa5; padding: 4px 8px; }");
 
     layout->addWidget(quick_widget, 1);
+    layout->addWidget(scene_bar);
     layout->addWidget(bar);
     layout->addWidget(results_box);
     layout->addWidget(status_label);
 
     /*-----------------------------------------------------*\
-    | Wiring                                                |
+    | Scene wiring                                          |
     \*-----------------------------------------------------*/
-    connect(refresh_btn, &QPushButton::clicked, this, [this]() { RefreshControllers(); });
+    connect(color_btn, &QPushButton::clicked, this, [this]() { PickColor(); });
+
+    connect(brightness_slider, &QSlider::valueChanged,
+            bridge, &studio::SceneBridge::setBrightnessPct);
+    connect(live_check, &QCheckBox::toggled,
+            bridge, &studio::SceneBridge::setLive);
+    connect(ghost_check, &QCheckBox::toggled,
+            bridge, &studio::SceneBridge::setCaseGhost);
+    connect(undo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::undo);
+    connect(redo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::redo);
+    connect(save_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::saveScene);
+    connect(load_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::loadScene);
+    connect(reset_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::resetScene);
+
+    connect(bridge, &studio::SceneBridge::selectionChanged, this, [this]()
+    {
+        const QVariantMap info = bridge->objectInfo(bridge->selectedId());
+        if(info.isEmpty())
+        {
+            selection_label->setText(QStringLiteral("(nothing selected)"));
+            color_btn->setEnabled(false);
+            return;
+        }
+        const bool writable = info.value("writable").toBool();
+        QString note;
+        if(!info.value("bound").toBool())
+        {
+            note = QStringLiteral(" — ") + info.value("reason").toString();
+        }
+        else if(!writable)
+        {
+            note = QStringLiteral(" — unverified, writes off");
+        }
+        selection_label->setText(info.value("label").toString() + note);
+        color_btn->setEnabled(info.value("kind").toString() != "decor");
+    });
+
+    connect(bridge, &studio::SceneBridge::statusMessage,
+            this, [this](const QString& line) { AppendResult(line); });
+
+    connect(bridge, &studio::SceneBridge::statusChanged, this, [this]()
+    {
+        status_label->setText(bridge->statusText());
+    });
+
+    /*-----------------------------------------------------*\
+    | Device-inspection wiring                              |
+    \*-----------------------------------------------------*/
+    connect(refresh_btn, &QPushButton::clicked, this, [this]()
+    {
+        RefreshControllers();
+        bridge->refreshDevices();
+    });
 
     connect(controller_combo, &QComboBox::currentIndexChanged, this, [this](int)
     {
@@ -168,6 +275,10 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
 
     connect(flash_btn, &QPushButton::clicked, this, [this]() { FlashSelectedZone(); });
     connect(measure_btn, &QPushButton::clicked, this, [this]() { MeasureWriteLatency(); });
+    connect(bindings_btn, &QPushButton::clicked, this, [this]()
+    {
+        AppendResult(bridge->bindingReport());
+    });
 
     /*-----------------------------------------------------*\
     | QML status reporting                                  |
@@ -178,7 +289,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         {
             QSGRendererInterface* rhi = quick_widget->quickWindow()->rendererInterface();
             const char* api_name = rhi ? GraphicsApiName(rhi->graphicsApi()) : "Unknown";
-            status_label->setText(QStringLiteral("Qt Quick 3D probe ready - RHI backend: %1 - drag to orbit, scroll to zoom, click a part")
+            status_label->setText(QStringLiteral("Studio ready - RHI backend: %1 - drag to orbit, scroll to zoom, click a part")
                                   .arg(QString::fromLatin1(api_name)));
         }
         else if(status == QQuickWidget::Error)
@@ -198,32 +309,6 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         AppendResult(QStringLiteral("sceneGraphError %1: %2").arg((int)error).arg(message));
     });
 
-    /* Framebuffer probe: after the scene settles, grab a frame and count
-       lit pixels to distinguish a live View3D from a black render. */
-    QTimer::singleShot(2500, this, [this]()
-    {
-        if(quick_widget->quickWindow() == nullptr)
-        {
-            AppendResult(QStringLiteral("fb probe: no quick window"));
-            return;
-        }
-        QImage frame = quick_widget->grabFramebuffer();
-        long lit = 0;
-        for(int y = 0; y < frame.height(); y += 8)
-        {
-            for(int x = 0; x < frame.width(); x += 8)
-            {
-                const QRgb px = frame.pixel(x, y);
-                if(qRed(px) > 40 || qGreen(px) > 40 || qBlue(px) > 40)
-                {
-                    lit++;
-                }
-            }
-        }
-        AppendResult(QStringLiteral("fb probe: %1x%2, lit samples=%3 (nonzero = scene renders)")
-                     .arg(frame.width()).arg(frame.height()).arg(lit));
-    });
-
     if(quick_widget->status() == QQuickWidget::Error)
     {
         report_qml(QQuickWidget::Error);
@@ -233,7 +318,21 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         connect(quick_widget, &QQuickWidget::statusChanged, this, report_qml);
     }
 
+    /* Restore the saved scene if one exists. */
+    bridge->loadScene();
+
     RefreshControllers();
+}
+
+void StudioTab::PickColor()
+{
+    const QColor color = QColorDialog::getColor(Qt::white, this,
+                                                QStringLiteral("Object color"));
+    if(color.isValid())
+    {
+        bridge->setPaintColor(color);
+        bridge->setSelectedColor(color);
+    }
 }
 
 void StudioTab::RefreshControllers()
@@ -277,8 +376,8 @@ void StudioTab::RefreshControllers()
 }
 
 /*---------------------------------------------------------*\
-| Flash a low-brightness identification pattern on the      |
-| selected zone (red/black alternating, ~4 s).              |
+|| Flash a low-brightness identification pattern on the      |
+|| selected zone (red/black alternating, ~4 s).              |
 \*---------------------------------------------------------*/
 void StudioTab::FlashSelectedZone()
 {
@@ -298,6 +397,7 @@ void StudioTab::FlashSelectedZone()
 
     std::thread([this, ctrl, zone_idx]()
     {
+        QMutexLocker io_lock(&g_io_mutex);
         const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
         for(int i = 0; i < 8; i++)
         {
@@ -315,9 +415,9 @@ void StudioTab::FlashSelectedZone()
 }
 
 /*---------------------------------------------------------*\
-| Measure per-zone UpdateZoneLEDs() wall time on a worker   |
-| thread; reports avg/max ms and implied max update rate.   |
-| Zones whose active mode lacks per-LED color are skipped.  |
+|| Measure per-zone UpdateZoneLEDs() wall time on a worker   |
+|| thread; reports avg/max ms and implied max update rate.   |
+|| Zones whose active mode lacks per-LED color are skipped.  |
 \*---------------------------------------------------------*/
 void StudioTab::MeasureWriteLatency()
 {
@@ -352,6 +452,7 @@ void StudioTab::MeasureWriteLatency()
                 }
                 else
                 {
+                    QMutexLocker io_lock(&g_io_mutex);
                     QElapsedTimer timer;
                     qint64 total = 0;
                     qint64 worst = 0;
