@@ -182,7 +182,11 @@ inline unsigned int FieldU32(const nlohmann::json& j, const char* key,
         return (unsigned int)u;
     }
     const long long s = v.get<long long>();
-    if(s < 0)
+    /* Bound BOTH ends like FieldI32: a positive value can arrive on
+       the signed path too (programmatic json(long long), or a binary
+       format deserializer) — without the upper check the narrowing
+       (unsigned int) cast wraps it into a silently-wrong field. */
+    if(s < 0 || s > 4294967295ll)
     {
         AddErr(errs, path + "." + key,
                "expected unsigned integer in 0..4294967295");

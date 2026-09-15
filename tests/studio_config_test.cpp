@@ -711,6 +711,29 @@ static void TestEffectsSection()
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
               "effects: negative seed rejected");
     }
+    /* Signed-integer path: a positive value stored as number_integer
+       (json(long long), binary-format deserializers) must still hit
+       the upper bound — the old check only rejected s < 0 and let
+       (unsigned int)s wrap it into a silently-wrong seed. */
+    {
+        json j = good;
+        j["effects"]["seed"] = 5000000000ll; /* signed, > UINT32_MAX */
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
+              "effects: signed seed > UINT32_MAX rejected");
+    }
+    {
+        /* Same bound via the text parser — a plain 5000000000
+           literal on disk must be rejected whichever integer type
+           the parser yields for it. */
+        json j = good;
+        j["effects"]["seed"] = json::parse("5000000000");
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
+              "effects: text 5000000000 seed rejected");
+    }
 
     /* effects.layers is reserved for milestone 5 — retained
        verbatim like definitions/extensions, never dropped. */

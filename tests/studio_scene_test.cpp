@@ -1525,6 +1525,22 @@ static void TestEffectSeedBounds()
     errors.clear();
     CHECK(!FromJson(j, back, &errors), "seed: negative rejected");
 
+    /* Signed-integer path: a positive value stored as number_integer
+       (json(long long), binary-format deserializers) must still hit
+       the upper bound — the old check only rejected s < 0 and let
+       (unsigned int)s wrap 5000000000 into a silently-wrong seed. */
+    j["effect"]["seed"] = 5000000000ll; /* signed, > UINT32_MAX */
+    errors.clear();
+    CHECK(!FromJson(j, back, &errors) && errors.size() > 0,
+          "seed: signed > UINT32_MAX rejected");
+
+    /* Same bound via the text parser — a plain 5000000000 literal
+       on disk must be rejected whichever integer type it lands on. */
+    j["effect"]["seed"] = nlohmann::json::parse("5000000000");
+    errors.clear();
+    CHECK(!FromJson(j, back, &errors) && errors.size() > 0,
+          "seed: text 5000000000 rejected");
+
     j["effect"]["seed"] = 1.5;
     errors.clear();
     CHECK(!FromJson(j, back, &errors), "seed: non-integer rejected");
