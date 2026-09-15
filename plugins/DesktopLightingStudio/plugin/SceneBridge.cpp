@@ -91,7 +91,12 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     , undo_stack(new QUndoStack(this))
 {
     play_timer = new QTimer(this);
-    play_timer->setInterval(33);
+    /* PreciseTimer: a coarse WM_TIMER quantizes to the ~15.6 ms
+       Windows system tick, so a 33 ms request fires at ~31/47 ms
+       irregularly — visible judder even though play_t uses real
+       elapsed time. ~60 fps at ~1 ms cadence instead. */
+    play_timer->setTimerType(Qt::PreciseTimer);
+    play_timer->setInterval(16);
     connect(play_timer, &QTimer::timeout, this, &SceneBridge::tick);
     play_clock = new QElapsedTimer();
 
@@ -383,6 +388,49 @@ void SceneBridge::setLive(bool on)
     }
 }
 
+void SceneBridge::pausePushes()
+{
+    /* Called on the probe's worker thread: setLive must run on the
+       GUI thread so liveChanged/property notifies stay there. */
+    if(QThread::currentThread() == thread())
+    {
+        probe_was_live = live_output;
+        setLive(false);
+    }
+    else
+    {
+        QMetaObject::invokeMethod(this, [this]()
+        {
+            probe_was_live = live_output;
+            setLive(false);
+        }, Qt::BlockingQueuedConnection);
+    }
+
+    /* Once live_output is false no new push can start — schedulePush,
+       scheduleLane, pushLive, and pushLiveAll all gate on it. Holding
+       both lane mutexes for the probe's duration drains in-flight
+       workers and blocks any straggler that slipped the gate. */
+    probe_lane_locks[0] = std::make_unique<std::unique_lock<QMutex>>(io_mutex);
+    probe_lane_locks[1] = std::make_unique<std::unique_lock<QMutex>>(fast_io_mutex);
+}
+
+void SceneBridge::resumePushes()
+{
+    probe_lane_locks[0].reset();
+    probe_lane_locks[1].reset();
+
+    const bool restore = probe_was_live;
+    if(QThread::currentThread() == thread())
+    {
+        setLive(restore);
+    }
+    else
+    {
+        QMetaObject::invokeMethod(this, [this, restore]() { setLive(restore); },
+                                  Qt::QueuedConnection);
+    }
+}
+
 void SceneBridge::setCaseGhost(bool on)
 {
     if(case_ghost == on)
@@ -554,6 +602,10 @@ void SceneBridge::rebuildEffect()
         }
     }
     engine.SetLayers(layers);
+    /* New layers may produce an identical first frame (or an empty
+       one where the static-scene push path runs) — the next tick
+       must emit + push regardless of the identical-frame skip. */
+    frame_sent = false;
 }
 
 void SceneBridge::playPreset(const QString& presetId)
@@ -608,9 +660,10 @@ void SceneBridge::setPlaying(bool on)
         {
             rebuildEffect();
         }
+        frame_sent = false;   /* first tick always repaints + pushes */
         play_clock->start();
         play_timer->start();
-        tick();     /* evaluate immediately — don't wait 33 ms */
+        tick();     /* evaluate immediately — don't wait for the timer */
     }
     else
     {
@@ -694,8 +747,17 @@ void SceneBridge::tick()
     }
 
     engine.Evaluate(doc, play_t.load(), frame, &in);
-    emitFrameChanged();
-    schedulePush();
+
+    /* An identical frame skips repaint + push — a static preset (or
+       a silent reactive one) would otherwise re-write every device
+       at the full tick rate for zero visible change. */
+    if(!frame_sent || frame != last_frame)
+    {
+        last_frame = frame;
+        frame_sent = true;
+        emitFrameChanged();
+        schedulePush();
+    }
 
     /* Surface provider state transitions (listening / capture
        unavailable / off) without spamming repeats. */
@@ -799,6 +861,37 @@ void SceneBridge::scheduleLane(int lane)
         again = true;
         return;
     }
+    if(!live_output)
+    {
+        /* Re-armed after live went off (probe or user): drop the
+           push instead of spawning a worker that would write late. */
+        in_flight = false;
+        return;
+    }
+    /* Most ticks find every binding still inside its pacing budget —
+       don't spawn a worker for an empty sweep. Lane membership and
+       due checks mirror runPushLane; the worker re-checks anyway, so
+       a stale read only costs a harmless spawn, never a wrong write. */
+    {
+        QMutexLocker pl(&pace_mutex);
+        const auto now = std::chrono::steady_clock::now();
+        bool any_due = false;
+        for(const DeviceBinding& b : doc.bindings)
+        {
+            const PushPace& p = push_pace[b.id];
+            const int eff = (p.lane < 0) ? 1 : p.lane;
+            if((BindingIsI2C(b.id) ? 1 : eff) == lane && p.due_after <= now)
+            {
+                any_due = true;
+                break;
+            }
+        }
+        if(!any_due)
+        {
+            in_flight = false;
+            return;
+        }
+    }
     const SceneDocument doc_copy   = doc;
     const FrameColors   frame_copy = frame;
     std::thread([this, lane, doc_copy, frame_copy]()
@@ -837,7 +930,9 @@ double SceneBridge::BindingMinPace(const std::string& binding_id) const
     {
         return 280.0;
     }
-    return 33.0;
+    /* Fast transports may update at the ~60 fps tick rate; the
+       measured-cost budget still throttles anything slower. */
+    return 16.0;
 }
 
 void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
@@ -879,7 +974,11 @@ void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
             QMutexLocker pl(&pace_mutex);
             pace->budget_ms = std::min(750.0,
                 std::max(pace->min_pace_ms, cost * 1.3));
-            pace->due_after = t1 + std::chrono::milliseconds((long long)pace->budget_ms);
+            /* Period-based pacing: the write's own duration counts
+               toward the budget, so a fast device reaches ~60 Hz
+               instead of cost+33 ms. Rest after the write is still
+               >= 30% of its cost, so the bus is never saturated. */
+            pace->due_after = t0 + std::chrono::milliseconds((long long)pace->budget_ms);
             pace->lane      = i2c ? 1 : (cost > 80.0 ? 1 : (cost < 40.0 ? 0 : eff));
         }
         if(!e.empty() && e.find("no mapped emitters") == std::string::npos)

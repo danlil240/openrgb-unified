@@ -620,18 +620,22 @@ void StudioTab::FlashSelectedZone()
 
     std::thread([this, ctrl, zone_idx]()
     {
-        QMutexLocker io_lock(&g_io_mutex);
-        const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
-        for(int i = 0; i < 8; i++)
+        bridge->pausePushes();
         {
-            const RGBColor color = (i % 2 == 0) ? ToRGBColor(64, 0, 0) : 0;
-            for(unsigned int l = 0; l < leds; l++)
+            QMutexLocker io_lock(&g_io_mutex);
+            const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
+            for(int i = 0; i < 8; i++)
             {
-                ctrl->SetColor(ctrl->GetZoneStartIndex(zone_idx) + l, color);
+                const RGBColor color = (i % 2 == 0) ? ToRGBColor(64, 0, 0) : 0;
+                for(unsigned int l = 0; l < leds; l++)
+                {
+                    ctrl->SetColor(ctrl->GetZoneStartIndex(zone_idx) + l, color);
+                }
+                ctrl->UpdateZoneLEDs(zone_idx);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
-            ctrl->UpdateZoneLEDs(zone_idx);
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
+        bridge->resumePushes();
         QMetaObject::invokeMethod(status_label, "setText", Qt::QueuedConnection,
                                   Q_ARG(QString, QStringLiteral("flash done")));
     }).detach();
@@ -640,7 +644,10 @@ void StudioTab::FlashSelectedZone()
 /*---------------------------------------------------------*\
 || Measure per-zone UpdateZoneLEDs() wall time on a worker   |
 || thread; reports avg/max ms and implied max update rate.   |
-|| Zones whose active mode lacks per-LED color are skipped.  |
+|| Zones not already in a per-LED color mode are switched    |
+|| into one for the measurement (mirroring EnsurePerLedMode) |
+|| and the previous mode is restored afterwards. Zones with |
+|| no per-LED mode at all are reported with the active mode. |
 \*---------------------------------------------------------*/
 void StudioTab::MeasureWriteLatency()
 {
@@ -656,47 +663,188 @@ void StudioTab::MeasureWriteLatency()
     QThread* worker = QThread::create([this, snapshot]()
     {
         constexpr int SAMPLES = 15;
-        for(RGBControllerInterface* ctrl : snapshot)
+
+        /* Exclusive hardware access: live pushes pause and drain
+           until resumePushes() at the end of the run. */
+        bridge->pausePushes();
+
+        auto emit_line = [this](const QString& head, RGBControllerInterface* ctrl,
+                                unsigned int z, const QString& tail)
         {
-            QString head = QStringLiteral("%1").arg(QString::fromStdString(ctrl->GetName()));
-            for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+            const QString line = QStringLiteral("%1 |   zone %2 %3 (%4 LEDs): %5")
+                                 .arg(head)
+                                 .arg(z)
+                                 .arg(QString::fromStdString(ctrl->GetZoneName(z)))
+                                 .arg(ctrl->GetZoneLEDsCount(z))
+                                 .arg(tail);
+            QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
+                                      Q_ARG(QString, line));
+        };
+
+        auto sample_zone = [this, &emit_line](const QString& head,
+                                            RGBControllerInterface* ctrl,
+                                            unsigned int z, const QString& mode_note)
+        {
+            /* Alternate two dim colors per sample so drivers can't
+               dedup an unchanged buffer; restore the colors after. */
+            const unsigned int leds  = ctrl->GetZoneLEDsCount(z);
+            const unsigned int start = ctrl->GetZoneStartIndex(z);
+            std::vector<RGBColor> saved(leds);
+            for(unsigned int l = 0; l < leds; l++)
             {
-                const int active = ctrl->GetZoneActiveMode(z);
-                const unsigned int flags = (active >= 0) ? ctrl->GetZoneModeFlags(z, active) : 0;
+                saved[l] = ctrl->GetZoneColor(z, l);
+            }
 
-                QString line = QStringLiteral("  zone %0 %1 (%2 LEDs): ")
-                               .arg(z)
-                               .arg(QString::fromStdString(ctrl->GetZoneName(z)))
-                               .arg(ctrl->GetZoneLEDsCount(z));
-
-                if(!(flags & MODE_FLAG_HAS_PER_LED_COLOR))
+            QElapsedTimer timer;
+            qint64 total = 0;
+            qint64 best  = -1;
+            qint64 worst = 0;
+            for(int s = 0; s < SAMPLES; s++)
+            {
+                const RGBColor c = (s & 1) ? ToRGBColor(0, 0, 24)
+                                          : ToRGBColor(24, 0, 0);
+                for(unsigned int l = 0; l < leds; l++)
                 {
-                    line += QStringLiteral("skipped - active mode has no per-LED color");
+                    ctrl->SetColor(start + l, c);
                 }
-                else
+                timer.start();
+                ctrl->UpdateZoneLEDs(z);
+                const qint64 ms = timer.elapsed();
+                total += ms;
+                worst  = qMax(worst, ms);
+                if(best < 0 || ms < best)
                 {
-                    QMutexLocker io_lock(&g_io_mutex);
-                    QElapsedTimer timer;
-                    qint64 total = 0;
-                    qint64 worst = 0;
-                    for(int s = 0; s < SAMPLES; s++)
+                    best = ms;
+                }
+            }
+            for(unsigned int l = 0; l < leds; l++)
+            {
+                ctrl->SetColor(start + l, saved[l]);
+            }
+            ctrl->UpdateZoneLEDs(z);
+
+            const double avg = (double)total / SAMPLES;
+            QString tail = mode_note + QStringLiteral("avg %1 ms, min %2 ms, max %3 ms, ~%4 updates/s")
+                           .arg(avg, 0, 'f', 1)
+                           .arg(best)
+                           .arg(worst)
+                           .arg(avg > 0.0 ? QString::number(1000.0 / avg, 'f', 0)
+                                          : QStringLiteral("inf"));
+            if(ctrl->GetLocation().rfind("Wireless:", 0) == 0)
+            {
+                tail += QStringLiteral("  (enqueue only - tx on ~300 ms poll)");
+            }
+            emit_line(head, ctrl, z, tail);
+        };
+
+        for(size_t ci = 0; ci < snapshot.size(); ci++)
+        {
+            RGBControllerInterface* ctrl = snapshot[ci];
+            const QString head = QStringLiteral("[%1] %2")
+                                 .arg(ci)
+                                 .arg(QString::fromStdString(ctrl->GetName()));
+
+            if(ctrl->SupportsPerZoneModes())
+            {
+                /* Per-zone modes: switch and restore each zone. */
+                for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+                {
+                    const int prev = ctrl->GetZoneActiveMode(z);
+
+                    int per_led = -1;
+                    for(unsigned int m = 0; m < ctrl->GetZoneModeCount(z); m++)
                     {
-                        timer.start();
-                        ctrl->UpdateZoneLEDs(z);
-                        const qint64 ms = timer.elapsed();
-                        total += ms;
-                        worst = qMax(worst, ms);
+                        if(ctrl->GetZoneModeFlags(z, m) & MODE_FLAG_HAS_PER_LED_COLOR)
+                        {
+                            per_led = (int)m;
+                            break;
+                        }
                     }
-                    const double avg = (double)total / SAMPLES;
-                    line += QStringLiteral("avg %1 ms, max %2 ms, ~%3 updates/s")
-                            .arg(avg, 0, 'f', 1)
-                            .arg(worst)
-                            .arg(avg > 0.0 ? QString::number(1000.0 / avg, 'f', 0) : QStringLiteral("inf"));
+
+                    if(per_led < 0)
+                    {
+                        emit_line(head, ctrl, z,
+                                  (prev >= 0)
+                                  ? QStringLiteral("skipped - mode '%1', no per-LED mode available")
+                                    .arg(QString::fromStdString(ctrl->GetZoneModeName(z, prev)))
+                                  : QStringLiteral("skipped - no modes on this zone"));
+                        continue;
+                    }
+
+                    const QString prev_name = (prev >= 0)
+                        ? QStringLiteral("'%1'")
+                          .arg(QString::fromStdString(ctrl->GetZoneModeName(z, prev)))
+                        : QStringLiteral("(none)");
+                    const QString note = (prev == per_led)
+                        ? QStringLiteral("mode '%1': ")
+                          .arg(QString::fromStdString(ctrl->GetZoneModeName(z, per_led)))
+                        : QStringLiteral("mode %1 -> '%2': ")
+                          .arg(prev_name)
+                          .arg(QString::fromStdString(ctrl->GetZoneModeName(z, per_led)));
+
+                    QMutexLocker io_lock(&g_io_mutex);
+                    if(prev != per_led)
+                    {
+                        ctrl->SetZoneActiveMode(z, per_led);
+                    }
+                    sample_zone(head, ctrl, z, note);
+                    if(prev != per_led)
+                    {
+                        ctrl->SetZoneActiveMode(z, prev);
+                    }
                 }
-                QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
-                                          Q_ARG(QString, head + QStringLiteral(" | ") + line));
+            }
+            else
+            {
+                /* Device-level modes: one switch covers all zones. */
+                const int prev = ctrl->GetActiveMode();
+
+                int per_led = -1;
+                for(unsigned int m = 0; m < ctrl->GetModeCount(); m++)
+                {
+                    if(ctrl->GetModeFlags(m) & MODE_FLAG_HAS_PER_LED_COLOR)
+                    {
+                        per_led = (int)m;
+                        break;
+                    }
+                }
+
+                if(per_led < 0)
+                {
+                    const QString tail = (ctrl->GetModeCount() > 0)
+                        ? QStringLiteral("skipped - device mode '%1', no per-LED mode available")
+                          .arg(QString::fromStdString(ctrl->GetModeName(prev)))
+                        : QStringLiteral("skipped - device has no modes");
+                    for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+                    {
+                        emit_line(head, ctrl, z, tail);
+                    }
+                    continue;
+                }
+
+                const QString note = (prev == per_led)
+                    ? QStringLiteral("mode '%1': ")
+                      .arg(QString::fromStdString(ctrl->GetModeName(per_led)))
+                    : QStringLiteral("mode '%1' -> '%2': ")
+                      .arg(QString::fromStdString(ctrl->GetModeName(prev)))
+                      .arg(QString::fromStdString(ctrl->GetModeName(per_led)));
+
+                QMutexLocker io_lock(&g_io_mutex);
+                if(prev != per_led)
+                {
+                    ctrl->SetActiveMode(per_led);
+                }
+                for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+                {
+                    sample_zone(head, ctrl, z, note);
+                }
+                if(prev != per_led)
+                {
+                    ctrl->SetActiveMode(prev);
+                }
             }
         }
+        bridge->resumePushes();
         QMetaObject::invokeMethod(status_label, "setText", Qt::QueuedConnection,
                                   Q_ARG(QString, QStringLiteral("measurement complete")));
     });

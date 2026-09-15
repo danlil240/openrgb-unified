@@ -27,6 +27,8 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 
 class OpenRGBPluginAPIInterface;
@@ -100,6 +102,14 @@ public:
     Q_INVOKABLE QVariantMap objectInfo(const QString& objectId) const;
     Q_INVOKABLE QString     bindingReport() const;
 
+    /* Probe support — StudioTab's flash/latency tools call these
+       from their worker thread for exclusive hardware access.
+       pausePushes() flips live off on the GUI thread, then holds
+       both lane mutexes so no push worker can write until
+       resumePushes() releases them and restores the prior state. */
+    void pausePushes();
+    void resumePushes();
+
 public slots:
     void select(const QString& objectId);
     void setSelectedColor(const QColor& color);
@@ -168,8 +178,8 @@ private:
     void scheduleLane(int lane);           /* spawn a lane push worker    */
     void runPushLane(int lane, const SceneDocument& dc,
                      const FrameColors& fc);           /* worker: due sweep */
-    bool BindingIsI2C(const std::string& binding_id) const; /* worker only */
-    double BindingMinPace(const std::string& binding_id) const; /* worker only */
+    bool BindingIsI2C(const std::string& binding_id) const;   /* read-only; UI + workers */
+    double BindingMinPace(const std::string& binding_id) const; /* read-only; UI + workers */
     void emitFrameChanged();               /* emittersChanged for frame   */
 
     void rebuildMatrixLayouts();
@@ -194,6 +204,8 @@ private:
        input providers read it (via the bus clock) off the UI thread. */
     EffectEngine                engine;
     FrameColors                 frame;
+    FrameColors                 last_frame;   /* last emitted+pushed frame  */
+    bool                        frame_sent  = false;
     QTimer*                     play_timer  = nullptr;
     QElapsedTimer*              play_clock  = nullptr;
     std::atomic<double>         play_t      { 0.0 };
@@ -203,13 +215,14 @@ private:
        anything not yet measured; lane 0 owns measured-fast USB/HID
        bindings. Each lane keeps newest-frame coalescing and paces its
        bindings independently — a binding's budget is its measured
-       write cost * 1.3 (clamped 33..750 ms), and 40/80 ms hysteresis
-       migrates non-I2C bindings between lanes. */
+       write cost * 1.3 (clamped 16..750 ms) counted from the write's
+       start, and 40/80 ms hysteresis migrates non-I2C bindings
+       between lanes. */
     struct PushPace
     {
         std::chrono::steady_clock::time_point due_after {};
-        double                              budget_ms   = 33.0;
-        double                              min_pace_ms = 33.0;
+        double                              budget_ms   = 16.0;
+        double                              min_pace_ms = 16.0;
         int                                 lane        = -1;  /* -1: unmeasured -> slow */
     };
     std::map<std::string, PushPace>         push_pace;       /* under pace_mutex    */
@@ -220,6 +233,10 @@ private:
     std::atomic<bool>                       lane_again[2]     { false, false };
     QMutex                                  fast_io_mutex;   /* lane 0 writes */
     std::string                             last_push_err;   /* UI thread */
+
+    /* Held for a probe's whole run; see pausePushes()/resumePushes(). */
+    std::unique_ptr<std::unique_lock<QMutex>> probe_lane_locks[2];
+    bool                                      probe_was_live = false;
 
     /* Stage 3 — reactive inputs. The bus stamps events on the play
        clock so ring ages are consistent with evaluation time. */
