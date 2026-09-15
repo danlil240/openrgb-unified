@@ -6,6 +6,10 @@ Rectangle {
     id: root
     color: "#101014"
 
+    // Diagnostic state readable from the probe / debug overlays.
+    property string dbg: ""
+    property real camYaw: cameraOrigin.eulerRotation.y
+
     // Canonical body specs. Decor boxes take their world size from the
     // object's transform.scale (meters); device bodies use fixed
     // canonical sizes per geometry type. #Cube/#Cylinder/#Sphere are
@@ -39,12 +43,19 @@ Rectangle {
             antialiasingMode: SceneEnvironment.NoAA
         }
 
-        PerspectiveCamera {
-            id: camera
-            position: Qt.vector3d(0, 0.85, 1.05)
+        // OrbitCameraController requires `origin` to be a Node whose
+        // eulerRotation it rotates; the camera must be its child.
+        Node {
+            id: cameraOrigin
+            position: Qt.vector3d(0.1, 0.18, 0.05)
             eulerRotation.x: -38
-            clipNear: 0.01
-            clipFar: 100
+
+            PerspectiveCamera {
+                id: camera
+                position: Qt.vector3d(0, 0, 1.21)
+                clipNear: 0.01
+                clipFar: 100
+            }
         }
 
         DirectionalLight {
@@ -142,27 +153,42 @@ Rectangle {
         OrbitCameraController {
             anchors.fill: parent
             camera: camera
-            origin: Qt.vector3d(0.1, 0.18, 0.05)
+            origin: cameraOrigin
             panEnabled: true
-            xSpeed: 140
-            ySpeed: 140
+            xSpeed: 0.12
+            ySpeed: 0.12
 
+            // Shift+click an emitter dot to paint it.
             TapHandler {
                 acceptedButtons: Qt.LeftButton
+                acceptedModifiers: Qt.ShiftModifier
                 onTapped: function(eventPoint) {
                     var result = view.pick(eventPoint.position.x, eventPoint.position.y)
                     if (!result.objectHit || typeof bridge === "undefined") {
                         return
                     }
                     var name = result.objectHit.objectName
-                    var mods = Qt.keyboardModifiers()
+                    root.dbg = "shift-tap " + name
                     if (name.indexOf("emit|") === 0) {
                         var p = name.split("|")
-                        if (mods & Qt.ShiftModifier) {
-                            bridge.paintEmitter(p[1], parseInt(p[2]), bridge.paintColor)
-                        } else {
-                            bridge.select(p[1])
-                        }
+                        bridge.paintEmitter(p[1], parseInt(p[2]), bridge.paintColor)
+                    }
+                }
+            }
+
+            // Plain click selects the hit device or emitter's object.
+            TapHandler {
+                acceptedButtons: Qt.LeftButton
+                acceptedModifiers: Qt.NoModifier
+                onTapped: function(eventPoint) {
+                    var result = view.pick(eventPoint.position.x, eventPoint.position.y)
+                    root.dbg = "tap hit=" + (result.objectHit ? result.objectHit.objectName : "none")
+                    if (!result.objectHit || typeof bridge === "undefined") {
+                        return
+                    }
+                    var name = result.objectHit.objectName
+                    if (name.indexOf("emit|") === 0) {
+                        bridge.select(name.split("|")[1])
                     } else if (name.indexOf("obj|") === 0) {
                         bridge.select(name.substring(4))
                     }
