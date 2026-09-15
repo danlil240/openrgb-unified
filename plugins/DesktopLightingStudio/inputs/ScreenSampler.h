@@ -2,8 +2,8 @@
 ||| ScreenSampler.h                                           |
 |||                                                           |
 |||   Periodic screen capture for the "screenfield"         |
-|||   primitive. Grabs the selected display (~10 Hz),       |
-|||   downscales to a 12x6 ColorF grid, applies temporal    |
+|||   primitive. Grabs the selected display (~25 Hz via a   |
+|||   GDI StretchBlt straight into the 12x6 grid), applies  |
 |||   smoothing and a luminance cap, and posts it to the    |
 |||   InputBus. A failed grab leaves the grid empty — the   |
 |||   primitive contributes nothing and the scene falls     |

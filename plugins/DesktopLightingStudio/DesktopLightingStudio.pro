@@ -7,8 +7,8 @@
 
 QT          += core gui widgets quick quickwidgets quick3d
 
-# WASAPI loopback + LL key hook (Stage 3 inputs)
-win32:LIBS  += -lole32 -luser32
+# WASAPI loopback + LL key hook + GDI screen grab (Stage 3 inputs)
+win32:LIBS  += -lole32 -luser32 -lgdi32
 
 TEMPLATE     = lib
 CONFIG      += plugin c++17 release
