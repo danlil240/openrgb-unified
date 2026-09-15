@@ -1,7 +1,9 @@
 CompileFlags:
   Add:
+    - -I../plugins/DesktopLightingStudio
     - -I../OpenRGB/Controllers/LianLiWirelessController
     - -I../OpenRGB/dependencies
+    - -I../OpenRGB/dependencies/json
     - -I../OpenRGB/dependencies/tinyuz
     - -I../OpenRGB/dependencies/HDiffPatch
     - -I../OpenRGB/dependencies/libusb-1.0.27/include
