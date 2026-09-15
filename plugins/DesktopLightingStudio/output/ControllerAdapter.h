@@ -51,6 +51,11 @@ public:
     std::string PushObject(const SceneDocument& doc, const std::string& object_id,
                            const FrameColors* frame = nullptr);
 
+    /* Write one binding's zone directly — the pacing unit for frame
+       pushes, so a caller can rate-limit each zone independently. */
+    std::string PushBinding(const SceneDocument& doc, const std::string& binding_id,
+                            const FrameColors* frame = nullptr);
+
     /* Write all resolved zones touched by the document. */
     std::string PushAll(const SceneDocument& doc, const FrameColors* frame = nullptr);
 

@@ -260,6 +260,13 @@ std::string ControllerAdapter::PushObject(const SceneDocument& doc,
     return PushZone(doc, owner->binding, frame);
 }
 
+std::string ControllerAdapter::PushBinding(const SceneDocument& doc,
+                                           const std::string& binding_id,
+                                           const FrameColors* frame)
+{
+    return PushZone(doc, binding_id, frame);
+}
+
 std::string ControllerAdapter::PushAll(const SceneDocument& doc,
                                        const FrameColors* frame)
 {

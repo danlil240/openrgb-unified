@@ -18,6 +18,8 @@
 #include "../effects/Presets.h"
 #include "OpenRGBPluginInterface.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <thread>
 
@@ -97,10 +99,13 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
 
 SceneBridge::~SceneBridge()
 {
-    /* Detached push workers hold `this` — give an in-flight write a
+    /* Detached push workers hold `this` — give in-flight writes a
        moment to finish before the bridge is torn down. */
     play_timer->stop();
-    for(int i = 0; i < 50 && push_in_flight.load(); i++)
+    for(int i = 0; i < 50
+            && (push_in_flight.load()
+                || lane_in_flight[0].load() || lane_in_flight[1].load());
+        i++)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -360,10 +365,11 @@ void SceneBridge::redo() { undo_stack->redo(); emit undoChanged(); }
 
 void SceneBridge::refreshDevices()
 {
-    /* io_mutex keeps a push worker from reading the controller list
-       mid-refresh. */
+    /* io_mutex + fast_io_mutex keep push workers on both lanes from
+       touching the controller list mid-refresh. */
     {
         QMutexLocker lock(&io_mutex);
+        QMutexLocker lock_fast(&fast_io_mutex);
         adapter.Refresh(doc);
     }
     rebuildMatrixLayouts();
@@ -594,13 +600,27 @@ void SceneBridge::emitFrameChanged()
     }
 }
 
-/* Newest-frame push: one worker in flight, at most one pending
-   request. Intermediate ticks while the worker is busy collapse
-   into a single follow-up push of the latest frame. */
+/* Newest-frame push: at most one worker in flight per lane plus one
+   pending request. Intermediate ticks while a lane is busy collapse
+   into a single follow-up push of the latest frame.
+
+   Frame pushes are split across two lanes because one serial worker
+   can't keep fast devices smooth while a 300+ ms I2C write is in
+   flight: lane 1 owns I2C/SMBus bindings (and unmeasured ones — a
+   first push late beats stalling the fast lane), lane 0 owns
+   measured-fast USB/HID bindings. Lanes share no bus, so concurrent
+   writes can't interleave mid-transaction. Static scene pushes stay
+   monolithic under both mutexes. */
 void SceneBridge::schedulePush()
 {
     if(!live_output || api == nullptr)
     {
+        return;
+    }
+    if(!frame.empty() && !doc.effect.preset.empty())
+    {
+        scheduleLane(0);
+        scheduleLane(1);
         return;
     }
     if(push_in_flight.exchange(true))
@@ -608,15 +628,16 @@ void SceneBridge::schedulePush()
         push_again = true;
         return;
     }
-    const SceneDocument doc_copy   = doc;
-    const FrameColors   frame_copy = frame;
-    const bool          use_frame  = !frame.empty() && !doc.effect.preset.empty();
-    std::thread([this, doc_copy, frame_copy, use_frame]()
+    const SceneDocument doc_copy = doc;
+    std::thread([this, doc_copy]()
     {
         std::string err;
         {
+            /* Both lane mutexes: a lane worker can still be finishing
+               a write when the effect just stopped. */
             QMutexLocker lock(&io_mutex);
-            err = adapter.PushAll(doc_copy, use_frame ? &frame_copy : nullptr);
+            QMutexLocker lock_fast(&fast_io_mutex);
+            err = adapter.PushAll(doc_copy, nullptr);
         }
         push_in_flight = false;
         if(push_again.exchange(false))
@@ -624,13 +645,118 @@ void SceneBridge::schedulePush()
             QMetaObject::invokeMethod(this, [this]() { schedulePush(); },
                                       Qt::QueuedConnection);
         }
-        if(!err.empty())
+        if(!err.empty() || !last_push_err.empty())
         {
-            const QString msg = QString::fromStdString(err);
-            QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
+            const std::string e = err;
+            QMetaObject::invokeMethod(this, [this, e]()
+            {
+                if(e == last_push_err)
+                {
+                    return;
+                }
+                last_push_err = e;
+                setStatus(e.empty() ? QStringLiteral("live output on")
+                                    : QString::fromStdString(e));
+            }, Qt::QueuedConnection);
+        }
+    }).detach();
+}
+
+void SceneBridge::scheduleLane(int lane)
+{
+    std::atomic<bool>& in_flight = lane_in_flight[lane];
+    std::atomic<bool>& again     = lane_again[lane];
+    if(in_flight.exchange(true))
+    {
+        again = true;
+        return;
+    }
+    const SceneDocument doc_copy   = doc;
+    const FrameColors   frame_copy = frame;
+    std::thread([this, lane, doc_copy, frame_copy]()
+    {
+        runPushLane(lane, doc_copy, frame_copy);
+        lane_in_flight[lane] = false;
+        if(lane_again[lane].exchange(false))
+        {
+            QMetaObject::invokeMethod(this, [this, lane]() { scheduleLane(lane); },
                                       Qt::QueuedConnection);
         }
     }).detach();
+}
+
+bool SceneBridge::BindingIsI2C(const std::string& binding_id) const
+{
+    const ResolvedBinding* r = adapter.Resolution(binding_id);
+    if(r == nullptr || r->status != BindingStatus::Resolved)
+    {
+        return false;
+    }
+    std::string loc = adapter.Snapshot()[r->controller_index].location;
+    for(char& c : loc) { c = (char)tolower((unsigned char)c); }
+    return loc.find("i2c") != std::string::npos
+        || loc.find("smbus") != std::string::npos;
+}
+
+void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
+                              const FrameColors& fc)
+{
+    using clock = std::chrono::steady_clock;
+    /* Lane mutex serializes writes on this transport class;
+       pace_mutex guards the shared bookkeeping map only — the slow
+       PushBinding call itself stays outside it. */
+    std::unique_lock<QMutex> lock(lane == 1 ? io_mutex : fast_io_mutex);
+    const auto now = clock::now();
+    std::string err;
+    for(const DeviceBinding& b : dc.bindings)
+    {
+        PushPace*  pace = nullptr;
+        bool       i2c  = false;
+        int        eff  = 1;
+        {
+            QMutexLocker pl(&pace_mutex);
+            PushPace& p = push_pace[b.id];
+            i2c = BindingIsI2C(b.id);
+            eff = (p.lane < 0) ? 1 : p.lane;
+            if((i2c ? 1 : eff) == lane && p.due_after <= now)
+            {
+                pace = &p;   /* std::map nodes are stable */
+            }
+        }
+        if(pace == nullptr)
+        {
+            continue;
+        }
+        const auto t0 = clock::now();
+        const std::string e = adapter.PushBinding(dc, b.id, &fc);
+        const auto t1 = clock::now();
+        const double cost =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        {
+            QMutexLocker pl(&pace_mutex);
+            pace->budget_ms = std::min(750.0, std::max(33.0, cost * 1.3));
+            pace->due_after = t1 + std::chrono::milliseconds((long long)pace->budget_ms);
+            pace->lane      = i2c ? 1 : (cost > 80.0 ? 1 : (cost < 40.0 ? 0 : eff));
+        }
+        if(!e.empty() && e.find("no mapped emitters") == std::string::npos)
+        {
+            err += b.id + ": " + e + "\n";
+        }
+    }
+    lock.unlock();
+    if(err.empty())
+    {
+        return;
+    }
+    QMetaObject::invokeMethod(this, [this, err]()
+    {
+        if(err == last_push_err)
+        {
+            return;
+        }
+        last_push_err = err;
+        setStatus(QString::fromStdString(err));
+    }, Qt::QueuedConnection);
 }
 
 void SceneBridge::applyObjectColor(const std::string& owner_id, SceneColor color)

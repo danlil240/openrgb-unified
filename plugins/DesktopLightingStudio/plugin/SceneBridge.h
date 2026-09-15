@@ -22,6 +22,9 @@
 #include "../effects/EffectEngine.h"
 
 #include <atomic>
+#include <chrono>
+#include <map>
+#include <string>
 
 class OpenRGBPluginAPIInterface;
 class QElapsedTimer;
@@ -133,6 +136,10 @@ private:
     void rebuildEffect();                  /* layers from doc.effect      */
     void tick();                           /* evaluate + repaint + push   */
     void schedulePush();                   /* newest-frame coalesced push */
+    void scheduleLane(int lane);           /* spawn a lane push worker    */
+    void runPushLane(int lane, const SceneDocument& dc,
+                     const FrameColors& fc);           /* worker: due sweep */
+    bool BindingIsI2C(const std::string& binding_id) const; /* worker only */
     void emitFrameChanged();               /* emittersChanged for frame   */
 
     void rebuildMatrixLayouts();
@@ -159,8 +166,27 @@ private:
     QElapsedTimer*              play_clock  = nullptr;
     double                      play_t      = 0.0;
     bool                        playing_state = false;
-    std::atomic<bool>           push_in_flight { false };
-    std::atomic<bool>           push_again     { false };
+    /* Frame pushes run on two serialized lanes so a slow transport
+       can't starve fast devices: lane 1 owns I2C/SMBus bindings and
+       anything not yet measured; lane 0 owns measured-fast USB/HID
+       bindings. Each lane keeps newest-frame coalescing and paces its
+       bindings independently — a binding's budget is its measured
+       write cost * 1.3 (clamped 33..750 ms), and 40/80 ms hysteresis
+       migrates non-I2C bindings between lanes. */
+    struct PushPace
+    {
+        std::chrono::steady_clock::time_point due_after {};
+        double                              budget_ms = 33.0;
+        int                                 lane      = -1;  /* -1: unmeasured -> slow */
+    };
+    std::map<std::string, PushPace>         push_pace;       /* under pace_mutex    */
+    QMutex                                  pace_mutex;      /* guards push_pace    */
+    std::atomic<bool>                       push_in_flight { false }; /* static PushAll */
+    std::atomic<bool>                       push_again     { false };
+    std::atomic<bool>                       lane_in_flight[2] { false, false };
+    std::atomic<bool>                       lane_again[2]     { false, false };
+    QMutex                                  fast_io_mutex;   /* lane 0 writes */
+    std::string                             last_push_err;   /* UI thread */
 };
 
 } /* namespace studio */
