@@ -45,6 +45,13 @@ private:
     void        FlashSelectedZone();
     void        MeasureWriteLatency();
     void        PickColor();
+    /* Workspace file actions — minimal wrappers; the store/bridge
+       owns the semantics. */
+    bool        ConfirmLoseDirty(const QString& action);
+    void        PromptReload();
+    void        PromptSaveCopy();
+    void        PromptExternalChange(bool dirty);
+    void        PromptRecovery();
 
     OpenRGBPluginAPIInterface*      api              = nullptr;
     std::vector<RGBControllerInterface*> controllers;
@@ -59,6 +66,7 @@ private:
     QPushButton*            color_btn       = nullptr;
     QSlider*                brightness_slider = nullptr;
     QCheckBox*              live_check      = nullptr;
+    QLabel*                 dirty_label     = nullptr;
 
     /* Stage 2 — scene cards + playback strip */
     QButtonGroup*           preset_group    = nullptr;

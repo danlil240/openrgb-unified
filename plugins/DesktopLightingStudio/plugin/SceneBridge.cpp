@@ -6,7 +6,9 @@
 
 #include "SceneBridge.h"
 
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QThread>
 #include <QTimer>
 #include <QUndoCommand>
@@ -16,10 +18,13 @@
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneJson.h"
+#include "../config/ConfigStore.h"
+#include "../config/ConfigMigration.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
 #include "../inputs/ScreenSampler.h"
 #include "OpenRGBPluginInterface.h"
+#include "filesystem.h"
 
 #include <algorithm>
 #include <cctype>
@@ -106,12 +111,50 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     input_bus.SetNow([this]() { return play_t.load(); });
     screen_in = new ScreenSampler(&input_bus, this);
 
+    /*------------------------------------------------*\
+    || Workspace store — studio.json under the host's  ||
+    || resolved user config dir (no fixed paths).      ||
+    \*------------------------------------------------*/
+    QString cfg_base;
+    if(api != nullptr)
+    {
+        const filesystem::path p = api->GetConfigurationDirectory();
+#ifdef _WIN32
+        cfg_base = QString::fromStdWString(p.wstring());
+#else
+        cfg_base = QString::fromUtf8(p.u8string().c_str());
+#endif
+    }
+    if(cfg_base.isEmpty())
+    {
+        cfg_base = QDir::currentPath();
+    }
+    store = new ConfigStore(cfg_base + "/DesktopLightingStudio", this);
+    store->SetSnapshotProvider([this]() { return CurrentWorkspace(); });
+    connect(store, &ConfigStore::dirtyChanged,
+            this, &SceneBridge::dirtyChanged);
+    connect(store, &ConfigStore::externalChange, this, [this]()
+    {
+        emit externalChangeDetected(store->dirty());
+    });
+    connect(store, &ConfigStore::autosaveFailed, this,
+            [this](const QString& msg)
+    {
+        setStatus(QStringLiteral("autosave failed: %1").arg(msg));
+    });
+
     doc = BuildDefaultDesk();
     refreshDevices();
 }
 
 SceneBridge::~SceneBridge()
 {
+    /* Leave recoverable edits behind on a clean shutdown too. */
+    if(store != nullptr)
+    {
+        store->FlushAutosave();
+    }
+
     /* Input sources disconnect before teardown — hooks and capture
        threads join here, never outliving the bridge. */
     audio_in.Stop();
@@ -394,6 +437,8 @@ void SceneBridge::setBrightnessPct(int pct)
 
 void SceneBridge::setLive(bool on)
 {
+    /* Live output is a runtime switch — it is never persisted as
+       enabled (output.live_on_startup is a JSON-edited preference). */
     if(live_output == on)
     {
         return;
@@ -486,76 +531,280 @@ void SceneBridge::refreshDevices()
     emit sceneChanged();
 }
 
-bool SceneBridge::saveScene()
+/*---------------------------------------------------------*\
+|| Workspace persistence                                    ||
+||                                                           ||
+||   studio.json under <OpenRGB config>/DesktopLighting-    ||
+||   Studio is authoritative. The old host-settings blob    ||
+||   is a one-time migration source; after the move the     ||
+||   file store is exclusive — SetSettings is never called  ||
+||   again for workspace data.                              ||
+\*---------------------------------------------------------*/
+StudioDocument SceneBridge::CurrentWorkspace() const
 {
-    if(api == nullptr)
+    StudioDocument w;
+    w.meta = meta;
+    if(w.meta.name.empty())
     {
-        setStatus(QStringLiteral("plugin API unavailable — cannot save"));
-        return false;
+        w.meta.name = doc.name.empty() ? std::string("My desk")
+                                       : doc.name;
     }
-    nlohmann::json j;
-    j["scene"]  = ToJson(doc);
-    j["inputs"] = {
-        { "audio",        audio_on         },
-        { "keys",         key_on           },
-        { "screen",       screen_on        },
-        { "screen_index", screen_index     },
-        { "sens_pct",     audio_sens_pct   },
-        { "decay_pct",    ripple_decay_pct },
-    };
-    api->SetSettings("DesktopLightingStudio", j);
-    api->SaveSettings();
-    setStatus(QStringLiteral("scene saved (%1 objects)").arg((int)doc.objects.size()));
-    return true;
+    w.inputs.audio        = audio_on;
+    w.inputs.keys         = key_on;
+    w.inputs.screen       = screen_on;
+    w.inputs.screen_index = screen_index;
+    w.inputs.sens_pct     = audio_sens_pct;
+    w.inputs.decay_pct    = ripple_decay_pct;
+    w.scene      = doc;
+    w.scene.name = w.meta.name;    /* one name home — the top level */
+    return w;
 }
 
-bool SceneBridge::loadScene()
+void SceneBridge::ApplyWorkspace(const StudioDocument& w)
 {
-    if(api == nullptr)
-    {
-        return false;
-    }
-    const nlohmann::json j = api->GetSettings("DesktopLightingStudio");
+    /* A saved workspace carries its effect state — loading restores
+       the preset and resumes playback if it was playing. Live output
+       is deliberately not touched here; it is a runtime switch. */
+    setPlaying(false);
+    doc      = w.scene;
+    doc.name = w.meta.name;
+    meta     = w.meta;
 
-    /* Input toggles persist beside the scene — a saved scene restores
-       the sources it was using. */
-    if(j.is_object() && j.contains("inputs") && j["inputs"].is_object())
-    {
-        const nlohmann::json& in = j["inputs"];
-        audio_sens_pct   = in.value("sens_pct", 100);
-        ripple_decay_pct = in.value("decay_pct", 100);
-        setScreenIndex(in.value("screen_index", 0));
-        setAudioInput(in.value("audio", false));
-        setKeyInput(in.value("keys", false));
-        setScreenInput(in.value("screen", false));
-        emit inputsChanged();
-    }
+    audio_sens_pct   = w.inputs.sens_pct;
+    ripple_decay_pct = w.inputs.decay_pct;
+    setScreenIndex(w.inputs.screen_index);
+    setAudioInput(w.inputs.audio);
+    setKeyInput(w.inputs.keys);
+    setScreenInput(w.inputs.screen);
+    emit inputsChanged();
 
-    if(!j.is_object() || !j.contains("scene") || !FromJson(j["scene"], doc))
-    {
-        setStatus(QStringLiteral("no saved scene — using default desk"));
-        return false;
-    }
-    undo_stack->clear();
-    emit undoChanged();
-
-    /* A saved scene carries its effect state — loading restores the
-       preset and resumes playback if it was playing (startup scene). */
     frame.clear();
     rebuildEffect();
     emit presetChanged();
     emit effectParamsChanged();
+    undo_stack->clear();
+    emit undoChanged();
     refreshDevices();
     if(doc.effect.playing)
     {
         setPlaying(true);
     }
-    setStatus(QStringLiteral("scene loaded (%1 objects)").arg((int)doc.objects.size()));
     if(live_output)
     {
         schedulePush();
     }
+}
+
+bool SceneBridge::LoadWorkspace()
+{
+    if(!store->DocumentExists())
+    {
+        setStatus(QStringLiteral("no saved workspace — using default desk"));
+        return false;
+    }
+    StudioDocument w;
+    QString err, warns;
+    if(!store->Load(&w, &err, &warns))
+    {
+        /* A rejected candidate never touches the active scene,
+           inputs, or live-output state. */
+        setStatus(QStringLiteral("studio.json rejected: %1").arg(err));
+        return false;
+    }
+    ApplyWorkspace(w);
+    store->SetClean();
+    if(!warns.isEmpty())
+    {
+        emit statusMessage(QStringLiteral("workspace: %1").arg(warns));
+    }
+    setStatus(QStringLiteral("loaded %1 (%2 objects)")
+                  .arg(store->DocumentPath()).arg((int)doc.objects.size()));
     return true;
+}
+
+void SceneBridge::markDirty()
+{
+    if(store != nullptr)
+    {
+        store->MarkDirty();
+    }
+}
+
+bool SceneBridge::dirty() const
+{
+    return store != nullptr && store->dirty();
+}
+
+QString SceneBridge::workspaceDir() const
+{
+    return store != nullptr ? store->WorkspaceDir() : QString();
+}
+
+QString SceneBridge::documentPath() const
+{
+    return store != nullptr ? store->DocumentPath() : QString();
+}
+
+bool SceneBridge::hasRecovery() const
+{
+    return store != nullptr && store->HasRecovery();
+}
+
+bool SceneBridge::saveScene()
+{
+    if(api == nullptr || store == nullptr)
+    {
+        setStatus(QStringLiteral("plugin API unavailable — cannot save"));
+        return false;
+    }
+    QString err;
+    if(!store->Save(CurrentWorkspace(), &err))
+    {
+        /* Save errors stay visible — never report a save that did
+           not land. */
+        setStatus(QStringLiteral("save failed: %1").arg(err));
+        return false;
+    }
+    setStatus(QStringLiteral("saved %1 (%2 objects)")
+                  .arg(store->DocumentPath()).arg((int)doc.objects.size()));
+    return true;
+}
+
+bool SceneBridge::saveSceneAs(const QString& path)
+{
+    if(api == nullptr || store == nullptr || path.isEmpty())
+    {
+        return false;
+    }
+    QString err;
+    if(!store->SaveAs(CurrentWorkspace(), path, &err))
+    {
+        setStatus(QStringLiteral("save failed: %1").arg(err));
+        return false;
+    }
+    setStatus(QStringLiteral("saved copy to %1").arg(path));
+    return true;
+}
+
+bool SceneBridge::loadScene()
+{
+    if(api == nullptr || store == nullptr)
+    {
+        return false;
+    }
+    QString err;
+    if(!store->EnsureWorkspaceDir(&err))
+    {
+        setStatus(QStringLiteral("workspace unavailable: %1").arg(err));
+        return false;
+    }
+
+    /* One-time migration from the host-settings blob. The marker
+       means "we already decided": deleting studio.json or saving an
+       intentionally empty scene never restarts migration. */
+    if(!store->DocumentExists() && !store->MigrationDone())
+    {
+        const nlohmann::json legacy = api->GetSettings("DesktopLightingStudio");
+        if(HasLegacySettings(legacy))
+        {
+            StudioDocument migrated;
+            std::vector<std::string> merrs;
+            if(MigrateLegacySettings(legacy, migrated, &merrs))
+            {
+                /* The original blob is preserved verbatim before the
+                   file store takes over. */
+                store->BackupLegacySettings(legacy);
+                if(store->Save(migrated, &err))
+                {
+                    setStatus(QStringLiteral("migrated settings to %1")
+                                  .arg(store->DocumentPath()));
+                }
+                else
+                {
+                    setStatus(QStringLiteral("migration save failed: %1").arg(err));
+                }
+            }
+            else
+            {
+                setStatus(QStringLiteral("legacy settings failed migration: %1")
+                    .arg(QString::fromStdString(merrs.empty() ? "unknown error"
+                                                              : merrs.front())));
+            }
+        }
+        store->MarkMigrationDone();
+    }
+
+    const bool loaded = LoadWorkspace();
+    if(!startup_load_done)
+    {
+        startup_load_done = true;
+        /* Live output is off on first launch unless the user opted in
+           via output.live_on_startup — default false, and neither
+           migration nor imported documents may set it. */
+        if(meta.live_on_startup)
+        {
+            setLive(true);
+        }
+    }
+    if(store->HasRecovery())
+    {
+        emit recoveryAvailable();
+    }
+    return loaded;
+}
+
+bool SceneBridge::reloadScene()
+{
+    if(api == nullptr || store == nullptr)
+    {
+        return false;
+    }
+    return LoadWorkspace();
+}
+
+bool SceneBridge::restoreBackup()
+{
+    if(store == nullptr || !QFileInfo::exists(store->BackupPath()))
+    {
+        setStatus(QStringLiteral("no backup yet"));
+        return false;
+    }
+    StudioDocument w;
+    QString err;
+    if(!store->LoadFile(store->BackupPath(), &w, &err))
+    {
+        setStatus(QStringLiteral("backup invalid: %1").arg(err));
+        return false;
+    }
+    ApplyWorkspace(w);
+    /* The restored doc differs from studio.json until saved. */
+    store->MarkDirty();
+    setStatus(QStringLiteral("restored backup — save to make it active"));
+    return true;
+}
+
+bool SceneBridge::recoverAutosave()
+{
+    StudioDocument w;
+    QString err;
+    if(store == nullptr || !store->RecoverAutosave(&w, &err))
+    {
+        setStatus(QStringLiteral("autosave invalid: %1").arg(err));
+        return false;
+    }
+    ApplyWorkspace(w);
+    store->DiscardRecovery();
+    store->MarkDirty();   /* recovered edits are unsaved */
+    setStatus(QStringLiteral("recovered autosaved changes"));
+    return true;
+}
+
+void SceneBridge::discardRecovery()
+{
+    if(store != nullptr)
+    {
+        store->DiscardRecovery();
+    }
 }
 
 void SceneBridge::resetScene()
@@ -569,6 +818,7 @@ void SceneBridge::resetScene()
     undo_stack->clear();
     emit undoChanged();
     refreshDevices();
+    markDirty();
     setStatus(QStringLiteral("scene reset to default desk"));
 }
 
@@ -640,6 +890,7 @@ void SceneBridge::playPreset(const QString& presetId)
         doc.effect.seed   = 0;
         play_t            = 0.0;
         input_bus.ClearEvents();   /* old-clock events would age wrong */
+        markDirty();
         emit presetChanged();
     }
     /* A reactive preset auto-enables its input source — the toggle
@@ -672,6 +923,7 @@ void SceneBridge::setPlaying(bool on)
     }
     playing_state      = on;
     doc.effect.playing = on;
+    markDirty();
     if(on)
     {
         if(engine.Empty())
@@ -694,6 +946,7 @@ void SceneBridge::stopEffect()
 {
     setPlaying(false);
     doc.effect.preset.clear();
+    markDirty();
     frame.clear();
     engine.SetLayers({});
     emit presetChanged();
@@ -715,6 +968,7 @@ void SceneBridge::remix()
        preset; the seed persists with the scene, so a remix is
        reproducible. */
     doc.effect.seed = HashU32(doc.effect.seed ^ 0x5D15A5E9u) + 1u;
+    markDirty();
     rebuildEffect();
     setPlaying(true);
     setStatus(QStringLiteral("remix seed %1").arg(doc.effect.seed));
@@ -724,6 +978,7 @@ void SceneBridge::remix()
 void SceneBridge::setEffectSpeedPct(int pct)
 {
     doc.effect.speed = qBound(10, pct, 400) / 100.0f;
+    markDirty();
     rebuildEffect();
     emit effectParamsChanged();
 }
@@ -731,6 +986,7 @@ void SceneBridge::setEffectSpeedPct(int pct)
 void SceneBridge::setEffectIntensityPct(int pct)
 {
     doc.effect.intensity = qBound(0, pct, 100) / 100.0f;
+    markDirty();
     rebuildEffect();
     emit effectParamsChanged();
 }
@@ -1031,6 +1287,7 @@ void SceneBridge::applyObjectColor(const std::string& owner_id, SceneColor color
             emit emittersChanged(QString::fromStdString(o.id));
         }
     }
+    markDirty();
     /* With an effect frame up, the frame owns the output — the painted
        base under it flows through the next push anyway. */
     if(frame.empty()) { pushLive(owner_id); } else { schedulePush(); }
@@ -1047,6 +1304,7 @@ void SceneBridge::applyEmitterColor(const std::string& owner_id, int index, Scen
             emit emittersChanged(QString::fromStdString(o.id));
         }
     }
+    markDirty();
     if(frame.empty()) { pushLive(owner_id); } else { schedulePush(); }
 }
 
@@ -1058,6 +1316,7 @@ void SceneBridge::applyBrightness(float brightness)
     {
         emit emittersChanged(QString::fromStdString(o.id));
     }
+    markDirty();
     if(frame.empty()) { pushLiveAll(); } else { schedulePush(); }
 }
 
@@ -1153,6 +1412,7 @@ void SceneBridge::setAudioInput(bool on)
         input_bus.SetAudioLevel(0.0f);
     }
     last_input_status.clear();
+    markDirty();
     emit inputsChanged();
 }
 
@@ -1172,6 +1432,7 @@ void SceneBridge::setKeyInput(bool on)
         key_in.Stop();
     }
     last_input_status.clear();
+    markDirty();
     emit inputsChanged();
 }
 
@@ -1191,6 +1452,7 @@ void SceneBridge::setScreenInput(bool on)
         screen_in->Stop();
     }
     last_input_status.clear();
+    markDirty();
     emit inputsChanged();
 }
 
@@ -1205,6 +1467,7 @@ void SceneBridge::setScreenIndex(int index)
     {
         screen_in->SetScreenIndex(index);
     }
+    markDirty();
     emit inputsChanged();
 }
 
@@ -1212,12 +1475,14 @@ void SceneBridge::setAudioSensitivityPct(int pct)
 {
     audio_sens_pct = qBound(25, pct, 200);
     audio_in.SetSensitivity(audio_sens_pct / 100.0f);
+    markDirty();
     emit inputsChanged();
 }
 
 void SceneBridge::setRippleDecayPct(int pct)
 {
     ripple_decay_pct = qBound(50, pct, 300);
+    markDirty();
     rebuildEffect();
     emit inputsChanged();
 }

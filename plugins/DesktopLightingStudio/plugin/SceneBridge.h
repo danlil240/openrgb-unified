@@ -18,6 +18,7 @@
 #include <QVariantMap>
 
 #include "../scene/SceneTypes.h"
+#include "../config/StudioConfig.h"
 #include "../output/ControllerAdapter.h"
 #include "../effects/EffectEngine.h"
 #include "../inputs/InputBus.h"
@@ -38,6 +39,7 @@ class QUndoStack;
 
 namespace studio
 {
+class ConfigStore;
 class ScreenSampler;
 
 class SceneBridge : public QObject
@@ -60,6 +62,9 @@ class SceneBridge : public QObject
     Q_PROPERTY(bool audioInput READ audioInput NOTIFY inputsChanged)
     Q_PROPERTY(bool keyInput READ keyInput NOTIFY inputsChanged)
     Q_PROPERTY(bool screenInput READ screenInput NOTIFY inputsChanged)
+    /* Workspace store — studio.json under the OpenRGB config dir. */
+    Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
+    Q_PROPERTY(QString documentPath READ documentPath CONSTANT)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -89,6 +94,12 @@ public:
     int             screenIndex() const { return screen_index; }
     int             audioSensitivityPct() const { return audio_sens_pct; }
     int             rippleDecayPct() const { return ripple_decay_pct; }
+
+    /* Workspace persistence (config/ConfigStore). */
+    bool            dirty() const;
+    QString         workspaceDir() const;
+    QString         documentPath() const;
+    bool            hasRecovery() const;
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -122,7 +133,12 @@ public slots:
     void redo();
     void refreshDevices();
     bool saveScene();
+    bool saveSceneAs(const QString& path);
     bool loadScene();
+    bool reloadScene();
+    bool restoreBackup();
+    bool recoverAutosave();
+    void discardRecovery();
     void resetScene();
 
     /* Stage 2 — effect playback */
@@ -156,6 +172,11 @@ signals:
     void presetChanged();
     void effectParamsChanged();
     void inputsChanged();
+    void dirtyChanged();
+    /* studio.json changed on disk (not our write); arg = dirty. */
+    void externalChangeDetected(bool dirty);
+    /* A valid autosave differing from studio.json exists. */
+    void recoveryAvailable();
 
 private:
     friend class SceneColorCommand;
@@ -186,10 +207,21 @@ private:
     void rebuildKeyLookup();             /* vk -> emitter world pos    */
     void setStatus(const QString& text);
 
+    /* Workspace document store. CurrentWorkspace snapshots runtime
+       state; ApplyWorkspace commits a validated candidate (never
+       touches live_output). markDirty drives the autosave. */
+    StudioDocument CurrentWorkspace() const;
+    void           ApplyWorkspace(const StudioDocument& w);
+    bool           LoadWorkspace();
+    void           markDirty();
+
     OpenRGBPluginAPIInterface*  api;
     ControllerAdapter           adapter;
     SceneDocument               doc;
     QUndoStack*                 undo_stack;
+    ConfigStore*                store = nullptr;
+    WorkspaceMeta               meta;             /* prefs + retained sections */
+    bool                        startup_load_done = false;
 
     QString                     selected;
     bool                        live_output = false;

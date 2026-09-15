@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/studio">
         <file alias="StudioScene.qml">StudioScene.qml</file>
+        <file alias="studio.schema.json">../schemas/studio.schema.json</file>
     </qresource>
 </RCC>

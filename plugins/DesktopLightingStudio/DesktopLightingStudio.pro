@@ -26,6 +26,9 @@ HEADERS += \
     plugin/DesktopLightingStudio.h \
     plugin/StudioTab.h \
     plugin/SceneBridge.h \
+    config/StudioConfig.h \
+    config/ConfigStore.h \
+    config/ConfigMigration.h \
     output/ControllerAdapter.h \
     scene/SceneTypes.h \
     scene/SceneGraph.h \
@@ -47,6 +50,9 @@ SOURCES += \
     plugin/DesktopLightingStudio.cpp \
     plugin/StudioTab.cpp \
     plugin/SceneBridge.cpp \
+    config/StudioConfig.cpp \
+    config/ConfigStore.cpp \
+    config/ConfigMigration.cpp \
     output/ControllerAdapter.cpp \
     scene/SceneTypes.cpp \
     scene/SceneGraph.cpp \
@@ -69,7 +75,8 @@ RESOURCES += \
 
 DISTFILES += \
     plugin/metadata.json \
-    ui/StudioScene.qml
+    ui/StudioScene.qml \
+    schemas/studio.schema.json
 
 DESTDIR      = $$PWD/out
 OBJECTS_DIR  = $$PWD/build/obj

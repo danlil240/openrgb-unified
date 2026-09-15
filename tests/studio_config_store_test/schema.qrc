@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/studio">
+        <file alias="studio.schema.json">../../plugins/DesktopLightingStudio/schemas/studio.schema.json</file>
+    </qresource>
+</RCC>

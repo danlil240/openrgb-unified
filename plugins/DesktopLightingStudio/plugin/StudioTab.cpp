@@ -13,14 +13,20 @@
 #include "../inputs/ScreenSampler.h"
 
 #include <QAbstractButton>
+#include <QAction>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QQmlContext>
@@ -32,6 +38,7 @@
 #include <QSlider>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <chrono>
@@ -143,12 +150,35 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     live_check = new QCheckBox(QStringLiteral("Live output"), scene_bar);
     QCheckBox* ghost_check = new QCheckBox(QStringLiteral("Ghost case"), scene_bar);
 
+    /* Workspace file menu — studio.json under the OpenRGB config dir
+       is authoritative; these actions are thin wrappers over the
+       bridge/store. */
+    QToolButton* file_button = new QToolButton(scene_bar);
+    file_button->setText(QStringLiteral("File"));
+    file_button->setPopupMode(QToolButton::InstantPopup);
+    QMenu* file_menu = new QMenu(file_button);
+    QAction* save_copy_action =
+        file_menu->addAction(QStringLiteral("Save Copy As…"));
+    QAction* reload_action =
+        file_menu->addAction(QStringLiteral("Reload studio.json"));
+    file_menu->addSeparator();
+    QAction* open_folder_action =
+        file_menu->addAction(QStringLiteral("Open Config Folder"));
+    QAction* restore_backup_action =
+        file_menu->addAction(QStringLiteral("Restore Backup"));
+    file_button->setMenu(file_menu);
+
+    dirty_label = new QLabel(QStringLiteral("● unsaved changes"), scene_bar);
+    dirty_label->setStyleSheet(QStringLiteral("color: #c8a037;"));
+    dirty_label->setVisible(false);
+
     QPushButton* undo_btn = new QPushButton(QStringLiteral("Undo"), scene_bar);
     QPushButton* redo_btn = new QPushButton(QStringLiteral("Redo"), scene_bar);
     QPushButton* save_btn = new QPushButton(QStringLiteral("Save"), scene_bar);
     QPushButton* load_btn = new QPushButton(QStringLiteral("Load"), scene_bar);
     QPushButton* reset_btn = new QPushButton(QStringLiteral("Reset"), scene_bar);
 
+    scene_row->addWidget(file_button);
     scene_row->addWidget(selection_label);
     scene_row->addWidget(color_btn);
     scene_row->addWidget(new QLabel(QStringLiteral("Brightness"), scene_bar));
@@ -156,6 +186,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     scene_row->addWidget(live_check);
     scene_row->addWidget(ghost_check);
     scene_row->addStretch(1);
+    scene_row->addWidget(dirty_label);
     scene_row->addWidget(undo_btn);
     scene_row->addWidget(redo_btn);
     scene_row->addWidget(save_btn);
@@ -320,8 +351,46 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     connect(undo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::undo);
     connect(redo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::redo);
     connect(save_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::saveScene);
-    connect(load_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::loadScene);
-    connect(reset_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::resetScene);
+    connect(load_btn, &QPushButton::clicked, this, [this]() { PromptReload(); });
+    connect(reset_btn, &QPushButton::clicked, this, [this]()
+    {
+        if(ConfirmLoseDirty(QStringLiteral("reset to the default desk")))
+        {
+            bridge->resetScene();
+        }
+    });
+
+    /* File menu — workspace actions. */
+    connect(save_copy_action, &QAction::triggered, this,
+            [this]() { PromptSaveCopy(); });
+    connect(reload_action, &QAction::triggered, this,
+            [this]() { PromptReload(); });
+    connect(open_folder_action, &QAction::triggered, this, [this]()
+    {
+        QString dir = bridge->workspaceDir();
+        if(dir.isEmpty())
+        {
+            AppendResult(QStringLiteral("workspace unavailable"));
+            return;
+        }
+        QDir().mkpath(dir);
+        QDesktopServices::openUrl(
+            QUrl::fromLocalFile(QFileInfo(dir).absoluteFilePath()));
+    });
+    connect(restore_backup_action, &QAction::triggered, this, [this]()
+    {
+        if(ConfirmLoseDirty(QStringLiteral("restore the backup")))
+        {
+            bridge->restoreBackup();
+        }
+    });
+
+    connect(bridge, &studio::SceneBridge::dirtyChanged, this,
+            [this]() { dirty_label->setVisible(bridge->dirty()); });
+    connect(bridge, &studio::SceneBridge::externalChangeDetected, this,
+            [this](bool dirty) { PromptExternalChange(dirty); });
+    connect(bridge, &studio::SceneBridge::recoveryAvailable, this,
+            [this]() { PromptRecovery(); });
 
     /*-----------------------------------------------------*\
     | Scene strip wiring                                    |
@@ -855,4 +924,119 @@ void StudioTab::MeasureWriteLatency()
 void StudioTab::AppendResult(const QString& line)
 {
     results_box->appendPlainText(line);
+}
+
+/*---------------------------------------------------------*\
+| Workspace file actions.                                   |
+|                                                           |
+| The dialogs are the thin edge of the conflict model:      |
+| the store detects, the bridge applies, this tab only      |
+| asks the user which side wins.                            |
+\*---------------------------------------------------------*/
+bool StudioTab::ConfirmLoseDirty(const QString& action)
+{
+    if(!bridge->dirty())
+    {
+        return true;
+    }
+    const auto choice = QMessageBox::warning(this,
+        QStringLiteral("Unsaved changes"),
+        QStringLiteral("You have unsaved changes. %1 will discard them "
+                       "(a copy is still autosaved for recovery).\n\n"
+                       "Save studio.json first?").arg(action),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Save);
+    if(choice == QMessageBox::Save)
+    {
+        return bridge->saveScene();
+    }
+    return choice == QMessageBox::Discard;
+}
+
+void StudioTab::PromptReload()
+{
+    /* Dirty: reloading discards the in-memory edits — confirm. */
+    if(!ConfirmLoseDirty(QStringLiteral("Reloading studio.json")))
+    {
+        return;
+    }
+    bridge->reloadScene();
+}
+
+void StudioTab::PromptSaveCopy()
+{
+    const QString path = QFileDialog::getSaveFileName(this,
+        QStringLiteral("Save workspace copy"),
+        bridge->workspaceDir(),
+        QStringLiteral("Studio workspace (*.json)"));
+    if(path.isEmpty())
+    {
+        return;
+    }
+    bridge->saveSceneAs(path);
+}
+
+void StudioTab::PromptExternalChange(bool dirty)
+{
+    /* The watcher fired — studio.json changed on disk. Clean doc:
+       just offer reload. Dirty doc: the three-way conflict choice. */
+    if(!dirty)
+    {
+        const auto choice = QMessageBox::information(this,
+            QStringLiteral("studio.json changed"),
+            QStringLiteral("studio.json was modified outside Studio.\n"
+                           "Reload it now?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        if(choice == QMessageBox::Yes)
+        {
+            bridge->reloadScene();
+        }
+        return;
+    }
+
+    QMessageBox box(QMessageBox::Warning,
+        QStringLiteral("studio.json changed"),
+        QStringLiteral("studio.json was modified outside Studio, but you "
+                       "also have unsaved changes."),
+        QMessageBox::NoButton, this);
+    QPushButton* keep = box.addButton(QStringLiteral("Keep current"),
+                                    QMessageBox::RejectRole);
+    QPushButton* reload = box.addButton(QStringLiteral("Reload disk"),
+                                        QMessageBox::AcceptRole);
+    QPushButton* copy = box.addButton(QStringLiteral("Save copy…"),
+                                      QMessageBox::ActionRole);
+    box.setDefaultButton(keep);
+    box.exec();
+
+    if(box.clickedButton() == reload)
+    {
+        bridge->reloadScene();
+    }
+    else if(box.clickedButton() == copy)
+    {
+        PromptSaveCopy();
+    }
+    /* "Keep current" does nothing — the in-memory doc stays and the
+       next save overwrites the disk file. */
+}
+
+void StudioTab::PromptRecovery()
+{
+    /* An autosave exists and is newer than studio.json — either an
+       interrupted save or unsaved edits from last session. */
+    const auto choice = QMessageBox::information(this,
+        QStringLiteral("Recover unsaved changes?"),
+        QStringLiteral("An autosaved workspace newer than studio.json "
+                       "was found — the last session may have closed "
+                       "with unsaved changes.\n\n"
+                       "Recover those changes?"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if(choice == QMessageBox::Yes)
+    {
+        bridge->recoverAutosave();
+    }
+    else
+    {
+        bridge->discardRecovery();
+    }
 }
