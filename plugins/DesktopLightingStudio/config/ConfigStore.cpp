@@ -61,27 +61,45 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
         return false;
     }
     /* Ship the schemas beside the document so hand editors have
-       them. */
+       them — refreshed when content differs, so a schema left by
+       an older build can't sit beside a newer-format document. */
     const QString schema_dir = dir + "/schemas";
     if(!QFileInfo::exists(schema_dir))
     {
         d.mkpath("schemas");
     }
-    const QString schema_dst = schema_dir + "/studio.schema.json";
-    if(!QFileInfo::exists(schema_dst))
-    {
-        QFile::copy(QStringLiteral(":/studio/studio.schema.json"), schema_dst);
-    }
-    const QString dev_schema_dst = schema_dir + "/device.schema.json";
-    if(!QFileInfo::exists(dev_schema_dst))
-    {
-        QFile::copy(QStringLiteral(":/studio/device.schema.json"),
-                    dev_schema_dst);
-    }
+    const auto sync_bundled = [](const QString& resource,
+                                 const QString& dst) {
+        QFile rf(resource);
+        if(!rf.open(QIODevice::ReadOnly))
+        {
+            return;
+        }
+        const QByteArray want = rf.readAll();
+        rf.close();
+        QFile df(dst);
+        if(df.open(QIODevice::ReadOnly))
+        {
+            const QByteArray have = df.readAll();
+            df.close();
+            if(have == want)
+            {
+                return;             /* already current */
+            }
+        }
+        QFile::remove(dst);
+        QFile::copy(resource, dst);
+    };
+    sync_bundled(QStringLiteral(":/studio/studio.schema.json"),
+                 schema_dir + "/studio.schema.json");
+    sync_bundled(QStringLiteral(":/studio/device.schema.json"),
+                 schema_dir + "/device.schema.json");
 
     /* Ship the packaged device types. Missing files only — a type
-       the user edited (or deleted to force the compiled-in default)
-       is never overwritten. */
+       the user edited is never overwritten; one the user deleted
+       is re-installed (the file layer is the shipped library, not
+       user data — remove a file to restore the default, edit it to
+       customize). */
     const QString preset_dir = PresetDir();
     if(!QFileInfo::exists(preset_dir))
     {

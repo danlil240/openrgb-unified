@@ -112,7 +112,12 @@ static std::vector<EffectLayer> Reactor(unsigned int seed)
         { 0.35f, ToColorF(MakeSceneColor(6,  32,  40))  },
         { 0.80f, ToColorF(MakeSceneColor(10, 60,  70))  },
     });
-    WithTargets(fans, { "fan_body", "mouse_strip" });
+    /* Targets resolve against resolved-scene names: object ids are
+       namespaced (<instance>/<entity>), geometry tags come from the
+       type files, and emitter groups equal their object id. The
+       mouse's three zones share geometry "mouse_zone" — only the
+       resolved strip id picks out the under-glow alone. */
+    WithTargets(fans, { "fan_body", "mouse/strip" });
 
     EffectLayer pump;
     pump.primitive = "spin";
@@ -124,7 +129,7 @@ static std::vector<EffectLayer> Reactor(unsigned int seed)
         { 0.40f, ToColorF(MakeSceneColor(64,  32,  0))  },
         { 0.85f, ToColorF(MakeSceneColor(96,  48,  8))  },
     });
-    WithTargets(pump, { "pump" });
+    WithTargets(pump, { "pump_body" });
 
     /* Energy climbing the DIMM strips. */
     EffectLayer dimms;
@@ -153,7 +158,7 @@ static std::vector<EffectLayer> Reactor(unsigned int seed)
         { 0.00f, ToColorF(MakeSceneColor(0, 224, 192)) },
         { 0.60f, ToColorF(MakeSceneColor(0, 48,  48))  },
     });
-    WithTargets(keys, { "keyboard" });
+    WithTargets(keys, { "keyboard_body" });
 
     return { Base(MakeSceneColor(10, 8, 6)), fans, pump, dimms, keys };
 }

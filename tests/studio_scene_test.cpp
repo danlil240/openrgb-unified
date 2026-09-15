@@ -107,8 +107,13 @@ static void TestStripAndMatrix()
     CHECK(strip.size() == 10, "strip count");
     CHECK(Near(strip[9].local_pos.x, -0.05f + 9 * 0.012f), "strip spacing");
 
-    unsigned int map[6] = { 0, 1, 99, 2, 3, 4 };
+    std::vector<unsigned int> map = { 0, 1, 99, 2, 3, 4 };
     auto keys = layout::KeyboardMatrix(2, 3, map, 99u, 0.019f, 0.019f, { 0, 0, 0 }, "kbd");
+    /* a short map stops at its end — never reads out of bounds */
+    std::vector<unsigned int> short_map = { 0, 1 };
+    auto short_keys = layout::KeyboardMatrix(2, 3, short_map, 99u,
+                                             0.019f, 0.019f, { 0, 0, 0 }, "kbd");
+    CHECK(short_keys.size() == 2, "matrix short map is bounds-safe");
     CHECK(keys.size() == 5, "matrix skips empty cell");
     CHECK(keys[2].address == 2, "matrix address from map");
     CHECK(Near(keys[4].local_pos.z, -0.019f), "matrix row 1 offset");

@@ -184,6 +184,19 @@ void ExpandType(ResolveCtx& c, const std::string& inst_path,
             {
                 std::vector<Emitter> em =
                     GenerateZoneEmitters(z, o.id, addr_base);
+                /* Address sanity — -1 is the render-only sentinel
+                   (Emitter::address); anything lower is a wrapped or
+                   invalid index PushZone would silently drop. */
+                for(const Emitter& e : em)
+                {
+                    if(e.address < -1)
+                    {
+                        AddErr(c, "device_settings." + inst_path
+                               + ".zones." + z.id,
+                               "address " + std::to_string(e.address)
+                               + " is invalid (must be >= -1)");
+                    }
+                }
                 /* LED bounds — the v2 workspace contract: every
                    address must be < the bound zone's led count
                    (zone_leds 0 = unchecked). addr_base + led_count

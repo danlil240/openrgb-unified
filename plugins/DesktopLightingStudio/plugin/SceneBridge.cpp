@@ -6,6 +6,7 @@
 
 #include "SceneBridge.h"
 
+#include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileInfo>
@@ -950,6 +951,34 @@ void SceneBridge::rebuildEffect()
                 L.density *= decay_mult;
             }
         }
+        /* Dead-target guard: a target naming no emitter-bearing
+           object leaves the layer silently inert — surface it once
+           per rebuild instead of debugging visuals. (Emitter groups
+           equal their object id, so id/geometry cover all match
+           terms; matrix_map emitters are runtime-generated.) */
+        for(const EffectLayer& L : layers)
+        {
+            for(const std::string& t : L.targets)
+            {
+                bool hit = false;
+                for(const SceneObject& o : doc.objects)
+                {
+                    const bool emits = !o.emitters.empty()
+                                       || o.layout == "matrix_map";
+                    if(emits && (t == o.id || t == o.geometry))
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if(!hit)
+                {
+                    qWarning("DesktopLightingStudio: effect layer target"
+                             " '%s' matches no emitter-bearing object",
+                             t.c_str());
+                }
+            }
+        }
     }
     engine.SetLayers(layers);
     /* New layers may produce an identical first frame (or an empty
@@ -1463,7 +1492,7 @@ void SceneBridge::rebuildMatrixLayouts()
         const Vec3 origin { -((float)cols - 1) * pitch * 0.5f,
                             0.016f,
                             ((float)rows - 1) * pitch * 0.5f };
-        obj.emitters = layout::KeyboardMatrix(rows, cols, map.data(), 0xFFFFFFFFu,
+        obj.emitters = layout::KeyboardMatrix(rows, cols, map, 0xFFFFFFFFu,
                                             pitch, pitch, origin, obj.id);
     }
 }

@@ -39,10 +39,13 @@ std::vector<Emitter> Strip(unsigned int n, float spacing,
 || KeyboardMatrix — emitters from a zone matrix map:       |
 || map[row*cols+col] gives the LED index (or skip when     |
 || equal to `empty`). Origin is the top-left key center,   |
-|| keys march +X across and -Z down (desk plane).          |
+|| keys march +X across and -Z down (desk plane). The map  |
+|| is passed by vector so a short map can never be read    |
+|| out of bounds — cells past the map are treated empty.   |
 \*---------------------------------------------------------*/
 std::vector<Emitter> KeyboardMatrix(unsigned int rows, unsigned int cols,
-                                    const unsigned int* map, unsigned int empty,
+                                    const std::vector<unsigned int>& map,
+                                    unsigned int empty,
                                     float pitch_x, float pitch_z,
                                     const Vec3& origin,
                                     const std::string& group);

@@ -20,6 +20,8 @@
 #include "presets/PresetRegistry.h"
 #include "config/StudioConfig.h"
 #include "config/ConfigMigration.h"
+#include "effects/EffectTypes.h"
+#include "effects/Presets.h"
 
 #include <nlohmann/json.hpp>
 
@@ -101,6 +103,43 @@ static json FanPreset(const std::string& id, int leds = 8)
                     {"radius_m", 0.052},
                     {"start_angle_deg", 0},
                     {"reverse", false},
+                }},
+            },
+        })},
+    };
+}
+
+/* A 2x3 static-matrix device — the layout GenerateZoneEmitters
+   indexes as map[row*cols+col]. */
+static json MatrixPreset(const std::string& id)
+{
+    return {
+        {"schema_version", 1},
+        {"id", id},
+        {"name", "Matrix pad"},
+        {"category", "test"},
+        {"entities", {
+            {"body", {
+                {"geometry", "pad_body"},
+                {"size_m", {0.06, 0.01, 0.04}},
+                {"x", 0}, {"y", 0}, {"z", 0},
+                {"rx", 0}, {"ry", 0}, {"rz", 0},
+                {"zone", "mx"},
+            }},
+        }},
+        {"zones", json::array({
+            {
+                {"id", "mx"},
+                {"entity", "body"},
+                {"led_count", 5},
+                {"layout", {
+                    {"type", "matrix"},
+                    {"rows", 2},
+                    {"cols", 3},
+                    {"pitch_x_m", 0.019},
+                    {"pitch_z_m", 0.019},
+                    /* one empty cell -> 5 emitters */
+                    {"map", {0, 1, 4294967295u, 2, 3, 4}},
                 }},
             },
         })},
@@ -287,6 +326,212 @@ static void TestPresetValidation()
               && keep.id == "keep-me",
               "preset: failure leaves candidate untouched");
     }
+}
+
+/*---------------------------------------------------------*\
+||| Matrix + address validation: the static-matrix map is  ||
+||| indexed map[row*cols+col]; a short map or a value that ||
+||| wraps int must be a file error, never an OOB read or a ||
+||| negative address at generation time.                   ||
+\*---------------------------------------------------------*/
+static void TestMatrixValidation()
+{
+    std::vector<std::string> errors;
+    DevicePreset p;
+
+    /* valid static matrix parses and generates */
+    CHECK(DevicePresetFromJson(MatrixPreset("matrix-dev"), p, &errors)
+          && errors.empty(),
+          "matrix: valid static map parses");
+    if(!p.zones.empty())
+    {
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "pad/body", 0);
+        CHECK(em.size() == 5, "matrix: empty cell skipped");
+        CHECK(em.size() == 5 && em[0].address == 0
+              && em[2].address == 2 && em[4].address == 4,
+              "matrix: addresses come from the map");
+    }
+
+    /* short map — the old hole: rows*cols indexing past the end */
+    {
+        json j = MatrixPreset("matrix-dev");
+        j["zones"][0]["layout"]["map"] = { 0 };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "rows*cols"),
+              "matrix: short map rejected");
+    }
+    /* wrapping values: >= 2^31 wraps (int)led negative */
+    {
+        json j = MatrixPreset("matrix-dev");
+        j["zones"][0]["layout"]["map"] = { 0, 1, 2147483648ll, 2, 3, 4 };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "map["),
+              "matrix: 2^31 map value rejected");
+    }
+    /* ... unless it IS the empty sentinel */
+    {
+        json j = MatrixPreset("matrix-dev");
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "matrix: empty sentinel allowed in map");
+    }
+    /* negatives */
+    {
+        json j = MatrixPreset("matrix-dev");
+        j["zones"][0]["layout"]["map"] = { 0, 1, -5, 2, 3, 4 };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "map["),
+              "matrix: negative map value rejected");
+    }
+    /* empty sentinel itself must fit u32 */
+    {
+        json j = MatrixPreset("matrix-dev");
+        j["zones"][0]["layout"]["empty"] = -1;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "empty"),
+              "matrix: negative empty sentinel rejected");
+    }
+
+    /* points.addresses: -1 is render-only, lower is invalid */
+    {
+        json j = FanPreset("pts");
+        j["zones"][0]["led_count"] = 3;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            {"points", {{0,0,0}, {0.01,0,0}, {0.02,0,0}}},
+            {"addresses", {0, -5, 2}},
+        };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "addresses"),
+              "points: address < -1 rejected");
+    }
+    {
+        json j = FanPreset("pts");
+        j["zones"][0]["led_count"] = 3;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            {"points", {{0,0,0}, {0.01,0,0}, {0.02,0,0}}},
+            {"addresses", {0, -1, 2}},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "points: -1 render-only address allowed");
+    }
+
+    /* led_count must agree with the generated points count when
+       declared — a stale count misreports the zone. */
+    {
+        json j = FanPreset("pts");
+        j["zones"][0]["led_count"] = 99;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            {"points", {{0,0,0}, {0.01,0,0}, {0.02,0,0}}},
+        };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "points: led_count must match points count");
+    }
+    {
+        json j = FanPreset("pts");
+        j["zones"][0]["led_count"] = 3;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            {"points", {{0,0,0}, {0.01,0,0}, {0.02,0,0}}},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "points: matching led_count accepted");
+    }
+
+    /* Resolver-side: a programmatic preset can carry an invalid
+       address the file parser would have caught — it must still
+       fail at resolve, not die silently in PushZone's clamp. */
+    {
+        DevicePreset bad;
+        bad.id       = "bad-addr";
+        bad.name     = "Bad addresses";
+        bad.category = "test";
+        PresetEntity e;
+        e.id       = "body";
+        e.geometry = "pad_body";
+        e.zone     = "pts";
+        bad.entities["body"] = e;
+        DeviceZone z;
+        z.id        = "pts";
+        z.entity    = "body";
+        z.led_count = 2;
+        z.layout.type = "points";
+        z.layout.points = { {0,0,0}, {0.01f,0,0} };
+        z.layout.addresses = { 0, -5 };
+        bad.zones.push_back(z);
+        PresetRegistry reg;
+        reg.SetDefaults({ bad });
+        StudioDocument w;
+        DeviceInstance inst;
+        inst.type = "bad-addr";
+        w.devices["pad"] = inst;
+        w.device_settings["pad"].zones["pts"].binding = "bus";
+        DeviceBinding b;
+        b.id = "bus"; b.zone_leds = 8;
+        w.bindings["bus"] = b;
+        SceneDocument doc;
+        errors.clear();
+        CHECK(!ResolveScene(w, reg, doc, &errors)
+              && HasError(errors, "invalid"),
+              "resolve: address < -1 rejected");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Effect targets: every WithTargets string in the        ||
+||| built-in presets must resolve to at least one emitter- ||
+||| bearing object in the default workspace. A dead target ||
+||| is a silently inert layer.                             ||
+\*---------------------------------------------------------*/
+static void TestEffectTargetsResolve()
+{
+    PresetRegistry reg;
+    reg.SetDefaults(DefaultDevicePresets());
+    const StudioDocument w = BuildDefaultWorkspace();
+    SceneDocument doc;
+    std::vector<std::string> errors;
+    CHECK(ResolveScene(w, reg, doc, &errors),
+          "targets: default desk resolves");
+
+    int checked = 0;
+    for(const PresetInfo& info : PresetList())
+    {
+        for(const EffectLayer& L : BuildPreset(info.id, 0))
+        {
+            for(const std::string& t : L.targets)
+            {
+                ++checked;
+                /* Match through the real matcher; emitters use their
+                   object id as group, and matrix_map objects get
+                   their emitters at runtime — count them as
+                   emitter-bearing. */
+                EffectLayer one;
+                one.targets = { t };
+                bool hit = false;
+                for(const SceneObject& o : doc.objects)
+                {
+                    if(o.emitters.empty() && o.layout != "matrix_map")
+                    {
+                        continue;
+                    }
+                    Emitter probe;
+                    probe.group = o.id;
+                    if(LayerMatches(one, o, probe))
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                const std::string name =
+                    "targets: '" + t + "' resolves (" + info.id + ")";
+                CHECK(hit, name.c_str());
+            }
+        }
+    }
+    CHECK(checked >= 5, "targets: presets carry targeted layers");
 }
 
 /*---------------------------------------------------------*\
@@ -1152,6 +1397,7 @@ int main()
 {
     TestPresetBasics();
     TestPresetValidation();
+    TestMatrixValidation();
     TestRegistry();
     TestResolveTwoFans();
     TestResolveMirror();
@@ -1162,6 +1408,7 @@ int main()
     TestMigrationSparseAddresses();
     TestResolveCaps();
     TestDefaultWorkspaceParity();
+    TestEffectTargetsResolve();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -259,9 +259,7 @@ static ZoneLayout LayoutFromJson(const nlohmann::json& j,
             l.rows = (unsigned int)rows;
             l.cols = (unsigned int)cols;
         }
-        const unsigned long long emp = FieldInt(j, "empty", 0xFFFFFFFFll,
-                                                path, errs);
-        l.empty_cell = (unsigned int)emp;
+        l.empty_cell = FieldU32(j, "empty", 0xFFFFFFFFu, path, errs);
         if(j.contains("map"))
         {
             if(!j["map"].is_array())
@@ -270,21 +268,57 @@ static ZoneLayout LayoutFromJson(const nlohmann::json& j,
             }
             else
             {
+                int mi = 0;
                 for(const nlohmann::json& c : j["map"])
                 {
+                    const std::string mp = path + ".map["
+                                           + std::to_string(mi++) + "]";
                     if(!IsInt(c))
                     {
-                        AddErr(errs, path + ".map", "expected integers");
-                        break;
+                        AddErr(errs, mp, "expected integer");
+                        continue;
                     }
-                    l.map.push_back(c.get<unsigned int>());
+                    /* Full-width read — get<unsigned int> wraps
+                       negatives and >32-bit values silently. */
+                    const long long v = c.get<long long>();
+                    if(v < 0 || v > 4294967295ll)
+                    {
+                        AddErr(errs, mp, "expected unsigned integer"
+                                       " in 0..4294967295");
+                        continue;
+                    }
+                    /* Emitter addresses are stored int — a mapped
+                       value >= 2^31 wraps negative at generation.
+                       Only the empty sentinel may reach the top
+                       of the u32 range. */
+                    if(v >= 2147483648ll
+                       && v != (long long)l.empty_cell)
+                    {
+                        AddErr(errs, mp, "LED index must be"
+                                       " < 2147483648 (or the empty"
+                                       " sentinel)");
+                        continue;
+                    }
+                    l.map.push_back((unsigned int)v);
                 }
             }
         }
-        if(!l.dynamic && (l.rows == 0 || l.cols == 0 || l.map.empty()))
+        if(!l.dynamic)
         {
-            AddErr(errs, path, "static matrix needs rows/cols/map"
-                               " (or \"dynamic\": true)");
+            if(l.rows == 0 || l.cols == 0 || l.map.empty())
+            {
+                AddErr(errs, path, "static matrix needs rows/cols/map"
+                                   " (or \"dynamic\": true)");
+            }
+            /* The generator indexes map[row*cols+col] — a short map
+               must be a file error, not an out-of-bounds read. */
+            else if(l.map.size() < (size_t)l.rows * l.cols)
+            {
+                AddErr(errs, path + ".map",
+                       "has " + std::to_string(l.map.size())
+                       + " entries, needs rows*cols ("
+                       + std::to_string((size_t)l.rows * l.cols) + ")");
+            }
         }
     }
     else if(l.type == "points")
@@ -317,7 +351,18 @@ static ZoneLayout LayoutFromJson(const nlohmann::json& j,
                         AddErr(errs, path + ".addresses", "expected integers");
                         break;
                     }
-                    l.addresses.push_back(ja.get<int>());
+                    /* -1 is the render-only sentinel (Emitter::
+                       address); anything lower is a wrapped or
+                       invalid index. */
+                    const long long a = ja.get<long long>();
+                    if(a < -1 || a > 2147483647ll)
+                    {
+                        AddErr(errs, path + ".addresses",
+                               "expected addresses >= -1"
+                               " (-1 = render-only)");
+                        break;
+                    }
+                    l.addresses.push_back((int)a);
                 }
                 if(!l.addresses.empty() && l.addresses.size() != l.points.size())
                 {
@@ -518,6 +563,18 @@ bool DevicePresetFromJson(const nlohmann::json& j, DevicePreset& p,
                 }
                 z.layout = LayoutFromJson(jz.value("layout", nlohmann::json()),
                                           path + ".layout", errs);
+                /* For a points layout the emitter count comes from
+                   points, not led_count — when both are declared they
+                   must agree (a mismatch is a stale hand edit that
+                   misreports the zone's size). */
+                if(z.layout.type == "points" && z.led_count != 0
+                   && z.led_count != z.layout.points.size())
+                {
+                    AddErr(errs, path + ".led_count",
+                           "declares " + std::to_string(z.led_count)
+                           + " LEDs but layout.points has "
+                           + std::to_string(z.layout.points.size()));
+                }
                 if(!IsPresetId(z.id))
                 {
                     AddErr(errs, path + ".id", "bad zone id '" + z.id + "'");
@@ -669,7 +726,7 @@ std::vector<Emitter> GenerateZoneEmitters(const DeviceZone& z,
                (SceneBridge::rebuildMatrixLayouts). */
             return {};
         }
-        return layout::KeyboardMatrix(l.rows, l.cols, l.map.data(),
+        return layout::KeyboardMatrix(l.rows, l.cols, l.map,
                                       l.empty_cell, l.pitch_x_m,
                                       l.pitch_z_m, l.origin, group);
     }

@@ -56,7 +56,8 @@ std::vector<Emitter> Strip(unsigned int n, float spacing,
 }
 
 std::vector<Emitter> KeyboardMatrix(unsigned int rows, unsigned int cols,
-                                    const unsigned int* map, unsigned int empty,
+                                    const std::vector<unsigned int>& map,
+                                    unsigned int empty,
                                     float pitch_x, float pitch_z,
                                     const Vec3& origin,
                                     const std::string& group)
@@ -66,7 +67,15 @@ std::vector<Emitter> KeyboardMatrix(unsigned int rows, unsigned int cols,
     {
         for(unsigned int c = 0; c < cols; c++)
         {
-            const unsigned int led = map[r * cols + c];
+            const size_t idx = (size_t)r * cols + c;
+            if(idx >= map.size())
+            {
+                /* Short map — the file validator requires >=
+                   rows*cols, but a hardware/programmatic caller
+                   must never read out of bounds. */
+                return out;
+            }
+            const unsigned int led = map[idx];
             if(led == empty)
             {
                 continue;
