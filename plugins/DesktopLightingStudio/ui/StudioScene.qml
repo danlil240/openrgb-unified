@@ -13,8 +13,7 @@ Rectangle {
         environment: SceneEnvironment {
             backgroundMode: SceneEnvironment.Color
             clearColor: "#101014"
-            antialiasingMode: SceneEnvironment.MSAA
-            antialiasingQuality: SceneEnvironment.High
+            antialiasingMode: SceneEnvironment.NoAA
         }
 
         PerspectiveCamera {

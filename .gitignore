@@ -10,3 +10,8 @@ plugins/*/.qmake.stash
 plugins/*/Makefile
 vendor/effects-plugin/
 vendor/visual-map-plugin/
+tests/*/.qmake.stash
+tests/*/Makefile
+tests/*/Makefile.*
+tests/*/release/
+tests/*/debug/

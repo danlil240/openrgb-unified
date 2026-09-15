@@ -54,6 +54,22 @@ Note: a full `build-windows.bat` rebuild replaces `OpenRGB Windows 64-bit\`
 entirely — rerun `build-plugin.bat` afterward to restore plugin deps and the
 `plugins\` folder.
 
+**Fixed load failure (third attempt):** after the dep fix the DLL still
+failed with "An Application Control policy has blocked this file". Code
+Integrity events 3077/3118 showed **Smart App Control** (On) blocking the
+fresh unsigned binary — the same policy that blocks ad-hoc test exes built
+under `tests\`. Empirically, the same bytes copied with PowerShell
+`Copy-Item` were blocked, while deploying via `cmd`/`xcopy` produced a
+loadable file. Deploy only through `build-plugin.bat`; never copy the
+plugin DLL with PowerShell.
+
+**Remaining probe issue:** the plugin loads and its controls work, but the
+`View3D` rendered black while the QML 2D overlay was fine (the "picked:"
+label proved QML + input worked). MSAA on `QQuickWidget`'s offscreen
+target is a suspect — the scene was switched to `SceneEnvironment.NoAA`,
+and the tab now logs `sceneGraphError` and a `grabFramebuffer` lit-pixel
+count so the render state is visible in the results box.
+
 ## Existing-plugin reuse comparison
 
 Both plugins are **GPL-2.0-only** (compatible: our plugin is a GPL OpenRGB

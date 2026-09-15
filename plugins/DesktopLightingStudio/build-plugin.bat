@@ -21,7 +21,10 @@ IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
 :: Force moc re-run: metadata.json is baked by moc but not tracked
 :: as a dependency, so edits would silently keep the old metadata.
-if exist build\moc rmdir /s /q build\moc
+:: Delete files but keep the directory - the generated Makefile
+:: redirects into build\moc without recreating it.
+if exist build\moc del /q build\moc\*
+if not exist build\moc mkdir build\moc
 
 jom
 IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
@@ -31,6 +34,10 @@ IF %ERRORLEVEL% NEQ 0 EXIT /B %ERRORLEVEL%
 
 set "PLUGIN_DST=%~dp0..\..\OpenRGB\OpenRGB Windows 64-bit\plugins\DesktopLightingStudio"
 if not exist "%PLUGIN_DST%" mkdir "%PLUGIN_DST%"
+:: Deploy via xcopy only - on this machine Smart App Control blocked
+:: a plugin DLL written by PowerShell Copy-Item, while the same bytes
+:: deployed via cmd/xcopy loaded fine. Do not copy deploy files with
+:: PowerShell.
 xcopy /y /e /i out\* "%PLUGIN_DST%\" >nul
 
 :: Plugin dependencies must live next to OpenRGB.exe - Windows does

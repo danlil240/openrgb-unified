@@ -23,6 +23,8 @@
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <QThread>
+#include <QTimer>
+#include <QImage>
 #include <QVBoxLayout>
 
 #include <chrono>
@@ -179,6 +181,38 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
             status_label->setText("QML load failed: " + lines.join(" | "));
         }
     };
+
+    connect(quick_widget, &QQuickWidget::sceneGraphError, this,
+            [this](QQuickWindow::SceneGraphError error, const QString& message)
+    {
+        AppendResult(QStringLiteral("sceneGraphError %1: %2").arg((int)error).arg(message));
+    });
+
+    /* Framebuffer probe: after the scene settles, grab a frame and count
+       lit pixels to distinguish a live View3D from a black render. */
+    QTimer::singleShot(2500, this, [this]()
+    {
+        if(quick_widget->quickWindow() == nullptr)
+        {
+            AppendResult(QStringLiteral("fb probe: no quick window"));
+            return;
+        }
+        QImage frame = quick_widget->grabFramebuffer();
+        long lit = 0;
+        for(int y = 0; y < frame.height(); y += 8)
+        {
+            for(int x = 0; x < frame.width(); x += 8)
+            {
+                const QRgb px = frame.pixel(x, y);
+                if(qRed(px) > 40 || qGreen(px) > 40 || qBlue(px) > 40)
+                {
+                    lit++;
+                }
+            }
+        }
+        AppendResult(QStringLiteral("fb probe: %1x%2, lit samples=%3 (nonzero = scene renders)")
+                     .arg(frame.width()).arg(frame.height()).arg(lit));
+    });
 
     if(quick_widget->status() == QQuickWidget::Error)
     {
