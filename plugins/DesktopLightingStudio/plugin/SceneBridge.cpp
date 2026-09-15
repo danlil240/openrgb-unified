@@ -19,7 +19,6 @@
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneJson.h"
 #include "../config/ConfigStore.h"
-#include "../config/ConfigMigration.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
 #include "../inputs/ScreenSampler.h"
@@ -699,39 +698,30 @@ bool SceneBridge::loadScene()
         return false;
     }
 
-    /* One-time migration from the host-settings blob. The marker
-       means "we already decided": deleting studio.json or saving an
-       intentionally empty scene never restarts migration. */
-    if(!store->DocumentExists() && !store->MigrationDone())
+    /* One-time migration from the host-settings blob. The store owns
+       the ordering (backup → validate → save → marker); a transient
+       write failure leaves the marker unset so the move is retried
+       next launch rather than orphaning the old scene. */
     {
         const nlohmann::json legacy = api->GetSettings("DesktopLightingStudio");
-        if(HasLegacySettings(legacy))
+        QString detail;
+        switch(store->RunLegacyMigration(legacy, &detail))
         {
-            StudioDocument migrated;
-            std::vector<std::string> merrs;
-            if(MigrateLegacySettings(legacy, migrated, &merrs))
-            {
-                /* The original blob is preserved verbatim before the
-                   file store takes over. */
-                store->BackupLegacySettings(legacy);
-                if(store->Save(migrated, &err))
-                {
-                    setStatus(QStringLiteral("migrated settings to %1")
-                                  .arg(store->DocumentPath()));
-                }
-                else
-                {
-                    setStatus(QStringLiteral("migration save failed: %1").arg(err));
-                }
-            }
-            else
-            {
-                setStatus(QStringLiteral("legacy settings failed migration: %1")
-                    .arg(QString::fromStdString(merrs.empty() ? "unknown error"
-                                                              : merrs.front())));
-            }
+        case ConfigStore::MigrationResult::Migrated:
+            setStatus(QStringLiteral("migrated settings to %1")
+                          .arg(store->DocumentPath()));
+            break;
+        case ConfigStore::MigrationResult::Invalid:
+            setStatus(QStringLiteral("legacy settings failed migration: %1")
+                          .arg(detail));
+            break;
+        case ConfigStore::MigrationResult::Failed:
+            setStatus(QStringLiteral("migration deferred (will retry): %1")
+                          .arg(detail));
+            break;
+        case ConfigStore::MigrationResult::NotNeeded:
+            break;
         }
-        store->MarkMigrationDone();
     }
 
     const bool loaded = LoadWorkspace();

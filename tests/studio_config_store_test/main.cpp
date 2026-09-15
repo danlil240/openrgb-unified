@@ -236,6 +236,101 @@ static void TestMigrationMarkers()
     CHECK(store.MigrationDone(), "migration: marker written");
 }
 
+static void TestMigrationRetry()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+
+    const nlohmann::json legacy = {
+        {"scene", {{"version", 2},
+                   {"name", "Old desk"},
+                   {"objects", nlohmann::json::array()}}},
+        {"inputs", {{"audio", true}, {"sens_pct", 150}}},
+    };
+
+    /* Transient failure: a file squatting on the workspace dir name
+       makes every write fail (disk full / sync lock analogue). The
+       marker must NOT be written — the next launch retries. */
+    const QString blocked_dir = tmp.path() + "/ws";
+    {
+        QFile block(blocked_dir);
+        block.open(QIODevice::WriteOnly);
+        block.write("x");
+        block.close();
+    }
+    {
+        ConfigStore bad(blocked_dir);
+        QString detail;
+        CHECK(bad.RunLegacyMigration(legacy, &detail)
+                  == ConfigStore::MigrationResult::Failed,
+              "retry: failed save reports Failed");
+        CHECK(!bad.MigrationDone(),
+              "retry: no marker after failed save");
+        CHECK(!bad.DocumentExists(),
+              "retry: no doc after failed save");
+    }
+
+    /* "Next launch": the blockage clears, migration lands, and the
+       original blob was backed up before anything else. */
+    QFile::remove(blocked_dir);
+    {
+        ConfigStore good(blocked_dir);
+        QString detail;
+        CHECK(good.RunLegacyMigration(legacy, &detail)
+                  == ConfigStore::MigrationResult::Migrated,
+              "retry: retry migrates");
+        CHECK(good.MigrationDone(), "retry: marker after success");
+        CHECK(good.DocumentExists(), "retry: studio.json written");
+        CHECK(QFileInfo::exists(good.LegacyBackupPath()),
+              "retry: legacy backup written");
+
+        StudioDocument w;
+        QString err;
+        CHECK(good.Load(&w, &err) && w.meta.name == "Old desk"
+              && w.inputs.audio && w.inputs.sens_pct == 150,
+              "retry: migrated doc carries scene+inputs");
+        CHECK(!w.meta.live_on_startup,
+              "retry: migration never enables live output");
+
+        /* Once the marker exists, deleting studio.json does not
+           resurrect the old blob — an intentional empty scene stays. */
+        QFile::remove(good.DocumentPath());
+        CHECK(good.RunLegacyMigration(legacy, &detail)
+                  == ConfigStore::MigrationResult::NotNeeded,
+              "retry: marker prevents re-run");
+    }
+
+    /* A permanently-invalid blob still marks done — but only after
+       its verbatim backup landed. */
+    {
+        ConfigStore inv(tmp.path() + "/ws_invalid");
+        const nlohmann::json bad_legacy = {
+            {"scene", {{"version", 99}, {"objects", nlohmann::json::array()}}},
+        };
+        QString detail;
+        CHECK(inv.RunLegacyMigration(bad_legacy, &detail)
+                  == ConfigStore::MigrationResult::Invalid,
+              "retry: invalid blob reports Invalid");
+        CHECK(inv.MigrationDone(),
+              "retry: invalid blob marks done (permanent)");
+        CHECK(QFileInfo::exists(inv.LegacyBackupPath()),
+              "retry: invalid blob still backed up");
+    }
+
+    /* Nothing to migrate: marker written so an intentional empty
+       scene never restarts migration. */
+    {
+        ConfigStore empty(tmp.path() + "/ws_empty");
+        const nlohmann::json nada = nlohmann::json::object();
+        QString detail;
+        CHECK(empty.RunLegacyMigration(nada, &detail)
+                  == ConfigStore::MigrationResult::NotNeeded,
+              "retry: empty blob needs nothing");
+        CHECK(empty.MigrationDone(),
+              "retry: empty blob still marks done");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -245,6 +340,7 @@ int main(int argc, char** argv)
     TestAutosaveRecovery();
     TestExternalChange();
     TestMigrationMarkers();
+    TestMigrationRetry();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

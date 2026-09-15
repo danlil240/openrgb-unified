@@ -5,6 +5,7 @@
 \*---------------------------------------------------------*/
 
 #include "ConfigStore.h"
+#include "ConfigMigration.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -79,6 +80,9 @@ bool ConfigStore::MigrationDone() const
 
 void ConfigStore::MarkMigrationDone()
 {
+    /* The marker may be written before anything else exists in the
+       workspace (nothing-to-migrate path) — create the dir first. */
+    EnsureWorkspaceDir();
     QFile f(MigrationMarkerPath());
     if(f.open(QIODevice::WriteOnly | QIODevice::Text))
     {
@@ -94,6 +98,64 @@ bool ConfigStore::BackupLegacySettings(const nlohmann::json& legacy,
     const QByteArray bytes =
         QByteArray::fromStdString(legacy.dump(2));
     return WriteAtomic(LegacyBackupPath(), bytes, error);
+}
+
+ConfigStore::MigrationResult
+ConfigStore::RunLegacyMigration(const nlohmann::json& legacy, QString* detail)
+{
+    if(DocumentExists() || MigrationDone())
+    {
+        return MigrationResult::NotNeeded;
+    }
+    if(!HasLegacySettings(legacy))
+    {
+        MarkMigrationDone();   /* nothing to move — decided permanently */
+        return MigrationResult::NotNeeded;
+    }
+
+    if(!EnsureWorkspaceDir(detail))
+    {
+        return MigrationResult::Failed;   /* transient — retried next launch */
+    }
+
+    /* The backup precedes validation AND the save: a legacy blob is
+       preserved verbatim even when it proves unmigratable, and never
+       migrated without a copy on disk. A failed backup is treated as
+       transient — no marker, so the move is retried. */
+    QString berr;
+    if(!BackupLegacySettings(legacy, &berr))
+    {
+        if(detail)
+        {
+            *detail = QStringLiteral("backup failed: %1").arg(berr);
+        }
+        return MigrationResult::Failed;
+    }
+
+    StudioDocument migrated;
+    std::vector<std::string> merrs;
+    if(!MigrateLegacySettings(legacy, migrated, &merrs))
+    {
+        /* A blob that fails validation will fail forever — the marker
+           is correct here, and the backup above keeps the original. */
+        MarkMigrationDone();
+        if(detail)
+        {
+            *detail = QString::fromStdString(
+                merrs.empty() ? "unknown error" : merrs.front());
+        }
+        return MigrationResult::Invalid;
+    }
+
+    if(!Save(migrated, detail))
+    {
+        /* Disk full / AV lock / sync conflict — do NOT mark done, or
+           the user's old scene is orphaned (doc absent, marker set,
+           migration never retried). */
+        return MigrationResult::Failed;
+    }
+    MarkMigrationDone();
+    return MigrationResult::Migrated;
 }
 
 QByteArray ConfigStore::Serialize(const StudioDocument& doc) const

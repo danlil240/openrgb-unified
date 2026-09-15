@@ -58,6 +58,23 @@ public:
     void MarkMigrationDone();
     bool BackupLegacySettings(const nlohmann::json& legacy, QString* error = nullptr);
 
+    enum class MigrationResult
+    {
+        NotNeeded,   /* already migrated, doc exists, or nothing to move */
+        Migrated,    /* migrated doc saved to studio.json; marker written */
+        Invalid,     /* blob failed validation — permanent; marker written */
+        Failed       /* write failed — transient; marker NOT written so
+                        the next launch retries instead of orphaning the
+                        old scene */
+    };
+    /* Runs the whole legacy-settings -> studio.json move with the
+       correct ordering: backup the original blob first, validate the
+       candidate, then save; the marker is written only when nothing
+       needed migrating or the outcome is permanent (landed / invalid
+       blob). Never writes the marker after a failed save. */
+    MigrationResult RunLegacyMigration(const nlohmann::json& legacy,
+                                       QString* detail = nullptr);
+
     /* Parse + validate studio.json into `out`. On failure `out` is
        untouched and `error` carries the field messages. A missing
        file is an error here — callers check DocumentExists first. */
