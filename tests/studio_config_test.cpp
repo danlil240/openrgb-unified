@@ -1,19 +1,22 @@
 /*---------------------------------------------------------*\
-|| studio_config_test.cpp                                    |
-||                                                           |
-||   Deterministic tests for the Desktop Lighting Studio    |
-||   workspace document (plugins/DesktopLightingStudio/     |
-||   config/): candidate validation, legacy-settings        |
-||   migration, and full round-trips. No Qt, no hardware —  |
-||   plain cl build via build-studio-tests.bat.             |
-||                                                           |
-||   SPDX-License-Identifier: GPL-2.0-or-later               |
+||| studio_config_test.cpp                                    |
+|||                                                           |
+|||   Deterministic tests for the Desktop Lighting Studio    |
+|||   workspace document (plugins/DesktopLightingStudio/     |
+|||   config/): compact v3 validation, legacy-settings       |
+|||   migration, and full round-trips. No Qt, no hardware —  |
+|||   plain cl build via build-studio-tests.bat.             |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
 #include "scene/SceneTypes.h"
 #include "scene/SceneGraph.h"
 #include "scene/SceneJson.h"
+#include "scene/SceneResolver.h"
 #include "scene/DefaultDesk.h"
+#include "presets/DevicePreset.h"
+#include "presets/PresetRegistry.h"
 #include "config/StudioConfig.h"
 #include "config/ConfigMigration.h"
 
@@ -53,84 +56,53 @@ static bool HasError(const std::vector<std::string>& errors,
 }
 
 /*---------------------------------------------------------*\
-|| A small hand-built scene: one bound device, one        ||
-|| mirrored copy under a group, one decor body.           ||
+||| A small v3 workspace: two fan instances sharing one    ||
+||| type (one mirrored), a binding, paint, prefs.          ||
 \*---------------------------------------------------------*/
-static studio::SceneDocument SmallScene()
-{
-    using namespace studio;
-    SceneDocument doc;
-    doc.name       = "Fixture desk";
-    doc.brightness = 0.65f;
-
-    DeviceBinding b;
-    b.id              = "fan_bus";
-    b.controller_name = "X870E AORUS ELITE";
-    b.vendor          = "Gigabyte";
-    b.device_type     = -1;
-    b.zone_name       = "ARGB_V2_1";
-    b.zone_leds       = 8;
-    doc.bindings.push_back(b);
-
-    SceneObject grp;
-    grp.id   = "case";
-    grp.label = "Case";
-    grp.kind = ObjectKind::Group;
-    grp.transform.position = { 0.4f, 0.1f, -0.1f };
-    doc.objects.push_back(grp);
-
-    SceneObject fan;
-    fan.id      = "fan0";
-    fan.label   = "Front fan";
-    fan.kind    = ObjectKind::Device;
-    fan.binding = "fan_bus";
-    fan.parent_id = "case";
-    fan.transform.position = { 0.0f, -0.16f, -0.14f };
-    fan.verified = true;
-    for(int i = 0; i < 8; i++)
-    {
-        Emitter e;
-        e.local_pos = { 0.05f * i, 0.016f, 0.0f };
-        e.group     = "fan0";
-        e.address   = i;
-        fan.emitters.push_back(e);
-    }
-    doc.objects.push_back(fan);
-
-    SceneObject mirror;
-    mirror.id        = "fan0_copy";
-    mirror.label     = "Fan (mirror)";
-    mirror.kind      = ObjectKind::Linked;
-    mirror.mirror_of = "fan0";
-    mirror.parent_id = "case";
-    mirror.transform.position = { 0.0f, -0.16f, 0.12f };
-    doc.objects.push_back(mirror);
-
-    SceneObject desk;
-    desk.id      = "desk";
-    desk.label   = "Desk";
-    desk.kind    = ObjectKind::Decor;
-    desk.geometry = "desk";
-    desk.size_m  = { 1.4f, 0.04f, 0.75f };
-    desk.transform.position = { 0.0f, -0.02f, 0.10f };
-    doc.objects.push_back(desk);
-
-    doc.object_colors["fan0"]       = MakeSceneColor(0x20, 0x40, 0x80);
-    doc.emitter_colors["fan0"][3]   = MakeSceneColor(0xFF, 0x00, 0x10);
-
-    doc.effect.preset    = "comet";
-    doc.effect.seed      = 4242;
-    doc.effect.speed     = 1.5f;
-    doc.effect.intensity = 0.75f;
-    doc.effect.playing   = true;
-    return doc;
-}
-
 static studio::StudioDocument SmallWorkspace()
 {
     studio::StudioDocument w;
-    w.meta.name = "Fixture desk";
-    w.scene     = SmallScene();
+    w.meta.name   = "Fixture desk";
+    w.brightness  = 0.65f;
+
+    studio::DeviceInstance a;
+    a.type         = "fan-120";
+    a.position     = { 0.0f, -0.16f, -0.14f };
+    a.parent       = "case";
+    w.devices["fan0"] = a;
+    studio::DeviceInstance b;
+    b.type         = "fan-120";
+    b.position     = { 0.0f, -0.16f, 0.12f };
+    b.parent       = "case";
+    w.devices["fan0_copy"] = b;
+    studio::DeviceInstance grp;
+    grp.type       = "group";
+    grp.position   = { 0.4f, 0.1f, -0.1f };
+    w.devices["case"] = grp;
+    studio::DeviceInstance desk;
+    desk.type      = "desk";
+    desk.position  = { 0.0f, -0.02f, 0.10f };
+    w.devices["desk"] = desk;
+
+    studio::DeviceBinding bind;
+    bind.id              = "fan_bus";
+    bind.controller_name = "X870E AORUS ELITE";
+    bind.vendor          = "Gigabyte";
+    bind.device_type     = -1;
+    bind.zone_name       = "ARGB_V2_1";
+    bind.zone_leds       = 8;
+    w.bindings["fan_bus"] = bind;
+
+    studio::DeviceSettings sa;
+    sa.zones["ring"] = { "fan_bus", 0, true };
+    w.device_settings["fan0"] = sa;
+    studio::DeviceSettings sb;
+    sb.mirror_of = "fan0";
+    w.device_settings["fan0_copy"] = sb;
+
+    w.object_colors["fan0/ring"]        = studio::MakeSceneColor(0x20, 0x40, 0x80);
+    w.emitter_colors["fan0/ring"][3]    = studio::MakeSceneColor(0xFF, 0x00, 0x10);
+
     w.inputs.audio        = true;
     w.inputs.keys         = false;
     w.inputs.screen       = true;
@@ -140,13 +112,19 @@ static studio::StudioDocument SmallWorkspace()
     w.meta.render.quality = "high";
     w.meta.camera.view    = "top";
     w.meta.extensions["thirdparty.example"] = { {"answer", 42} };
+
+    w.effect.preset    = "comet";
+    w.effect.seed      = 4242;
+    w.effect.speed     = 1.5f;
+    w.effect.intensity = 0.75f;
+    w.effect.playing   = true;
     return w;
 }
 
 /*---------------------------------------------------------*\
-|| Round-trip: every persisted field survives             ||
-|| ToJson -> FromJson, and the document shape matches the ||
-|| spec's top-level sections.                             ||
+||| Round-trip: every persisted field survives             ||
+||| ToJson -> FromJson, and the document shape matches the ||
+||| spec's top-level sections.                             ||
 \*---------------------------------------------------------*/
 static void TestWorkspaceRoundTrip()
 {
@@ -157,19 +135,21 @@ static void TestWorkspaceRoundTrip()
 
     CHECK(j.value("schema_version", 0) == STUDIO_SCHEMA_VERSION,
           "workspace: schema_version written");
+    CHECK(STUDIO_SCHEMA_VERSION == 3, "workspace: schema v3");
     CHECK(j.value("name", std::string()) == "Fixture desk",
           "workspace: top-level name");
     CHECK(j.contains("ui") && j.contains("camera") && j.contains("controls")
           && j.contains("render") && j.contains("inputs") && j.contains("output")
-          && j.contains("scene") && j.contains("effects")
-          && j.contains("definitions") && j.contains("extensions"),
+          && j.contains("devices") && j.contains("bindings")
+          && j.contains("device_settings") && j.contains("colors")
+          && j.contains("effects") && j.contains("extensions"),
           "workspace: all spec sections present");
+    CHECK(!j.contains("scene") && !j.contains("definitions"),
+          "workspace: no expanded sections");
     CHECK(Near(j["output"].value("brightness", 0.0f), 0.65f),
-          "workspace: brightness hoisted to output");
+          "workspace: brightness under output");
     CHECK(j["output"].value("live_on_startup", true) == false,
           "workspace: live_on_startup written false");
-    CHECK(!j["scene"].contains("effect") && !j["scene"].contains("brightness"),
-          "workspace: effect/brightness not duplicated in scene");
     CHECK(j["effects"].value("preset", std::string()) == "comet",
           "workspace: effect preset under effects");
     CHECK(j["effects"].value("playing", false) == true,
@@ -178,6 +158,12 @@ static void TestWorkspaceRoundTrip()
           "workspace: input settings serialized");
     CHECK(j["extensions"].contains("thirdparty.example"),
           "workspace: extensions retained");
+    CHECK(j["devices"]["fan0"].value("type", std::string()) == "fan-120"
+          && j["devices"]["fan0"].value("parent", std::string()) == "case",
+          "workspace: compact instance fields");
+    CHECK(j["device_settings"]["fan0_copy"].value("mirror_of", std::string())
+          == "fan0",
+          "workspace: instance mirror in device_settings");
 
     StudioDocument back;
     std::vector<std::string> errors;
@@ -187,31 +173,32 @@ static void TestWorkspaceRoundTrip()
         std::printf("  (unexpected errors: %s)\n", errors.front().c_str());
     }
     CHECK(back.meta.name == "Fixture desk", "round-trip: name");
-    CHECK(back.scene.objects.size() == w.scene.objects.size(),
-          "round-trip: object count");
-    CHECK(back.scene.bindings.size() == 1, "round-trip: bindings");
-    CHECK(FindObject(back.scene, "fan0") != nullptr
-          && FindObject(back.scene, "fan0")->parent_id == "case",
-          "round-trip: parent_id");
-    CHECK(FindObject(back.scene, "fan0_copy")->mirror_of == "fan0",
-          "round-trip: mirror_of ownership");
-    CHECK(Near(FindObject(back.scene, "fan0")->transform.position.y, -0.16f),
-          "round-trip: position");
-    CHECK(back.scene.object_colors["fan0"] == MakeSceneColor(0x20, 0x40, 0x80),
+    CHECK(back.devices.size() == 4 && back.bindings.size() == 1,
+          "round-trip: instances + bindings");
+    CHECK(back.devices["fan0"].type == "fan-120"
+          && back.devices["fan0"].parent == "case"
+          && Near(back.devices["fan0"].position.y, -0.16f),
+          "round-trip: instance fields");
+    CHECK(back.device_settings["fan0_copy"].mirror_of == "fan0",
+          "round-trip: mirror setting");
+    CHECK(back.device_settings["fan0"].zones["ring"].binding == "fan_bus"
+          && back.device_settings["fan0"].zones["ring"].verified,
+          "round-trip: zone attachment");
+    CHECK(back.object_colors["fan0/ring"] == MakeSceneColor(0x20, 0x40, 0x80),
           "round-trip: object color");
-    CHECK(back.scene.emitter_colors["fan0"][3] == MakeSceneColor(0xFF, 0x00, 0x10),
+    CHECK(back.emitter_colors["fan0/ring"][3] == MakeSceneColor(0xFF, 0x00, 0x10),
           "round-trip: emitter color");
-    CHECK(Near(back.scene.brightness, 0.65f), "round-trip: brightness");
+    CHECK(Near(back.brightness, 0.65f), "round-trip: brightness");
     CHECK(back.inputs.audio && !back.inputs.keys && back.inputs.screen
           && back.inputs.screen_index == 1 && back.inputs.sens_pct == 150
           && back.inputs.decay_pct == 120,
           "round-trip: input settings");
     CHECK(back.meta.render.quality == "high" && back.meta.camera.view == "top",
           "round-trip: meta prefs");
-    CHECK(back.scene.effect.preset == "comet" && back.scene.effect.seed == 4242
-          && Near(back.scene.effect.speed, 1.5f)
-          && Near(back.scene.effect.intensity, 0.75f)
-          && back.scene.effect.playing,
+    CHECK(back.effect.preset == "comet" && back.effect.seed == 4242
+          && Near(back.effect.speed, 1.5f)
+          && Near(back.effect.intensity, 0.75f)
+          && back.effect.playing,
           "round-trip: effect state");
     CHECK(back.meta.extensions["thirdparty.example"]["answer"] == 42,
           "round-trip: extensions verbatim");
@@ -222,8 +209,8 @@ static void TestWorkspaceRoundTrip()
 }
 
 /*---------------------------------------------------------*\
-|| Whole-document validation: field-specific errors,      ||
-|| candidate left untouched on failure.                   ||
+||| Whole-document validation: field-specific errors,      ||
+||| candidate left untouched on failure.                   ||
 \*---------------------------------------------------------*/
 static void TestWorkspaceValidation()
 {
@@ -232,7 +219,6 @@ static void TestWorkspaceValidation()
     const json good = ToJson(SmallWorkspace());
     std::vector<std::string> errors, warnings;
 
-    /* malformed types at the workspace level */
     {
         json j = good;
         j["inputs"] = "on";
@@ -256,17 +242,10 @@ static void TestWorkspaceValidation()
     }
     {
         json j = good;
-        j["schema_version"] = "2";
+        j["schema_version"] = "3";
         StudioDocument doc;
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "schema_version"),
               "validate: schema_version wrong type rejected");
-    }
-    {
-        json j = good;
-        j["scene"] = json::array();
-        StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "scene"),
-              "validate: scene wrong type rejected");
     }
     {
         json j = good;
@@ -283,7 +262,8 @@ static void TestWorkspaceValidation()
               "validate: sens_pct out of range rejected");
     }
 
-    /* newer versions rejected — workspace and scene section */
+    /* versions: newer rejected untouched, older is the expanded
+       format (migrated at the file layer, not here) */
     {
         json j = good;
         j["schema_version"] = STUDIO_SCHEMA_VERSION + 1;
@@ -293,94 +273,116 @@ static void TestWorkspaceValidation()
     }
     {
         json j = good;
-        j["scene"]["version"] = 99;
+        j["schema_version"] = 2;
         StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors),
-              "validate: newer scene version rejected");
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "schema_version"),
+              "validate: expanded v2 rejected by the v3 reader");
     }
 
-    /* structural errors through the scene section */
+    /* expanded sections must not appear in a v3 workspace */
     {
         json j = good;
-        j["scene"]["objects"].push_back(j["scene"]["objects"][0]);
+        j["scene"] = json::object();
         StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "duplicate"),
-              "validate: duplicate object id rejected");
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "scene"),
+              "validate: embedded scene rejected");
     }
     {
-        /* case -> fan0 -> case: fan0 already has parent_id "case" */
         json j = good;
-        j["scene"]["objects"][0]["parent_id"] = "fan0";
+        j["definitions"] = json::object();
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "definitions"),
+              "validate: embedded definitions rejected");
+    }
+
+    /* compact-section structural errors */
+    {
+        json j = good;
+        j["devices"]["fan0"]["type"] = "has space";
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "type"),
+              "validate: bad type id rejected");
+    }
+    {
+        json j = good;
+        j["devices"]["fan0"]["parent"] = "ghost";
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "parent"),
+              "validate: dangling instance parent rejected");
+    }
+    {
+        json j = good;
+        j["devices"]["fan0"]["parent"] = "fan0_copy";
+        j["devices"]["fan0_copy"]["parent"] = "fan0";
         StudioDocument doc;
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "cycle"),
-              "validate: parent cycle rejected");
+              "validate: instance parent cycle rejected");
     }
     {
         json j = good;
-        j["scene"]["objects"][1]["scale"]["x"] = -1.0;
+        j["devices"]["fan0"]["x"] = "north";
         StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "scale"),
-              "validate: invalid scale rejected");
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "devices.fan0.x"),
+              "validate: malformed position rejected");
     }
     {
         json j = good;
-        j["scene"]["objects"][1]["position"]["x"] = "north";
-        StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors),
-              "validate: malformed position type rejected");
-    }
-
-    /* out-of-range LED addresses and dangling binding refs */
-    {
-        json j = good;
-        j["scene"]["objects"][1]["emitters"][0]["address"] = 8;   /* zone_leds == 8 */
-        StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "address"),
-              "validate: emitter address past zone end rejected");
-    }
-    {
-        json j = good;
-        j["scene"]["objects"][1]["emitters"][0]["address"] = -2;
-        StudioDocument doc;
-        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "address"),
-              "validate: emitter address < -1 rejected");
-    }
-    {
-        json j = good;
-        j["scene"]["objects"][1]["binding"] = "no_such_binding";
+        j["device_settings"]["fan0"]["zones"]["ring"]["binding"] = "ghost";
         StudioDocument doc;
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "binding"),
-              "validate: dangling object binding rejected");
+              "validate: dangling zone binding rejected");
+    }
+    {
+        json j = good;
+        j["device_settings"]["fan0"]["mirror_of"] = "fan0";
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "mirror_of"),
+              "validate: self mirror rejected");
+    }
+    {
+        json j = good;
+        j["device_settings"]["fan0"]["mirror_of"] = "ghost";
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "mirror_of"),
+              "validate: dangling mirror target rejected");
+    }
+    {
+        json j = good;
+        j["device_settings"]["ghost"] = {{"visible", false}};
+        StudioDocument doc;
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "ghost"),
+              "validate: settings for unknown instance rejected");
     }
 
     /* failed loads never touch the active candidate */
     {
         StudioDocument doc = SmallWorkspace();
-        const size_t n = doc.scene.objects.size();
+        const size_t n = doc.devices.size();
         json bad = good;
         bad["schema_version"] = 42;
         CHECK(!FromJson(bad, doc, &errors)
-              && doc.scene.objects.size() == n
+              && doc.devices.size() == n
               && doc.meta.name == "Fixture desk",
               "validate: failure leaves document untouched");
     }
 
-    /* an empty scene is a valid workspace */
+    /* an empty desk is a valid workspace */
     {
         json j = good;
-        j["scene"]["objects"]   = json::array();
-        j["scene"]["bindings"]  = json::array();
-        j["scene"]["object_colors"]  = json::object();
-        j["scene"]["emitter_colors"] = json::object();
+        j["devices"]         = json::object();
+        j["bindings"]        = json::object();
+        j["device_settings"] = json::object();
+        j["colors"]          = {{"objects", json::object()},
+                                {"emitters", json::object()}};
         StudioDocument doc;
-        CHECK(FromJson(j, doc, &errors) && doc.scene.objects.empty(),
-              "validate: empty scene allowed");
+        CHECK(FromJson(j, doc, &errors) && doc.devices.empty(),
+              "validate: empty desk allowed");
     }
 
     /* unknown top-level fields warn instead of failing */
     {
         json j = good;
-        j["camer"] = j["camera"];   /* plausible typo */
+        j["camer"] = j["camera"];
         StudioDocument doc;
         errors.clear(); warnings.clear();
         CHECK(FromJson(j, doc, &errors, &warnings)
@@ -399,7 +401,7 @@ static void TestWorkspaceValidation()
 }
 
 /*---------------------------------------------------------*\
-|| #RRGGBB colors on write; packed ints still accepted.   ||
+||| #RRGGBB colors on write; packed ints still accepted.   ||
 \*---------------------------------------------------------*/
 static void TestHexColors()
 {
@@ -408,33 +410,33 @@ static void TestHexColors()
     StudioDocument w = SmallWorkspace();
     const json j = ToJson(w);
 
-    CHECK(j["scene"]["object_colors"]["fan0"].is_string()
-          && j["scene"]["object_colors"]["fan0"] == "#204080",
+    CHECK(j["colors"]["objects"]["fan0/ring"].is_string()
+          && j["colors"]["objects"]["fan0/ring"] == "#204080",
           "colors: object color written as #RRGGBB");
-    CHECK(j["scene"]["emitter_colors"]["fan0"]["3"] == "#FF0010",
+    CHECK(j["colors"]["emitters"]["fan0/ring"]["3"] == "#FF0010",
           "colors: emitter color written as #RRGGBB");
 
     /* packed ints (pre-existing files) still parse */
     json legacy_color = j;
-    legacy_color["scene"]["object_colors"]["fan0"] = 0x00804020;
+    legacy_color["colors"]["objects"]["fan0/ring"] = 0x00804020;
     StudioDocument doc;
     std::vector<std::string> errors;
     CHECK(FromJson(legacy_color, doc, &errors)
-          && doc.scene.object_colors["fan0"] == MakeSceneColor(0x20, 0x40, 0x80),
+          && doc.object_colors["fan0/ring"] == MakeSceneColor(0x20, 0x40, 0x80),
           "colors: packed int accepted");
 
     /* malformed color rejected with a field path */
     json bad = j;
-    bad["scene"]["object_colors"]["fan0"] = "blue";
+    bad["colors"]["objects"]["fan0/ring"] = "blue";
     CHECK(!FromJson(bad, doc, &errors)
-          && HasError(errors, "object_colors"),
+          && HasError(errors, "colors"),
           "colors: malformed color rejected");
 }
 
 /*---------------------------------------------------------*\
-|| Legacy host-settings blob -> StudioDocument migration. ||
-|| Fixture mirrors what the old saveScene() wrote into    ||
-|| OpenRGB settings: {"scene": v1 doc, "inputs": {...}}.  ||
+||| Legacy host-settings blob -> v3 migration. Fixture     ||
+||| mirrors what the old saveScene() wrote into OpenRGB    ||
+||| settings: {"scene": v1 doc, "inputs": {...}}.          ||
 \*---------------------------------------------------------*/
 static json LegacyFixture()
 {
@@ -472,7 +474,7 @@ static json LegacyFixture()
                 {"kind", "decor"},
                 {"position", {{"x", 0.0}, {"y", -0.02}, {"z", 0.10}}},
                 {"rotation", {{"x", 0}, {"y", 0}, {"z", 0}}},
-                {"scale",    {{"x", 1.4}, {"y", 0.04}, {"z", 0.75}}},  /* v1: dims */
+                {"scale",    {{"x", 1.4}, {"y", 0.04}, {"z", 0.75}}},
                 {"binding", ""},
                 {"mirror_of", ""},
                 {"geometry", "desk"},
@@ -566,8 +568,10 @@ static void TestLegacyMigration()
           "migration: empty settings not a migration source");
 
     StudioDocument w;
+    std::vector<DevicePreset> types;
     std::vector<std::string> errors;
-    CHECK(MigrateLegacySettings(legacy, w, &errors), "migration: converts");
+    CHECK(MigrateLegacySettings(legacy, w, &types, &errors),
+          "migration: converts");
     if(!errors.empty())
     {
         std::printf("  (migration errors: %s)\n", errors.front().c_str());
@@ -575,41 +579,41 @@ static void TestLegacyMigration()
 
     CHECK(w.schema_version == STUDIO_SCHEMA_VERSION, "migration: version");
     CHECK(w.meta.name == "Daniel's desk", "migration: name");
-    CHECK(w.scene.version == 2, "migration: scene upgraded to v2");
+    CHECK(!types.empty(), "migration: types extracted");
 
-    /* IDs, positions, mirrored ownership preserved */
-    CHECK(w.scene.objects.size() == 4, "migration: object count");
-    const SceneObject* kbd = FindObject(w.scene, "keyboard");
-    CHECK(kbd != nullptr && kbd->kind == ObjectKind::Device
-          && kbd->binding == "kbd_g512",
-          "migration: keyboard id + binding");
-    CHECK(kbd != nullptr && Near(kbd->transform.rotation_deg.y, -8.0f),
-          "migration: rotation preserved");
-    CHECK(kbd != nullptr && kbd->emitters.size() == 1
-          && kbd->emitters[0].address == 12,
-          "migration: emitter address preserved");
-    const SceneObject* mirror = FindObject(w.scene, "case_fan_b1");
-    CHECK(mirror != nullptr && mirror->kind == ObjectKind::Linked
-          && mirror->mirror_of == "case_fans",
-          "migration: mirrored ownership preserved");
+    /* IDs, positions, mirrored ownership preserved — objects became
+       compact instances, ids stable. */
+    CHECK(w.devices.size() == 4, "migration: instance count");
+    CHECK(w.devices.count("keyboard") == 1
+          && w.devices["keyboard"].parent.empty()
+          && Near(w.devices["keyboard"].rotation_deg.y, -8.0f),
+          "migration: keyboard instance + rotation");
+    CHECK(w.bindings.count("kbd_g512") == 1
+          && w.bindings.count("fan_bus") == 1,
+          "migration: binding identity preserved");
+    CHECK(w.device_settings.count("case_fan_b1") == 1
+          && w.device_settings["case_fan_b1"].mirror_of == "case_fans",
+          "migration: mirror preserved as instance setting");
+    CHECK(w.device_settings["case_fans"].zones["main"].binding == "fan_bus"
+          && w.device_settings["case_fans"].zones["main"].verified,
+          "migration: zone binding + verification preserved");
+    /* the keyboard's single emitter sat at address 12 — sparse, so
+       the extracted zone keeps explicit addressing or the base. */
+    const ZoneSetting& kz = w.device_settings["keyboard"].zones["main"];
+    CHECK(kz.binding == "kbd_g512" && kz.verified
+          && kz.addr_base == 12,
+          "migration: emitter address base preserved");
 
-    /* v1 decor scale -> size_m, scale reset to identity */
-    const SceneObject* desk = FindObject(w.scene, "desk");
-    CHECK(desk != nullptr && Near(desk->size_m.x, 1.4f)
-          && Near(desk->size_m.y, 0.04f)
-          && Near(desk->transform.scale.x, 1.0f),
-          "migration: v1 decor scale -> size_m");
-
-    /* colors survive (packed ints -> same SceneColor values) */
-    CHECK(w.scene.object_colors["keyboard"] == 0x000000FFu,
-          "migration: object color preserved");
-    CHECK(w.scene.emitter_colors["keyboard"][12] == 0x0000FF00u,
-          "migration: emitter color preserved");
-    CHECK(Near(w.scene.brightness, 0.8f), "migration: brightness preserved");
+    /* colors re-keyed to <instance>/<entity> */
+    CHECK(w.object_colors["keyboard/body"] == 0x000000FFu,
+          "migration: object color re-keyed");
+    CHECK(w.emitter_colors["keyboard/body"][12] == 0x0000FF00u,
+          "migration: emitter color re-keyed");
+    CHECK(Near(w.brightness, 0.8f), "migration: brightness preserved");
 
     /* effect state + input settings preserved */
-    CHECK(w.scene.effect.preset == "aurora" && w.scene.effect.playing
-          && w.scene.effect.seed == 7 && Near(w.scene.effect.speed, 1.25f),
+    CHECK(w.effect.preset == "aurora" && w.effect.playing
+          && w.effect.seed == 7 && Near(w.effect.speed, 1.25f),
           "migration: effect state preserved");
     CHECK(w.inputs.audio && w.inputs.keys && !w.inputs.screen
           && w.inputs.sens_pct == 175 && w.inputs.decay_pct == 200,
@@ -618,23 +622,26 @@ static void TestLegacyMigration()
     /* migration NEVER turns live output on */
     CHECK(w.meta.live_on_startup == false, "migration: live_on_startup off");
 
-    /* the migrated doc is itself a valid workspace, stable on rewrite */
+    /* the migrated doc is itself a valid workspace, stable on
+       rewrite */
     StudioDocument back;
     CHECK(FromJson(ToJson(w), back, &errors),
           "migration: migrated doc round-trips");
     CHECK(ToJson(back) == ToJson(w), "migration: deterministic");
 
-    /* an invalid legacy scene fails cleanly instead of half-loading */
+    /* an invalid legacy scene fails cleanly instead of
+       half-loading */
     json bad_legacy = legacy;
     bad_legacy["scene"]["objects"][3]["mirror_of"] = "ghost";
     StudioDocument untouched = SmallWorkspace();
-    CHECK(!MigrateLegacySettings(bad_legacy, untouched, &errors)
+    std::vector<DevicePreset> t2;
+    CHECK(!MigrateLegacySettings(bad_legacy, untouched, &t2, &errors)
           && untouched.meta.name == "Fixture desk",
           "migration: invalid legacy rejected, doc untouched");
 }
 
 /*---------------------------------------------------------*\
-|| Effect-section validation details.                     ||
+||| Effect-section validation details.                     ||
 \*---------------------------------------------------------*/
 static void TestEffectsSection()
 {
@@ -661,7 +668,6 @@ static void TestEffectsSection()
         j["effects"]["preset"] = "no_such_look";
         StudioDocument doc;
         errors.clear(); warnings.clear();
-        /* unknown preset warns but must not kill the document */
         CHECK(FromJson(j, doc, &errors, &warnings)
               && HasError(warnings, "preset"),
               "effects: unknown preset warns, doc still loads");
@@ -675,29 +681,28 @@ static void TestEffectsSection()
     }
 
     /* effects.seed is a uint32 — remix() spans the whole unsigned
-       range, so seeds >= 2^31 must survive the round-trip (the old
-       get<int> read wrapped them negative and killed the load). */
+       range, so seeds >= 2^31 must survive the round-trip. */
     {
         json j = good;
         j["effects"]["seed"] = 0xFFFFFFFFu;
         StudioDocument doc;
         CHECK(FromJson(j, doc, &errors)
-              && doc.scene.effect.seed == 0xFFFFFFFFu,
+              && doc.effect.seed == 0xFFFFFFFFu,
               "effects: seed 0xFFFFFFFF loads");
         CHECK(ToJson(doc)["effects"]["seed"] == 0xFFFFFFFFu,
               "effects: seed 0xFFFFFFFF re-serializes");
     }
     {
         json j = good;
-        j["effects"]["seed"] = 3000000000u;   /* > 2^31, < 2^32 */
+        j["effects"]["seed"] = 3000000000u;
         StudioDocument doc;
         CHECK(FromJson(j, doc, &errors)
-              && doc.scene.effect.seed == 3000000000u,
+              && doc.effect.seed == 3000000000u,
               "effects: seed > 2^31 loads");
     }
     {
         json j = good;
-        j["effects"]["seed"] = 4294967296ull; /* past uint32 */
+        j["effects"]["seed"] = 4294967296ull;
         StudioDocument doc;
         errors.clear();
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
@@ -711,22 +716,15 @@ static void TestEffectsSection()
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
               "effects: negative seed rejected");
     }
-    /* Signed-integer path: a positive value stored as number_integer
-       (json(long long), binary-format deserializers) must still hit
-       the upper bound — the old check only rejected s < 0 and let
-       (unsigned int)s wrap it into a silently-wrong seed. */
     {
         json j = good;
-        j["effects"]["seed"] = 5000000000ll; /* signed, > UINT32_MAX */
+        j["effects"]["seed"] = 5000000000ll;
         StudioDocument doc;
         errors.clear();
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
               "effects: signed seed > UINT32_MAX rejected");
     }
     {
-        /* Same bound via the text parser — a plain 5000000000
-           literal on disk must be rejected whichever integer type
-           the parser yields for it. */
         json j = good;
         j["effects"]["seed"] = json::parse("5000000000");
         StudioDocument doc;
@@ -735,8 +733,8 @@ static void TestEffectsSection()
               "effects: text 5000000000 seed rejected");
     }
 
-    /* effects.layers is reserved for milestone 5 — retained
-       verbatim like definitions/extensions, never dropped. */
+    /* effects.layers is reserved — retained verbatim like
+       extensions, never dropped. */
     {
         json j = good;
         j["effects"]["layers"] = json::array({
@@ -770,8 +768,8 @@ static void TestEffectsSection()
 }
 
 /*---------------------------------------------------------*\
-|| Size limits: malformed community content must not be   ||
-|| able to destabilize the host.                          ||
+||| Size limits: malformed community content must not be   ||
+||| able to destabilize the host.                          ||
 \*---------------------------------------------------------*/
 static void TestDocumentLimits()
 {
@@ -781,28 +779,59 @@ static void TestDocumentLimits()
 
     {
         json j = good;
-        json& objects = j["scene"]["objects"];
         for(int i = 0; i < 2100; i++)
         {
-            objects.push_back({{"id", "pad_" + std::to_string(i)}});
+            j["devices"]["pad_" + std::to_string(i)] =
+                {{"type", "fan-120"}};
         }
         StudioDocument doc;
         CHECK(!FromJson(j, doc, &errors),
-              "limits: object count capped");
+              "limits: device count capped");
     }
     {
         json j = good;
-        json emitters = json::array();
-        for(int i = 0; i < 70000; i++)
+        for(int i = 0; i < 9000; i++)
         {
-            emitters.push_back({{"pos", {{"x",0},{"y",0},{"z",0}}},
-                                {"group","g"},{"address",-1}});
+            j["colors"]["objects"]["k_" + std::to_string(i)] = "#FF0000";
         }
-        j["scene"]["objects"][1]["emitters"] = emitters;
         StudioDocument doc;
         CHECK(!FromJson(j, doc, &errors),
-              "limits: emitter count capped");
+              "limits: color key count capped");
     }
+}
+
+/*---------------------------------------------------------*\
+||| The default desk end-to-end: compact workspace ->      ||
+||| resolved scene -> compact save text contains no        ||
+||| expanded content.                                      ||
+\*---------------------------------------------------------*/
+static void TestDefaultWorkspace()
+{
+    using namespace studio;
+
+    PresetRegistry reg;
+    reg.SetDefaults(DefaultDevicePresets());
+
+    StudioDocument w = BuildDefaultWorkspace();
+    std::vector<std::string> errors;
+    SceneDocument resolved;
+    CHECK(ResolveScene(w, reg, resolved, &errors),
+          "default: workspace resolves");
+    CHECK(resolved.objects.size() > 20,
+          "default: instances expand");
+
+    const json dj = ToJson(w);
+    bool expanded = dj.contains("entities") || dj.contains("emitters")
+                    || dj.contains("definitions") || dj.contains("scene");
+    for(const auto& kv : dj["devices"].items())
+    {
+        if(kv.value().contains("entities") || kv.value().contains("emitters")
+           || kv.value().contains("geometry"))
+        {
+            expanded = true;
+        }
+    }
+    CHECK(!expanded, "default: compact text has no expanded content");
 }
 
 int main()
@@ -813,6 +842,7 @@ int main()
     TestLegacyMigration();
     TestEffectsSection();
     TestDocumentLimits();
+    TestDefaultWorkspace();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

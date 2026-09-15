@@ -2,17 +2,16 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://openrgb.org/plugins/DesktopLightingStudio/schemas/studio.schema.json",
   "title": "Desktop Lighting Studio workspace",
-  "description": "Authoritative active workspace document (studio.json). Scene objects, bindings, colors, input/output settings, and editor preferences. Units: meters for positions/sizes, degrees for rotation, packed colors written as \"#RRGGBB\".",
+  "description": "Authoritative active workspace document (studio.json), compact v3: device INSTANCES (type id + placement), bindings, per-instance settings, colors, input/output settings, and editor preferences. Reusable device definitions live in external type files (presets/devices/*.device.json, see device.schema.json) — never inline here. Units: meters for positions, degrees for Euler rotations (Rz*Ry*Rx), colors written as \"#RRGGBB\".",
   "type": "object",
-  "required": ["schema_version", "scene"],
+  "required": ["schema_version"],
   "additionalProperties": true,
   "properties": {
     "$schema": { "type": "string" },
     "schema_version": {
       "type": "integer",
-      "minimum": 1,
-      "maximum": 2,
-      "description": "Workspace schema version. Documents newer than the supported version are rejected, not rewritten."
+      "const": 3,
+      "description": "Workspace schema version. 3 = compact instances. v1/v2 expanded documents migrate on file load; newer documents are rejected, not rewritten."
     },
     "name": { "type": "string" },
     "ui": {
@@ -66,74 +65,98 @@
         }
       }
     },
-    "scene": {
+    "devices": {
       "type": "object",
-      "description": "SceneJson v2 document. name/brightness/effect live in the top-level sections instead.",
-      "properties": {
-        "version": { "type": "integer", "minimum": 1, "maximum": 2 },
-        "bindings": {
-          "type": "array",
-          "maxItems": 512,
-          "items": {
-            "type": "object",
-            "required": ["id"],
-            "properties": {
-              "id": { "type": "string", "minLength": 1 },
-              "controller_name": { "type": "string" },
-              "vendor": { "type": "string" },
-              "serial": { "type": "string" },
-              "location": { "type": "string" },
-              "device_type": { "type": "integer" },
-              "zone_name": { "type": "string" },
-              "zone_leds": { "type": "integer", "minimum": 0 }
-            }
+      "description": "Root device instances keyed by stable instance id. Each entry is placement only: the reusable definition is devices.<id>.type resolved to presets/devices/<type>.device.json (file id must match).",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Device-type id — resolves to presets/devices/<id>.device.json."
+          },
+          "x": { "type": "number", "description": "Meters." },
+          "y": { "type": "number", "description": "Meters." },
+          "z": { "type": "number", "description": "Meters." },
+          "rx": { "type": "number", "description": "Euler degrees, Rz*Ry*Rx order." },
+          "ry": { "type": "number" },
+          "rz": { "type": "number" },
+          "parent": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Optional parent INSTANCE id — placement is then relative to it. Must resolve; cycles rejected."
           }
         },
-        "objects": {
-          "type": "array",
-          "maxItems": 2048,
-          "items": {
+        "additionalProperties": false
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "description": "Persistent hardware identities keyed by binding id — never controller-list indices.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "controller_name": { "type": "string" },
+          "vendor": { "type": "string" },
+          "serial": { "type": "string" },
+          "location": { "type": "string" },
+          "device_type": { "type": "integer" },
+          "zone_name": { "type": "string" },
+          "zone_leds": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "device_settings": {
+      "type": "object",
+      "description": "Per-instance state keyed by instance path (a root instance id, or <parent>/<child-entity> for a nested child device inside a type).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "visible": { "type": "boolean", "default": true },
+          "locked": { "type": "boolean", "default": false },
+          "mirror_of": {
+            "type": "string",
+            "description": "Another instance path of the SAME type. Every expanded object under this path becomes a Linked copy of the corresponding object under the target — output ownership, never placement. Chains rejected."
+          },
+          "zones": {
             "type": "object",
-            "required": ["id"],
-            "properties": {
-              "id": { "type": "string", "minLength": 1 },
-              "label": { "type": "string" },
-              "kind": { "type": "string", "enum": ["decor", "device", "linked", "group"] },
-              "parent_id": { "type": "string", "description": "Placement frame owner; must resolve, no cycles." },
-              "position": { "$ref": "#/definitions/vec3" },
-              "rotation": { "$ref": "#/definitions/vec3", "description": "Euler XYZ degrees, Rz*Ry*Rx order." },
-              "scale": { "$ref": "#/definitions/vec3", "description": "Dimensionless; every component must be > 0." },
-              "size_m": { "$ref": "#/definitions/vec3", "description": "Body dimensions in meters (pre-scale); each component >= 0, and a 0 component falls back to the geometry's canonical axis size ({0,0,0} = full canonical size)." },
-              "binding": { "type": "string", "description": "DeviceBinding id; must resolve when set." },
-              "mirror_of": { "type": "string", "description": "Linked objects only; must name a non-linked object." },
-              "geometry": { "type": "string" },
-              "layout": { "type": "string" },
-              "verified": { "type": "boolean" },
-              "visible": { "type": "boolean" },
-              "emitters": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "pos": { "$ref": "#/definitions/vec3" },
-                    "group": { "type": "string" },
-                    "address": {
-                      "type": "integer",
-                      "minimum": -1,
-                      "description": "LED index in the bound zone, or -1 for render-only. Must be < the binding's zone_leds when that is nonzero."
-                    }
-                  }
+            "description": "Zone id -> physical attachment for zones declared by this instance's type.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "binding": {
+                  "type": "string",
+                  "description": "bindings key; must resolve when set."
+                },
+                "addr_base": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "First LED index this zone occupies in the bound hardware zone."
+                },
+                "verified": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Hardware-verified => writable. Type files can never grant this."
                 }
               }
             }
           }
-        },
-        "object_colors": {
+        }
+      }
+    },
+    "colors": {
+      "type": "object",
+      "properties": {
+        "objects": {
           "type": "object",
+          "description": "Resolved object path (<instance>/<entity>) -> base color.",
           "additionalProperties": { "$ref": "#/definitions/color" }
         },
-        "emitter_colors": {
+        "emitters": {
           "type": "object",
+          "description": "Resolved object path -> emitter index -> painted color override.",
           "additionalProperties": {
             "type": "object",
             "additionalProperties": { "$ref": "#/definitions/color" }
@@ -155,28 +178,12 @@
         }
       }
     },
-    "definitions": {
-      "type": "object",
-      "properties": {
-        "devices": { "type": "array" },
-        "effects": { "type": "array" }
-      },
-      "description": "Device/effect preset snapshots used by this workspace; authoritative for it."
-    },
     "extensions": {
       "type": "object",
       "description": "Third-party extension data, retained verbatim."
     }
   },
   "definitions": {
-    "vec3": {
-      "type": "object",
-      "properties": {
-        "x": { "type": "number" },
-        "y": { "type": "number" },
-        "z": { "type": "number" }
-      }
-    },
     "color": {
       "oneOf": [
         { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },

@@ -1383,12 +1383,12 @@ static void TestDefaultDeskGroups()
                                       { 0.052f, 0.016f, 0.0f });
         CHECK(Near(w.x, 0.522f) && Near(w.y, 0.30f) && Near(w.z, -0.284f),
               "desk: rear fan world preserved");
-        /* gpu_logo on the card's glass-facing edge: node local
-           {-0.03,-0.02,-0.02} under the case anchor -> {0.44,0.215,-0.12};
+        /* gpu_logo on the card's glass-facing (-x) edge: node local
+           {-0.04,-0.035,-0.02} under the case anchor -> {0.43,0.20,-0.12};
            ry=90 turns strip led0 local {-0.03,0,0} into +z 0.03 ->
-           {0.44,0.215,-0.09} */
+           {0.43,0.20,-0.09} */
         const Vec3 g = TransformPoint(world.at("gpu_logo"), { -0.03f, 0, 0 });
-        CHECK(Near(g.x, 0.44f) && Near(g.y, 0.215f) && Near(g.z, -0.09f),
+        CHECK(Near(g.x, 0.43f) && Near(g.y, 0.20f) && Near(g.z, -0.09f),
               "desk: gpu logo world preserved");
     }
 

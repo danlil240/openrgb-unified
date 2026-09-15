@@ -50,8 +50,9 @@ static Vec3 Vec3From(const nlohmann::json& j, const Vec3& def,
 }
 
 /* Colors write as "#RRGGBB"; reads accept that or the legacy packed
-   0x00BBGGRR integer. */
-static std::string ColorHex(SceneColor c)
+   0x00BBGGRR integer. Exported (SceneColorHex/ParseSceneColor) so
+   the workspace serializer shares the one implementation. */
+std::string SceneColorHex(SceneColor c)
 {
     char buf[8];
     std::snprintf(buf, sizeof(buf), "#%02X%02X%02X",
@@ -59,7 +60,7 @@ static std::string ColorHex(SceneColor c)
     return buf;
 }
 
-static bool ParseColor(const nlohmann::json& v, SceneColor& out)
+bool ParseSceneColor(const nlohmann::json& v, SceneColor& out)
 {
     if(v.is_number_unsigned() || v.is_number_integer())
     {
@@ -161,7 +162,7 @@ nlohmann::json ToJson(const SceneDocument& doc)
     nlohmann::json colors = nlohmann::json::object();
     for(const auto& kv : doc.object_colors)
     {
-        colors[kv.first] = ColorHex(kv.second);
+        colors[kv.first] = SceneColorHex(kv.second);
     }
     j["object_colors"] = colors;
 
@@ -171,7 +172,7 @@ nlohmann::json ToJson(const SceneDocument& doc)
         nlohmann::json inner = nlohmann::json::object();
         for(const auto& e : kv.second)
         {
-            inner[std::to_string(e.first)] = ColorHex(e.second);
+            inner[std::to_string(e.first)] = SceneColorHex(e.second);
         }
         ecolors[kv.first] = inner;
     }
@@ -364,7 +365,7 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
             for(auto it = colors.begin(); it != colors.end(); ++it)
             {
                 SceneColor c = 0;
-                if(ParseColor(it.value(), c))
+                if(ParseSceneColor(it.value(), c))
                 {
                     out.object_colors[it.key()] = c;
                 }
@@ -410,7 +411,7 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
                         continue;
                     }
                     SceneColor c = 0;
-                    if(ParseColor(e.value(), c))
+                    if(ParseSceneColor(e.value(), c))
                     {
                         out.emitter_colors[it.key()][index] = c;
                     }

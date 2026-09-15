@@ -19,6 +19,7 @@
 
 #include "../scene/SceneTypes.h"
 #include "../config/StudioConfig.h"
+#include "../presets/PresetRegistry.h"
 #include "../output/ControllerAdapter.h"
 #include "../effects/EffectEngine.h"
 #include "../inputs/InputBus.h"
@@ -209,15 +210,21 @@ private:
 
     /* Workspace document store. CurrentWorkspace snapshots runtime
        state; ApplyWorkspace commits a validated candidate (never
-       touches live_output). markDirty drives the autosave. */
+       touches live_output). markDirty drives the autosave.
+       ReloadPresets refreshes the type library (packaged defaults
+       under the workspace's presets/devices/ files) so a Reload
+       picks up edited type files. */
     StudioDocument CurrentWorkspace() const;
     void           ApplyWorkspace(const StudioDocument& w);
     bool           LoadWorkspace();
+    void           ReloadPresets();
     void           markDirty();
 
     OpenRGBPluginAPIInterface*  api;
     ControllerAdapter           adapter;
-    SceneDocument               doc;
+    SceneDocument               doc;              /* resolved runtime scene  */
+    StudioDocument              workspace;        /* compact authoring state */
+    PresetRegistry              registry;         /* device-type library     */
     QUndoStack*                 undo_stack;
     ConfigStore*                store = nullptr;
     WorkspaceMeta               meta;             /* prefs + retained sections */

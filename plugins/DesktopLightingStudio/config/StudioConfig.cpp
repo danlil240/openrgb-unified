@@ -1,16 +1,17 @@
 /*---------------------------------------------------------*\
-|| StudioConfig.cpp                                          |
-||                                                           |
-||   SPDX-License-Identifier: GPL-2.0-or-later               |
+||| StudioConfig.cpp                                          |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
 #include "StudioConfig.h"
 #include "../scene/SceneJson.h"
 #include "../scene/JsonFields.h"
+#include "../presets/DevicePreset.h"
 #include "../effects/Presets.h"
 
-#include <cstdint>
 #include <set>
+#include <vector>
 
 namespace studio
 {
@@ -63,35 +64,188 @@ std::string FieldEnum(const nlohmann::json& j, const char* key,
     return v;
 }
 
+/* Split an instance/entity path on '/' and check every segment is
+   a legal id. */
+std::vector<std::string> PathSegments(const std::string& path)
+{
+    std::vector<std::string> segs;
+    std::string cur;
+    for(char c : path)
+    {
+        if(c == '/')
+        {
+            segs.push_back(cur);
+            cur.clear();
+        }
+        else
+        {
+            cur += c;
+        }
+    }
+    segs.push_back(cur);
+    return segs;
+}
+
+bool ValidPath(const std::string& path)
+{
+    for(const std::string& s : PathSegments(path))
+    {
+        if(!IsPresetId(s))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+nlohmann::json BindingToJson(const DeviceBinding& b)
+{
+    return {
+        {"controller_name", b.controller_name},
+        {"vendor",          b.vendor},
+        {"serial",          b.serial},
+        {"location",        b.location},
+        {"device_type",     b.device_type},
+        {"zone_name",       b.zone_name},
+        {"zone_leds",       b.zone_leds},
+    };
+}
+
+DeviceBinding BindingFromJson(const nlohmann::json& jb,
+                              const std::string& id,
+                              const std::string& path,
+                              std::vector<std::string>& errs)
+{
+    DeviceBinding b;
+    b.id              = id;
+    b.controller_name = FieldStr(jb, "controller_name", std::string(), path, errs);
+    b.vendor          = FieldStr(jb, "vendor", std::string(), path, errs);
+    b.serial          = FieldStr(jb, "serial", std::string(), path, errs);
+    b.location        = FieldStr(jb, "location", std::string(), path, errs);
+    b.device_type     = FieldI32(jb, "device_type", -1, path, errs);
+    b.zone_name       = FieldStr(jb, "zone_name", std::string(), path, errs);
+    const long long leds = FieldInt(jb, "zone_leds", 0, path, errs);
+    b.zone_leds       = leds <= 0 ? 0u
+                      : (leds > 4294967295ll ? 4294967295u
+                                             : (unsigned int)leds);
+    return b;
+}
+
 } /* anonymous namespace */
 
 nlohmann::json ToJson(const StudioDocument& doc)
 {
-    /* The scene keeps its own SceneJson shape minus the fields that
-       live in the workspace-level sections (name, brightness,
-       effect) so each value has exactly one home in the file. */
-    nlohmann::json scene = ToJson(doc.scene);
-    scene.erase("name");
-    scene.erase("brightness");
-    scene.erase("effect");
-
     nlohmann::json effects = {
-        {"preset",    doc.scene.effect.preset},
-        {"seed",      doc.scene.effect.seed},
-        {"speed",     doc.scene.effect.speed},
-        {"intensity", doc.scene.effect.intensity},
-        {"playing",   doc.scene.effect.playing},
+        {"preset",    doc.effect.preset},
+        {"seed",      doc.effect.seed},
+        {"speed",     doc.effect.speed},
+        {"intensity", doc.effect.intensity},
+        {"playing",   doc.effect.playing},
         /* Reserved for JSON layer definitions (milestone 5);
-           retained verbatim like definitions/extensions. */
+           retained verbatim like extensions. */
         {"layers",    doc.meta.layers.is_array() ? doc.meta.layers
                                                  : nlohmann::json::array()},
+    };
+
+    nlohmann::json devices = nlohmann::json::object();
+    for(const auto& kv : doc.devices)
+    {
+        const DeviceInstance& d = kv.second;
+        nlohmann::json jd = {
+            {"type", d.type},
+            {"x",    d.position.x},
+            {"y",    d.position.y},
+            {"z",    d.position.z},
+            {"rx",   d.rotation_deg.x},
+            {"ry",   d.rotation_deg.y},
+            {"rz",   d.rotation_deg.z},
+        };
+        if(!d.parent.empty())
+        {
+            jd["parent"] = d.parent;
+        }
+        devices[kv.first] = jd;
+    }
+
+    nlohmann::json bindings = nlohmann::json::object();
+    for(const auto& kv : doc.bindings)
+    {
+        bindings[kv.first] = BindingToJson(kv.second);
+    }
+
+    nlohmann::json settings = nlohmann::json::object();
+    for(const auto& kv : doc.device_settings)
+    {
+        const DeviceSettings& s = kv.second;
+        nlohmann::json js = nlohmann::json::object();
+        if(s.extra.is_object())
+        {
+            /* unknown fields first — known keys overwrite below so a
+               stale retained field can't shadow live state */
+            js = s.extra;
+        }
+        if(!s.visible)
+        {
+            js["visible"] = false;
+        }
+        if(s.locked)
+        {
+            js["locked"] = true;
+        }
+        if(!s.mirror_of.empty())
+        {
+            js["mirror_of"] = s.mirror_of;
+        }
+        if(!s.zones.empty())
+        {
+            nlohmann::json zones = nlohmann::json::object();
+            for(const auto& zkv : s.zones)
+            {
+                const ZoneSetting& z = zkv.second;
+                nlohmann::json jz = nlohmann::json::object();
+                if(!z.binding.empty())
+                {
+                    jz["binding"] = z.binding;
+                }
+                if(z.addr_base != 0)
+                {
+                    jz["addr_base"] = z.addr_base;
+                }
+                if(z.verified)
+                {
+                    jz["verified"] = true;
+                }
+                zones[zkv.first] = jz;
+            }
+            js["zones"] = zones;
+        }
+        settings[kv.first] = js;
+    }
+
+    nlohmann::json objects = nlohmann::json::object();
+    for(const auto& kv : doc.object_colors)
+    {
+        objects[kv.first] = SceneColorHex(kv.second);
+    }
+    nlohmann::json emitters = nlohmann::json::object();
+    for(const auto& kv : doc.emitter_colors)
+    {
+        nlohmann::json inner = nlohmann::json::object();
+        for(const auto& e : kv.second)
+        {
+            inner[std::to_string(e.first)] = SceneColorHex(e.second);
+        }
+        emitters[kv.first] = inner;
+    }
+    nlohmann::json colors = {
+        {"objects",  objects},
+        {"emitters", emitters},
     };
 
     nlohmann::json j;
     j["$schema"]        = "schemas/studio.schema.json";
     j["schema_version"] = doc.schema_version;
-    j["name"]           = doc.meta.name.empty() ? doc.scene.name
-                                                : doc.meta.name;
+    j["name"]           = doc.meta.name;
     j["ui"] = {
         {"theme",          doc.meta.ui.theme},
         {"reduced_motion", doc.meta.ui.reduced_motion},
@@ -118,16 +272,15 @@ nlohmann::json ToJson(const StudioDocument& doc)
         {"decay_pct",    doc.inputs.decay_pct},
     };
     j["output"] = {
-        {"brightness",       doc.scene.brightness},
+        {"brightness",       doc.brightness},
         {"live_on_startup",  doc.meta.live_on_startup},
     };
-    j["scene"]   = scene;
-    j["effects"] = effects;
-    j["definitions"] = doc.meta.definitions.is_object()
-        ? doc.meta.definitions
-        : nlohmann::json{{"devices",  nlohmann::json::array()},
-                         {"effects",  nlohmann::json::array()}};
-    j["extensions"]  = doc.meta.extensions.is_object()
+    j["devices"]         = devices;
+    j["bindings"]        = bindings;
+    j["device_settings"] = settings;
+    j["colors"]          = colors;
+    j["effects"]         = effects;
+    j["extensions"]      = doc.meta.extensions.is_object()
         ? doc.meta.extensions
         : nlohmann::json::object();
     return j;
@@ -148,7 +301,9 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
 
     /*------------------------------------------------*\
     || schema_version — newer docs are rejected        ||
-    || untouched rather than silently downgraded.      ||
+    || untouched rather than silently downgraded; the  ||
+    || expanded v2 format migrates at the file layer   ||
+    || (ConfigStore), never inside FromJson.           ||
     \*------------------------------------------------*/
     if(!j.contains("schema_version"))
     {
@@ -161,9 +316,11 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
     else
     {
         const long long v = j["schema_version"].get<long long>();
-        if(v < 1)
+        if(v < STUDIO_SCHEMA_VERSION)
         {
-            errs.push_back("schema_version: expected >= 1");
+            AddErr(errs, "schema_version",
+                   std::to_string(v) + " is the expanded format —"
+                   " it migrates on file load (ConfigStore)");
         }
         else if(v > STUDIO_SCHEMA_VERSION)
         {
@@ -171,6 +328,20 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                    std::to_string(v) + " is newer than supported "
                    + std::to_string(STUDIO_SCHEMA_VERSION));
         }
+    }
+
+    /* Expanded sections must never appear in a v3 workspace —
+       entities and embedded definitions live in the type files. */
+    if(j.contains("scene"))
+    {
+        AddErr(errs, "scene",
+               "expanded scenes must not be serialized in schema v3");
+    }
+    if(j.contains("definitions"))
+    {
+        AddErr(errs, "definitions",
+               "embedded device definitions must not be serialized"
+               " in schema v3");
     }
 
     StudioDocument out;
@@ -284,11 +455,8 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
     }
 
     /*------------------------------------------------*\
-    || output — brightness is hoisted here; it lands   ||
-    || on the scene doc before scene validation runs.  ||
+    || output                                          ||
     \*------------------------------------------------*/
-    bool     have_brightness = false;
-    double   brightness      = 1.0;
     if(const nlohmann::json* s = Section(j, "output", errs))
     {
         if(s->contains("brightness"))
@@ -300,8 +468,7 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
             }
             else if(s->at("brightness").is_number())
             {
-                brightness      = b;
-                have_brightness = true;
+                out.brightness = (float)b;
             }
         }
         out.meta.live_on_startup = FieldBool(*s, "live_on_startup",
@@ -309,36 +476,34 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
     }
 
     /*------------------------------------------------*\
-    || effects — re-anchored into scene.effect so the  ||
-    || scene doc stays the single in-memory owner.     ||
+    || effects                                         ||
     \*------------------------------------------------*/
-    bool          have_effect = false;
-    nlohmann::json effect_j    = nlohmann::json::object();
-    std::string   preset;
     if(const nlohmann::json* s = Section(j, "effects", errs))
     {
-        have_effect = true;
-        preset = FieldStr(*s, "preset", std::string(), "effects", errs);
-        effect_j["preset"] = preset;
-        /* Full-range uint32 read — the old long-long read +
-           (unsigned int) cast wrapped seeds > UINT32_MAX and a
-           >= 2^31 seed never survived scene validation. */
-        effect_j["seed"] = FieldU32(*s, "seed", 0, "effects", errs);
+        out.effect.preset    = FieldStr(*s, "preset", std::string(),
+                                        "effects", errs);
+        out.effect.seed      = FieldU32(*s, "seed", 0, "effects", errs);
         const double speed = FieldNum(*s, "speed", 1.0, "effects", errs);
         if(speed <= 0.0)
         {
             AddErr(errs, "effects.speed", "expected number > 0");
         }
-        effect_j["speed"] = speed;
+        else
+        {
+            out.effect.speed = (float)speed;
+        }
         const double intensity = FieldNum(*s, "intensity", 1.0,
                                           "effects", errs);
         if(intensity < 0.0 || intensity > 1.0)
         {
             AddErr(errs, "effects.intensity", "expected number in 0..1");
         }
-        effect_j["intensity"] = intensity;
-        effect_j["playing"] = FieldBool(*s, "playing", false,
-                                        "effects", errs);
+        else
+        {
+            out.effect.intensity = (float)intensity;
+        }
+        out.effect.playing = FieldBool(*s, "playing", false,
+                                       "effects", errs);
         if(s->contains("layers"))
         {
             if(!s->at("layers").is_array())
@@ -347,148 +512,364 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
             }
             else
             {
-                /* Reserved for milestone 5 — retained verbatim like
-                   definitions/extensions so a hand-authored layers
-                   array is never destroyed by a save. */
                 out.meta.layers = s->at("layers");
             }
         }
     }
 
     /*------------------------------------------------*\
-    || scene — delegated to the scene validator with   ||
-    || the hoisted fields re-attached.                  ||
+    || devices — compact placements                    ||
     \*------------------------------------------------*/
-    bool scene_ok = false;
-    if(!j.contains("scene"))
+    if(j.contains("devices"))
     {
-        errs.push_back("scene: missing");
-    }
-    else if(!j["scene"].is_object())
-    {
-        errs.push_back("scene: expected object");
-    }
-    else
-    {
-        nlohmann::json scene_j = j["scene"];
-        if(!scene_j.contains("version"))
+        if(!j["devices"].is_object())
         {
-            scene_j["version"] = 2;
+            AddErr(errs, "devices", "expected object");
         }
-        if(!out.meta.name.empty())
+        else
         {
-            scene_j["name"] = out.meta.name;
-        }
-        if(have_brightness)
-        {
-            scene_j["brightness"] = brightness;
-        }
-        if(have_effect)
-        {
-            scene_j["effect"] = effect_j;
-        }
-
-        std::vector<std::string> scene_errors;
-        try
-        {
-            scene_ok = FromJson(scene_j, out.scene, &scene_errors);
-        }
-        catch(...)
-        {
-            scene_errors.push_back("unexpected parse failure");
-        }
-        for(const std::string& e : scene_errors)
-        {
-            errs.push_back("scene: " + e);
-        }
-
-        if(scene_ok)
-        {
-            /* Workspace-level checks the scene layer can't see:
-               object -> binding references, LED addresses against
-               the bound zone, and content caps. */
-            if(out.scene.objects.size() > STUDIO_MAX_OBJECTS)
+            for(auto it = j["devices"].begin(); it != j["devices"].end(); ++it)
             {
-                AddErr(errs, "scene.objects", "count exceeds cap "
-                       + std::to_string(STUDIO_MAX_OBJECTS));
-            }
-            if(out.scene.bindings.size() > STUDIO_MAX_BINDINGS)
-            {
-                AddErr(errs, "scene.bindings", "count exceeds cap "
-                       + std::to_string(STUDIO_MAX_BINDINGS));
-            }
-
-            std::set<std::string> binding_ids;
-            for(const DeviceBinding& b : out.scene.bindings)
-            {
-                binding_ids.insert(b.id);
-            }
-
-            size_t total_emitters = 0;
-            for(const SceneObject& o : out.scene.objects)
-            {
-                total_emitters += o.emitters.size();
-                const std::string opath = "scene.objects[" + o.id + "]";
-
-                const DeviceBinding* bound = nullptr;
-                if(!o.binding.empty())
+                const std::string iid  = it.key();
+                const nlohmann::json& jd = it.value();
+                const std::string path = "devices." + iid;
+                if(!IsPresetId(iid))
                 {
-                    const auto bit = binding_ids.find(o.binding);
-                    if(bit == binding_ids.end())
-                    {
-                        AddErr(errs, opath + ".binding",
-                               "unknown binding '" + o.binding + "'");
-                    }
-                    else
-                    {
-                        for(const DeviceBinding& b : out.scene.bindings)
-                        {
-                            if(b.id == o.binding) { bound = &b; break; }
-                        }
-                    }
+                    AddErr(errs, path, "bad instance id '" + iid + "'");
+                    continue;
                 }
-                for(size_t i = 0; i < o.emitters.size(); i++)
+                if(!jd.is_object())
                 {
-                    const int a = o.emitters[i].address;
-                    const std::string ep = opath + ".emitters["
-                                           + std::to_string(i) + "].address";
-                    if(a < -1)
-                    {
-                        AddErr(errs, ep, "expected -1 or >= 0");
-                    }
-                    else if(bound != nullptr && bound->zone_leds > 0
-                            && a >= (int)bound->zone_leds)
-                    {
-                        AddErr(errs, ep, std::to_string(a)
-                               + " out of range (zone '" + bound->zone_name
-                               + "' has " + std::to_string(bound->zone_leds)
-                               + " LEDs)");
-                    }
+                    AddErr(errs, path, "expected object");
+                    continue;
+                }
+                DeviceInstance d;
+                d.type           = FieldStr(jd, "type", std::string(),
+                                            path, errs);
+                if(!IsPresetId(d.type))
+                {
+                    AddErr(errs, path + ".type", "expected a device-type"
+                           " id ([A-Za-z0-9_-])");
+                }
+                d.position.x     = (float)FieldNum(jd, "x", 0.0, path, errs);
+                d.position.y     = (float)FieldNum(jd, "y", 0.0, path, errs);
+                d.position.z     = (float)FieldNum(jd, "z", 0.0, path, errs);
+                d.rotation_deg.x = (float)FieldNum(jd, "rx", 0.0, path, errs);
+                d.rotation_deg.y = (float)FieldNum(jd, "ry", 0.0, path, errs);
+                d.rotation_deg.z = (float)FieldNum(jd, "rz", 0.0, path, errs);
+                d.parent         = FieldStr(jd, "parent", std::string(),
+                                            path, errs);
+                out.devices[iid] = d;
+            }
+            if(out.devices.size() > STUDIO_MAX_DEVICES)
+            {
+                AddErr(errs, "devices", "count exceeds cap "
+                       + std::to_string(STUDIO_MAX_DEVICES));
+            }
+            /* parent refs + cycles */
+            for(const auto& kv : out.devices)
+            {
+                const std::string& pid = kv.second.parent;
+                if(pid.empty())
+                {
+                    continue;
+                }
+                if(!IsPresetId(pid) || out.devices.find(pid) == out.devices.end())
+                {
+                    AddErr(errs, "devices." + kv.first + ".parent",
+                           "unknown instance '" + pid + "'");
                 }
             }
-            if(total_emitters > STUDIO_MAX_EMITTERS)
+            for(const auto& kv : out.devices)
             {
-                AddErr(errs, "scene.objects.emitters", "count exceeds cap "
-                       + std::to_string(STUDIO_MAX_EMITTERS));
+                std::set<std::string> seen;
+                std::string cur = kv.first;
+                while(!cur.empty())
+                {
+                    if(!seen.insert(cur).second)
+                    {
+                        AddErr(errs, "devices." + kv.first + ".parent",
+                               "parent cycle through '" + cur + "'");
+                        break;
+                    }
+                    const auto it = out.devices.find(cur);
+                    cur = (it == out.devices.end()) ? std::string()
+                                                  : it->second.parent;
+                }
             }
         }
     }
 
     /*------------------------------------------------*\
-    || definitions + extensions — retained verbatim    ||
+    || bindings                                        ||
     \*------------------------------------------------*/
-    if(const nlohmann::json* s = Section(j, "definitions", errs))
+    if(j.contains("bindings"))
     {
-        if(s->contains("devices") && !s->at("devices").is_array())
+        if(!j["bindings"].is_object())
         {
-            AddErr(errs, "definitions.devices", "expected array");
+            AddErr(errs, "bindings", "expected object");
         }
-        if(s->contains("effects") && !s->at("effects").is_array())
+        else
         {
-            AddErr(errs, "definitions.effects", "expected array");
+            for(auto it = j["bindings"].begin(); it != j["bindings"].end(); ++it)
+            {
+                const std::string path = "bindings." + it.key();
+                if(!IsPresetId(it.key()))
+                {
+                    AddErr(errs, path, "bad binding id '" + it.key() + "'");
+                    continue;
+                }
+                if(!it.value().is_object())
+                {
+                    AddErr(errs, path, "expected object");
+                    continue;
+                }
+                out.bindings[it.key()] =
+                    BindingFromJson(it.value(), it.key(), path, errs);
+            }
+            if(out.bindings.size() > STUDIO_MAX_BINDINGS)
+            {
+                AddErr(errs, "bindings", "count exceeds cap "
+                       + std::to_string(STUDIO_MAX_BINDINGS));
+            }
         }
-        out.meta.definitions = *s;
     }
+
+    /*------------------------------------------------*\
+    || device_settings                                 ||
+    \*------------------------------------------------*/
+    if(j.contains("device_settings"))
+    {
+        if(!j["device_settings"].is_object())
+        {
+            AddErr(errs, "device_settings", "expected object");
+        }
+        else
+        {
+            for(auto it = j["device_settings"].begin();
+                it != j["device_settings"].end(); ++it)
+            {
+                const std::string spath = it.key();
+                const nlohmann::json& js = it.value();
+                const std::string path = "device_settings." + spath;
+                if(!ValidPath(spath))
+                {
+                    AddErr(errs, path, "bad instance path '" + spath + "'");
+                    continue;
+                }
+                /* The first segment must be a root device instance;
+                   deeper segments are validated on resolution. */
+                const std::string root = PathSegments(spath).front();
+                if(out.devices.find(root) == out.devices.end())
+                {
+                    AddErr(errs, path,
+                           "unknown device instance '" + root + "'");
+                    continue;
+                }
+                if(!js.is_object())
+                {
+                    AddErr(errs, path, "expected object");
+                    continue;
+                }
+                DeviceSettings s;
+                s.visible   = FieldBool(js, "visible", true, path, errs);
+                s.locked    = FieldBool(js, "locked", false, path, errs);
+                s.mirror_of = FieldStr(js, "mirror_of", std::string(),
+                                       path, errs);
+                if(!s.mirror_of.empty())
+                {
+                    if(!ValidPath(s.mirror_of))
+                    {
+                        AddErr(errs, path + ".mirror_of",
+                               "bad instance path '" + s.mirror_of + "'");
+                    }
+                    else
+                    {
+                        const std::string mroot =
+                            PathSegments(s.mirror_of).front();
+                        if(out.devices.find(mroot) == out.devices.end())
+                        {
+                            AddErr(errs, path + ".mirror_of",
+                                   "unknown device instance '" + mroot + "'");
+                        }
+                    }
+                    if(s.mirror_of == spath)
+                    {
+                        AddErr(errs, path + ".mirror_of", "self mirror");
+                    }
+                }
+                if(js.contains("zones"))
+                {
+                    if(!js["zones"].is_object())
+                    {
+                        AddErr(errs, path + ".zones", "expected object");
+                    }
+                    else
+                    {
+                        for(auto zt = js["zones"].begin();
+                            zt != js["zones"].end(); ++zt)
+                        {
+                            const std::string zp = path + ".zones." + zt.key();
+                            if(!IsPresetId(zt.key()))
+                            {
+                                AddErr(errs, zp, "bad zone id '" + zt.key() + "'");
+                                continue;
+                            }
+                            if(!zt.value().is_object())
+                            {
+                                AddErr(errs, zp, "expected object");
+                                continue;
+                            }
+                            ZoneSetting z;
+                            z.binding   = FieldStr(zt.value(), "binding",
+                                                   std::string(), zp, errs);
+                            z.addr_base = FieldI32(zt.value(), "addr_base",
+                                                   0, zp, errs);
+                            z.verified  = FieldBool(zt.value(), "verified",
+                                                    false, zp, errs);
+                            if(z.addr_base < 0)
+                            {
+                                AddErr(errs, zp + ".addr_base",
+                                       "expected >= 0");
+                            }
+                            if(!z.binding.empty()
+                               && out.bindings.find(z.binding) == out.bindings.end())
+                            {
+                                AddErr(errs, zp + ".binding",
+                                       "unknown binding '" + z.binding + "'");
+                            }
+                            s.zones[zt.key()] = z;
+                        }
+                        if(s.zones.size() > STUDIO_MAX_ZONE_SET)
+                        {
+                            AddErr(errs, path + ".zones", "count exceeds cap "
+                                   + std::to_string(STUDIO_MAX_ZONE_SET));
+                        }
+                    }
+                }
+                /* Retain unknown fields verbatim. */
+                static const std::set<std::string> known = {
+                    "visible", "locked", "mirror_of", "zones",
+                };
+                for(auto kt = js.begin(); kt != js.end(); ++kt)
+                {
+                    if(known.find(kt.key()) == known.end())
+                    {
+                        s.extra[kt.key()] = kt.value();
+                    }
+                }
+                out.device_settings[spath] = s;
+            }
+            if(out.device_settings.size() > STUDIO_MAX_SETTINGS)
+            {
+                AddErr(errs, "device_settings", "count exceeds cap "
+                       + std::to_string(STUDIO_MAX_SETTINGS));
+            }
+        }
+    }
+
+    /*------------------------------------------------*\
+    || colors                                          ||
+    \*------------------------------------------------*/
+    if(const nlohmann::json* s = Section(j, "colors", errs))
+    {
+        if(s->contains("objects"))
+        {
+            const nlohmann::json& oc = (*s)["objects"];
+            if(!oc.is_object())
+            {
+                AddErr(errs, "colors.objects", "expected object");
+            }
+            else
+            {
+                for(auto it = oc.begin(); it != oc.end(); ++it)
+                {
+                    const std::string path = "colors.objects." + it.key();
+                    if(!ValidPath(it.key()))
+                    {
+                        AddErr(errs, path, "bad object path '" + it.key() + "'");
+                        continue;
+                    }
+                    SceneColor c = 0;
+                    if(ParseSceneColor(it.value(), c))
+                    {
+                        out.object_colors[it.key()] = c;
+                    }
+                    else
+                    {
+                        AddErr(errs, path,
+                               "expected \"#RRGGBB\" or packed integer");
+                    }
+                }
+                if(out.object_colors.size() > STUDIO_MAX_COLOR_KEYS)
+                {
+                    AddErr(errs, "colors.objects", "count exceeds cap "
+                           + std::to_string(STUDIO_MAX_COLOR_KEYS));
+                }
+            }
+        }
+        if(s->contains("emitters"))
+        {
+            const nlohmann::json& ec = (*s)["emitters"];
+            if(!ec.is_object())
+            {
+                AddErr(errs, "colors.emitters", "expected object");
+            }
+            else
+            {
+                for(auto it = ec.begin(); it != ec.end(); ++it)
+                {
+                    const std::string path = "colors.emitters." + it.key();
+                    if(!ValidPath(it.key()))
+                    {
+                        AddErr(errs, path, "bad object path '" + it.key() + "'");
+                        continue;
+                    }
+                    if(!it.value().is_object())
+                    {
+                        AddErr(errs, path, "expected object");
+                        continue;
+                    }
+                    for(auto e = it.value().begin(); e != it.value().end(); ++e)
+                    {
+                        int index = -1;
+                        try
+                        {
+                            index = std::stoi(e.key());
+                        }
+                        catch(...)
+                        {
+                        }
+                        if(index < 0)
+                        {
+                            AddErr(errs, path,
+                                   "bad emitter index '" + e.key() + "'");
+                            continue;
+                        }
+                        SceneColor c = 0;
+                        if(ParseSceneColor(e.value(), c))
+                        {
+                            out.emitter_colors[it.key()][index] = c;
+                        }
+                        else
+                        {
+                            AddErr(errs, path + "." + e.key(),
+                                   "expected \"#RRGGBB\" or packed integer");
+                        }
+                    }
+                }
+                if(out.emitter_colors.size() > STUDIO_MAX_COLOR_KEYS)
+                {
+                    AddErr(errs, "colors.emitters", "count exceeds cap "
+                           + std::to_string(STUDIO_MAX_COLOR_KEYS));
+                }
+            }
+        }
+    }
+
+    /*------------------------------------------------*\
+    || extensions — retained verbatim                  ||
+    \*------------------------------------------------*/
     if(const nlohmann::json* s = Section(j, "extensions", errs))
     {
         out.meta.extensions = *s;
@@ -499,8 +880,10 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
     \*------------------------------------------------*/
     static const std::set<std::string> known = {
         "$schema", "schema_version", "name", "ui", "camera", "controls",
-        "render", "inputs", "output", "scene", "effects", "definitions",
-        "extensions",
+        "render", "inputs", "output", "devices", "bindings",
+        "device_settings", "colors", "effects", "extensions",
+        /* handled above as hard errors, listed so they don't also
+           warn: */ "scene", "definitions",
     };
     for(auto it = j.begin(); it != j.end(); ++it)
     {
@@ -510,11 +893,11 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                             + "' — possible typo");
         }
     }
-    if(!out.scene.effect.preset.empty()
-       && FindPreset(out.scene.effect.preset) == nullptr)
+    if(!out.effect.preset.empty()
+       && FindPreset(out.effect.preset) == nullptr)
     {
         warns.push_back("effects.preset: unknown preset '"
-                        + out.scene.effect.preset + "'");
+                        + out.effect.preset + "'");
     }
 
     if(!errs.empty())

@@ -10,6 +10,342 @@
 namespace studio
 {
 
+/*---------------------------------------------------------*\
+||| v3 default content — packaged device types + the       ||
+||| compact workspace referencing them. The .device.json   ||
+||| files under presets/devices/ are generated FROM this   ||
+||| data; the test suite asserts they match.               ||
+\*---------------------------------------------------------*/
+namespace
+{
+
+const float DEF_RING_R    = 0.052f;
+const float DEF_FAN_FACE  = 0.016f;
+const float DEF_PUMP_FACE = 0.024f;
+
+PresetEntity Part(const std::string& id, const std::string& geometry,
+                  const Vec3& size, const Vec3& pos, const Vec3& rot,
+                  const std::string& zone = std::string())
+{
+    PresetEntity e;
+    e.id           = id;
+    e.geometry     = geometry;
+    e.size_m       = size;
+    e.position     = pos;
+    e.rotation_deg = rot;
+    e.zone         = zone;
+    return e;
+}
+
+DeviceZone RingZone(const std::string& id, const std::string& entity,
+                    unsigned int leds, float radius, float face_y)
+{
+    DeviceZone z;
+    z.id                  = id;
+    z.entity              = entity;
+    z.led_count           = leds;
+    z.layout.type         = "ring";
+    z.layout.radius_m     = radius;
+    z.layout.start_angle_deg = 0.0f;
+    z.layout.face_y_m     = face_y;
+    return z;
+}
+
+DeviceZone StripZone(const std::string& id, const std::string& entity,
+                     unsigned int leds, float spacing, const Vec3& origin)
+{
+    DeviceZone z;
+    z.id              = id;
+    z.entity          = entity;
+    z.led_count       = leds;
+    z.layout.type     = "strip";
+    z.layout.spacing_m = spacing;
+    z.layout.origin   = origin;
+    return z;
+}
+
+DeviceZone PointsZone(const std::string& id, const std::string& entity,
+                      const Vec3& point)
+{
+    DeviceZone z;
+    z.id           = id;
+    z.entity       = entity;
+    z.led_count    = 1;
+    z.layout.type  = "points";
+    z.layout.points.push_back(point);
+    return z;
+}
+
+DevicePreset Preset(const std::string& id, const std::string& name,
+                    const std::string& category)
+{
+    DevicePreset p;
+    p.id       = id;
+    p.name     = name;
+    p.category = category;
+    return p;
+}
+
+DeviceInstance Inst(const std::string& type, const Vec3& pos,
+                    const Vec3& rot, const std::string& parent = std::string())
+{
+    DeviceInstance d;
+    d.type         = type;
+    d.position     = pos;
+    d.rotation_deg = rot;
+    d.parent       = parent;
+    return d;
+}
+
+ZoneSetting ZoneBound(const std::string& binding, int addr_base,
+                      bool verified)
+{
+    ZoneSetting z;
+    z.binding   = binding;
+    z.addr_base = addr_base;
+    z.verified  = verified;
+    return z;
+}
+
+} /* anonymous namespace */
+
+std::vector<DevicePreset> DefaultDevicePresets()
+{
+    std::vector<DevicePreset> out;
+
+    {
+        DevicePreset p = Preset("desk", "Desk surface", "furniture");
+        p.entities["body"] = Part("body", "desk",
+            { 1.4f, 0.04f, 0.75f }, { 0, 0, 0 }, { 0, 0, 0 });
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("monitor", "Monitor", "furniture");
+        p.entities["body"] = Part("body", "monitor",
+            { 0.62f, 0.36f, 0.02f }, { 0, 0, 0 }, { 0, 0, 0 });
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("pc-case", "PC case shell", "case");
+        p.entities["shell"] = Part("shell", "case_shell",
+            { 0.21f, 0.47f, 0.46f }, { 0, 0, 0 }, { 0, 0, 0 });
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("keyboard-104",
+                                "Full-size keyboard (zone matrix)", "keyboard");
+        p.entities["body"] = Part("body", "keyboard_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "matrix");
+        DeviceZone z;
+        z.id              = "matrix";
+        z.entity          = "body";
+        z.led_count       = 0;              /* dynamic */
+        z.layout.type     = "matrix";
+        z.layout.dynamic  = true;
+        p.zones.push_back(z);
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("mouse-3zone",
+                                "Gaming mouse (wheel/logo/strip)", "mouse");
+        p.entities["body"]  = Part("body", "mouse_body",
+            { 0.066f, 0.04f, 0.117f }, { 0, 0, 0 }, { 0, 0, 0 });
+        p.entities["wheel"] = Part("wheel", "mouse_zone",
+            { 0, 0, 0 }, { 0, 0.025f, -0.035f }, { 0, 0, 0 }, "wheel");
+        p.entities["logo"]  = Part("logo", "mouse_zone",
+            { 0, 0, 0 }, { 0, 0.025f, 0.02f }, { 0, 0, 0 }, "logo");
+        p.entities["strip"] = Part("strip", "mouse_zone",
+            { 0, 0, 0 }, { 0, -0.008f, 0.005f }, { 0, 0, 0 }, "strip");
+        p.zones.push_back(PointsZone("wheel", "wheel", { 0, 0, 0 }));
+        p.zones.push_back(PointsZone("logo", "logo", { 0, 0, 0 }));
+        p.zones.push_back(RingZone("strip", "strip", 11, 0.028f, 0.0f));
+        p.zones.back().layout.start_angle_deg = 90.0f;
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("fan-120", "120 mm RGB fan — 8 LEDs", "fan");
+        p.entities["body"] = Part("body", "fan_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
+        p.zones.push_back(RingZone("ring", "body", 8, DEF_RING_R, DEF_FAN_FACE));
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("fan-slw",
+                                "Lian Li SL Wireless fan — 40 LEDs", "fan");
+        p.entities["body"] = Part("body", "fan_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
+        p.zones.push_back(RingZone("ring", "body", 40, DEF_RING_R, DEF_FAN_FACE));
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("pump-360", "Cooler pump cap — 8 LEDs", "cooler");
+        p.entities["body"] = Part("body", "pump_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
+        p.zones.push_back(RingZone("ring", "body", 8, 0.020f, DEF_PUMP_FACE));
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("gpu-fan", "GPU fan — 8 LEDs, downward",
+                                "gpu");
+        p.entities["body"] = Part("body", "fan_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
+        p.zones.push_back(RingZone("ring", "body", 8, 0.04f, -DEF_FAN_FACE));
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("ram-stick", "RAM stick — 10-LED strip", "ram");
+        p.entities["body"] = Part("body", "ram_body",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "strip");
+        p.zones.push_back(StripZone("strip", "body", 10, 0.012f,
+                                    { -0.054f, 0.03f, 0 }));
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("gpu-card", "Graphics card (decor)", "gpu");
+        p.entities["body"] = Part("body", "gpu_body",
+            { 0.30f, 0.05f, 0.13f }, { 0, 0, 0 }, { 0, 0, 0 });
+        out.push_back(p);
+    }
+    {
+        DevicePreset p = Preset("gpu-logo", "GPU side logo — 4 LEDs", "gpu");
+        p.entities["body"] = Part("body", "gpu_logo",
+            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "strip");
+        p.zones.push_back(StripZone("strip", "body", 4, 0.02f,
+                                    { -0.03f, 0, 0 }));
+        out.push_back(p);
+    }
+    {
+        /* Placement-only type for v2 group nodes produced by
+           migration — no entities, no zones. */
+        DevicePreset p = Preset("group", "Placement group", "group");
+        out.push_back(p);
+    }
+    return out;
+}
+
+StudioDocument BuildDefaultWorkspace()
+{
+    StudioDocument w;
+    w.meta.name   = "Default desk";
+    w.brightness  = 1.0f;
+
+    /* Same persistent identities as the expanded builder. */
+    for(const DeviceBinding& b : BuildDefaultDesk().bindings)
+    {
+        w.bindings[b.id] = b;
+    }
+
+    /*-----------------------------------------------------*\
+    | Root placements (world coords, meters/degrees).       |
+    \*-----------------------------------------------------*/
+    w.devices["desk"]     = Inst("desk",         { 0.0f, -0.02f, 0.10f }, { 0, 0, 0 });
+    w.devices["monitor"]  = Inst("monitor",      { 0.0f, 0.32f, -0.22f }, { 0, 0, 0 });
+    w.devices["keyboard"] = Inst("keyboard-104", { -0.06f, 0.02f, 0.26f }, { 0, 0, 0 });
+    w.devices["mouse"]    = Inst("mouse-3zone",  { 0.26f, 0.02f, 0.27f }, { 0, 0, 0 });
+    w.devices["case"]     = Inst("pc-case",      { 0.47f, 0.235f, -0.10f }, { 0, 0, 0 });
+
+    /*-----------------------------------------------------*\
+    | Inside the case — same case-local coords as the       |
+    | expanded desk; parent "case" supplies the world       |
+    | anchor.                                               |
+    \*-----------------------------------------------------*/
+    const std::string CASE = "case";
+
+    /* ARGB_V2_1 — four case fans on one mirrored 8-LED ring. */
+    w.devices["case_fans"]     = Inst("fan-120", { 0.0f, -0.16f, -0.14f }, { 0, 0, 0 }, CASE);
+    w.devices["case_fan_b1"]   = Inst("fan-120", { 0.0f, -0.16f, -0.01f }, { 0, 0, 0 }, CASE);
+    w.devices["case_fan_b2"]   = Inst("fan-120", { 0.0f, -0.205f, 0.14f }, { 0, 0, 0 }, CASE);
+    w.devices["case_fan_rear"] = Inst("fan-120", { 0.0f, 0.065f, -0.20f }, { 90, 0, 0 }, CASE);
+    w.device_settings["case_fans"].zones["ring"] = ZoneBound("argb_v2_1", 0, true);
+    w.device_settings["case_fan_b1"].mirror_of   = "case_fans";
+    w.device_settings["case_fan_b2"].mirror_of   = "case_fans";
+    w.device_settings["case_fan_rear"].mirror_of = "case_fans";
+
+    /* ARGB_V2_2 — 3 mirrored radiator fans (addrs 0-7) + pump (8-15). */
+    w.devices["rad_fans"]   = Inst("fan-120", { 0.0f, 0.185f, -0.14f }, { 0, -90, 0 }, CASE);
+    w.devices["rad_fan_m1"] = Inst("fan-120", { 0.0f, 0.185f, -0.01f }, { 0, -90, 0 }, CASE);
+    w.devices["rad_fan_m2"] = Inst("fan-120", { 0.0f, 0.185f, 0.12f }, { 0, -90, 0 }, CASE);
+    w.device_settings["rad_fans"].zones["ring"] = ZoneBound("argb_v2_2", 0, true);
+    w.device_settings["rad_fan_m1"].mirror_of   = "rad_fans";
+    w.device_settings["rad_fan_m2"].mirror_of   = "rad_fans";
+
+    w.devices["pump"] = Inst("pump-360", { 0.05f, 0.05f, -0.11f }, { 0, 0, 90 }, CASE);
+    w.device_settings["pump"].zones["ring"] = ZoneBound("argb_v2_2", 8, true);
+
+    /* ARGB_V2_3 — single fan above the GPU's top edge. */
+    w.devices["gpu_top_fan"] = Inst("fan-120", { 0.03f, 0.008f, 0.10f }, { 0, 0, 0 }, CASE);
+    w.device_settings["gpu_top_fan"].zones["ring"] = ZoneBound("argb_v2_3", 0, true);
+
+    /* 3x Lian Li SL Wireless — vertical side-intake stack. */
+    for(int i = 0; i < 3; i++)
+    {
+        const std::string id = "slw_fan_" + std::to_string(i);
+        w.devices[id] = Inst("fan-slw",
+            { 0.08f, -0.135f + 0.125f * (float)i, 0.15f }, { 0, 0, 90 }, CASE);
+        w.device_settings[id].zones["ring"] = ZoneBound(id, 0, true);
+    }
+
+    /* Corsair DIMMs — two 10-LED strips; bindings disambiguate the
+       identical controllers by I2C location. */
+    for(int i = 0; i < 2; i++)
+    {
+        const std::string id = "dimm_" + std::to_string(i);
+        w.devices[id] = Inst("ram-stick",
+            { 0.05f, 0.09f, -0.07f + 0.035f * (float)i }, { 0, 0, 90 }, CASE);
+        w.device_settings[id].zones["strip"] = ZoneBound(id, 0, true);
+    }
+
+    /* GPU — body is decor; side logo + 3 unverified fan rings. */
+    w.devices["gpu_body"] = Inst("gpu-card", { 0.03f, -0.035f, -0.03f }, { 0, -90, 0 }, CASE);
+    w.devices["gpu_logo"] = Inst("gpu-logo", { -0.04f, -0.035f, -0.02f }, { 0, 90, 0 }, CASE);
+    w.device_settings["gpu_logo"].zones["strip"] = ZoneBound("gpu_logo", 0, true);
+
+    const char* fans[3] = { "gpu_fan_r", "gpu_fan_m", "gpu_fan_l" };
+    for(int i = 0; i < 3; i++)
+    {
+        w.devices[fans[i]] = Inst("gpu-fan",
+            { 0.03f, -0.075f, -0.13f + 0.10f * (float)i }, { 0, 0, 0 }, CASE);
+        /* zero-RPM lighting unconfirmed — bound but never written */
+        w.device_settings[fans[i]].zones["ring"] =
+            ZoneBound(fans[i], 0, false);
+    }
+
+    /*-----------------------------------------------------*\
+    | Zone attachments outside the case.                    |
+    \*-----------------------------------------------------*/
+    w.device_settings["keyboard"].zones["matrix"] = ZoneBound("kbd_g512", 0, true);
+    w.device_settings["mouse"].zones["wheel"] = ZoneBound("mouse_wheel", 0, true);
+    w.device_settings["mouse"].zones["logo"]  = ZoneBound("mouse_logo", 0, true);
+    w.device_settings["mouse"].zones["strip"] = ZoneBound("mouse_strip", 0, true);
+
+    /*-----------------------------------------------------*\
+    | Base colors — same values as the expanded desk, keyed |
+    | at the resolved <instance>/<entity> paths.            |
+    \*-----------------------------------------------------*/
+    w.object_colors["keyboard/body"]    = MakeSceneColor(40, 60, 200);
+    w.object_colors["mouse/wheel"]      = MakeSceneColor(200, 30, 30);
+    w.object_colors["mouse/logo"]       = MakeSceneColor(200, 30, 30);
+    w.object_colors["mouse/strip"]      = MakeSceneColor(200, 30, 30);
+    w.object_colors["case_fans/body"]   = MakeSceneColor(0, 180, 160);
+    w.object_colors["rad_fans/body"]    = MakeSceneColor(0, 140, 200);
+    w.object_colors["pump/body"]        = MakeSceneColor(200, 200, 210);
+    w.object_colors["gpu_top_fan/body"] = MakeSceneColor(0, 180, 160);
+    for(int i = 0; i < 3; i++)
+    {
+        w.object_colors["slw_fan_" + std::to_string(i) + "/body"] =
+            MakeSceneColor(0, 180, 160);
+    }
+    for(int i = 0; i < 2; i++)
+    {
+        w.object_colors["dimm_" + std::to_string(i) + "/body"] =
+            MakeSceneColor(220, 140, 30);
+    }
+    w.object_colors["gpu_logo/body"] = MakeSceneColor(230, 230, 240);
+
+    return w;
+}
+
+
 static SceneObject Group(const std::string& id, const std::string& label,
                          const Vec3& pos)
 {
@@ -182,8 +518,9 @@ SceneDocument BuildDefaultDesk()
 
     /* ARGB_V2_1 — four case fans on one mirrored 8-LED ring.
        Logical owner + 3 linked copies: bottom intake row x3 running
-       front-to-back (back + middle sit on the PSU shroud, front one
-       on the floor ahead of it) and a rear exhaust above the GPU. */
+       front-to-back (back + middle sit at PSU-shroud height, front
+       one on the case floor ahead of the shroud) and a rear exhaust
+       above the GPU. */
     {
         SceneObject f0 = Device("case_fans", "Case fans (x4 shared)", "fan_body",
                                 "argb_v2_1", { 0.0f, -0.16f, -0.14f }, { 0, 0, 0 });
@@ -195,7 +532,7 @@ SceneDocument BuildDefaultDesk()
         b1.parent_id = "case";
         doc.objects.push_back(b1);
         SceneObject b2 = Linked("case_fan_b2", "Case fan (mirror)", "fan_body",
-                                "case_fans", { 0.0f, -0.16f, 0.12f }, { 0, 0, 0 });
+                                "case_fans", { 0.0f, -0.205f, 0.14f }, { 0, 0, 0 });
         b2.parent_id = "case";
         doc.objects.push_back(b2);
         SceneObject rear = Linked("case_fan_rear", "Rear exhaust (mirror)", "fan_body",
@@ -225,9 +562,10 @@ SceneDocument BuildDefaultDesk()
         doc.objects.push_back(m2);
 
         /* Pump cap faces -x like the Lian Li stack — RGB out from
-           the motherboard toward the glass. */
+           the motherboard toward the glass. Sits on the CPU socket,
+           -z of the DIMMs (left of them in the scene view). */
         SceneObject pump = Device("pump", "Cooler pump", "pump_body",
-                                  "argb_v2_2", { 0.06f, 0.05f, 0.02f }, { 0, 0, 90 });
+                                  "argb_v2_2", { 0.05f, 0.05f, -0.11f }, { 0, 0, 90 });
         pump.parent_id = "case";
         pump.emitters = layout::Ring(8, 0.020f, 0.0f, false, "pump", 8, PUMP_FACE_Y);
         doc.objects.push_back(pump);
@@ -240,7 +578,7 @@ SceneDocument BuildDefaultDesk()
        the card's front end. */
     {
         SceneObject top = Device("gpu_top_fan", "Top GPU fan", "fan_body",
-                                 "argb_v2_3", { 0.0f, 0.05f, 0.10f }, { 0, 0, 0 });
+                                 "argb_v2_3", { 0.03f, 0.008f, 0.10f }, { 0, 0, 0 });
         top.parent_id = "case";
         top.emitters = layout::Ring(8, RING_R, 0.0f, false, "gpu_top_fan", 0, FAN_FACE_Y);
         doc.objects.push_back(top);
@@ -285,21 +623,22 @@ SceneDocument BuildDefaultDesk()
         doc.object_colors[id] = MakeSceneColor(220, 140, 30);
     }
 
-    /* GPU — rot {90,90,0} turns the card's 0.30 m length onto z
-       (bracket at the back, cooler extending toward the front):
-       0.05 m edge to the glass, 0.13 m tall. Side logo verified;
-       fan rings rendered but unverified (zero-RPM lighting
-       unconfirmed — plan forbids writes). */
+    /* GPU — normal (horizontal) mount: ry=-90 turns the card's
+       0.30 m length onto z (bracket at the back), so it is a flat
+       slab 0.05 m thick in y reaching 0.13 m out from the board
+       toward the glass. The glass sees the card's -x edge, which
+       carries the side logo. Fan rings rendered but unverified
+       (zero-RPM lighting unconfirmed — plan forbids writes). */
     {
         SceneObject gpu = Decor("gpu_body", "GPU", "gpu_body",
-            { 0.0f, -0.035f, -0.03f }, { 90, 90, 0 }, { 0.30f, 0.05f, 0.13f });
+            { 0.03f, -0.035f, -0.03f }, { 0, -90, 0 }, { 0.30f, 0.05f, 0.13f });
         gpu.parent_id = "case";
         doc.objects.push_back(gpu);
 
         /* Side logo on the glass-facing (-x) edge; ry=90 lays the
            strip along the card's z length. */
         SceneObject logo = Device("gpu_logo", "GPU side logo", "gpu_logo",
-                                  "gpu_logo", { -0.03f, -0.02f, -0.02f }, { 0, 90, 0 });
+                                  "gpu_logo", { -0.04f, -0.035f, -0.02f }, { 0, 90, 0 });
         logo.parent_id = "case";
         logo.emitters = layout::Strip(4, 0.02f, { -0.03f, 0, 0 }, "gpu_logo");
         doc.objects.push_back(logo);
@@ -309,12 +648,12 @@ SceneDocument BuildDefaultDesk()
         const char* names[3] = { "Right", "Middle", "Left" };
         for(int i = 0; i < 3; i++)
         {
-            /* Fans hang just below the card's bottom edge (card
-               bottom y=-0.10), spread along its z length. Emitters
+            /* Fans hang just below the card's bottom face (card
+               bottom y=-0.06), spread along its z length. Emitters
                face down like the hardware. */
             SceneObject fan = Device(fans[i], std::string("GPU ") + names[i] + " fan",
                                      "fan_body", fans[i],
-                                     { 0.0f, -0.115f, -0.13f + 0.10f * (float)i },
+                                     { 0.03f, -0.075f, -0.13f + 0.10f * (float)i },
                                      { 0, 0, 0 });
             fan.parent_id = "case";
             fan.emitters = layout::Ring(8, 0.04f, 0.0f, false, fans[i], 0, -FAN_FACE_Y);

@@ -58,12 +58,12 @@ static QByteArray ReadAll(const QString& path)
 
 static studio::StudioDocument DocA()
 {
-    studio::StudioDocument w;
+    studio::StudioDocument w = studio::BuildDefaultWorkspace();
     w.meta.name = "Store fixture";
-    w.scene     = studio::BuildDefaultDesk();
-    w.scene.brightness = 0.7f;
+    w.meta.brightness = 0.7f;
     w.inputs.audio = true;
     w.inputs.sens_pct = 175;
+    w.object_colors["pc_case/front"] = 0xA0B0C0u;
     return w;
 }
 
@@ -85,11 +85,13 @@ static void TestSaveLoadBackup()
 
     const QByteArray bytes_a = ReadAll(store.DocumentPath());
     /* pretty-printed two-space JSON */
-    CHECK(bytes_a.contains("\n  \"schema_version\": 2"), "store: 2-space pretty print");
+    CHECK(bytes_a.contains("\n  \"schema_version\": 3"), "store: 2-space pretty print");
+    CHECK(bytes_a.contains("\"devices\"") && !bytes_a.contains("\"emitters\""),
+          "store: compact instances only");
     CHECK(bytes_a.contains("\"#"), "store: hex colors on disk");
 
     /* A second save snapshots the previous file as last-valid backup. */
-    a.scene.brightness = 0.4f;
+    a.meta.brightness = 0.4f;
     CHECK(store.Save(a, &err), "store: second save");
     CHECK(ReadAll(store.BackupPath()) == bytes_a, "store: backup holds last valid");
     CHECK(!store.dirty(), "store: clean after save");
@@ -97,7 +99,7 @@ static void TestSaveLoadBackup()
     StudioDocument back;
     CHECK(store.Load(&back, &err), "store: load");
     CHECK(back.meta.name == "Store fixture"
-          && back.scene.objects.size() == a.scene.objects.size()
+          && back.devices.size() == a.devices.size()
           && back.inputs.audio && back.inputs.sens_pct == 175,
           "store: load round-trips workspace");
 
@@ -148,7 +150,7 @@ static void TestAutosaveRecovery()
     /* Provider serves the edited state. */
     StudioDocument edited = DocA();
     edited.meta.name = "Edited desk";
-    edited.scene.brightness = 0.2f;
+    edited.meta.brightness = 0.2f;
     store.SetSnapshotProvider([&edited]() { return edited; });
     store.SetAutosaveDelayMs(30);
 

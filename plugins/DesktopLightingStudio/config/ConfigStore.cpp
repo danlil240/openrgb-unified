@@ -6,6 +6,7 @@
 
 #include "ConfigStore.h"
 #include "ConfigMigration.h"
+#include "../scene/SceneJson.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -59,7 +60,8 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
         }
         return false;
     }
-    /* Ship the schema beside the document so hand editors have it. */
+    /* Ship the schemas beside the document so hand editors have
+       them. */
     const QString schema_dir = dir + "/schemas";
     if(!QFileInfo::exists(schema_dir))
     {
@@ -69,6 +71,30 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
     if(!QFileInfo::exists(schema_dst))
     {
         QFile::copy(QStringLiteral(":/studio/studio.schema.json"), schema_dst);
+    }
+    const QString dev_schema_dst = schema_dir + "/device.schema.json";
+    if(!QFileInfo::exists(dev_schema_dst))
+    {
+        QFile::copy(QStringLiteral(":/studio/device.schema.json"),
+                    dev_schema_dst);
+    }
+
+    /* Ship the packaged device types. Missing files only — a type
+       the user edited (or deleted to force the compiled-in default)
+       is never overwritten. */
+    const QString preset_dir = PresetDir();
+    if(!QFileInfo::exists(preset_dir))
+    {
+        d.mkpath("presets/devices");
+    }
+    const QDir bundled(QStringLiteral(":/studio/presets/devices"));
+    for(const QString& name : bundled.entryList(QDir::Files))
+    {
+        const QString dst = preset_dir + "/" + name;
+        if(!QFileInfo::exists(dst))
+        {
+            QFile::copy(bundled.filePath(name), dst);
+        }
     }
     return true;
 }
@@ -138,8 +164,9 @@ ConfigStore::RunLegacyMigration(const nlohmann::json& legacy, QString* detail)
     }
 
     StudioDocument migrated;
+    std::vector<DevicePreset> types;
     std::vector<std::string> merrs;
-    if(!MigrateLegacySettings(legacy, migrated, &merrs))
+    if(!MigrateLegacySettings(legacy, migrated, &types, &merrs))
     {
         /* A blob that fails validation will fail forever — the marker
            is correct here, and the backup above keeps the original. */
@@ -150,6 +177,14 @@ ConfigStore::RunLegacyMigration(const nlohmann::json& legacy, QString* detail)
                 merrs.empty() ? "unknown error" : merrs.front());
         }
         return MigrationResult::Invalid;
+    }
+
+    /* Type files land (validated) before the workspace that
+       references them — a failed install leaves no half-migrated
+       desk, and the marker stays unset so the move retries. */
+    if(!InstallTypes(migrated, types, detail))
+    {
+        return MigrationResult::Failed;
     }
 
     if(!Save(migrated, detail))
@@ -218,8 +253,9 @@ bool ConfigStore::WriteAtomic(const QString& path, const QByteArray& bytes,
     return true;
 }
 
-bool ConfigStore::LoadFile(const QString& path, StudioDocument* out,
-                           QString* error, QString* warnings) const
+bool ConfigStore::LoadParsed(const QString& path, StudioDocument* out,
+                             std::vector<DevicePreset>* types,
+                             QString* error, QString* warnings) const
 {
     QFile f(path);
     if(!f.open(QIODevice::ReadOnly))
@@ -255,6 +291,128 @@ bool ConfigStore::LoadFile(const QString& path, StudioDocument* out,
         return false;
     }
 
+    /*------------------------------------------------*\
+    || Expanded (v1/v2) workspace — migrate through    ||
+    || the scene extractor. The compact result is      ||
+    || overlaid with the v2 file's own preference      ||
+    || sections so theme/camera/inputs survive, then   ||
+    || re-validated as a normal v3 candidate.          ||
+    \*------------------------------------------------*/
+    const long long version = (j.is_object()
+                               && j.contains("schema_version")
+                               && j["schema_version"].is_number())
+        ? j["schema_version"].get<long long>()
+        : -1;
+    if(version >= 1 && version < STUDIO_SCHEMA_VERSION
+       && j.is_object() && j.contains("scene"))
+    {
+        SceneDocument scene;
+        std::vector<std::string> serrs;
+        if(!FromJson(j["scene"], scene, &serrs))
+        {
+            QStringList lines;
+            for(const std::string& e : serrs)
+            {
+                lines << QString::fromStdString(e);
+            }
+            if(error)
+            {
+                *error = QStringLiteral("%1: scene: %2")
+                             .arg(path, lines.join("; "));
+            }
+            return false;
+        }
+        StudioDocument mig;
+        std::vector<DevicePreset> t;
+        std::vector<std::string> merrs, mwarns;
+        if(!MigrateExpandedScene(scene, mig, t, &merrs, &mwarns))
+        {
+            QStringList lines;
+            for(const std::string& e : merrs)
+            {
+                lines << QString::fromStdString(e);
+            }
+            if(error)
+            {
+                *error = QStringLiteral("%1: migration: %2")
+                             .arg(path, lines.join("; "));
+            }
+            return false;
+        }
+        nlohmann::json wj = ToJson(mig);
+        /* Preference sections: keep what the v2 file had — the
+           migrated scene knows nothing about editor prefs. */
+        static const char* carried[] = {
+            "ui", "camera", "controls", "render", "inputs",
+            "extensions",
+        };
+        for(const char* k : carried)
+        {
+            if(j.contains(k))
+            {
+                wj[k] = j[k];
+            }
+        }
+        if(j.contains("name"))
+        {
+            wj["name"] = j["name"];
+        }
+        if(j.contains("output") && j["output"].is_object())
+        {
+            if(j["output"].contains("brightness"))
+            {
+                wj["output"]["brightness"] = j["output"]["brightness"];
+            }
+        }
+        if(j.contains("effects") && j["effects"].is_object())
+        {
+            /* The v2 effects section wins over the scene's embedded
+               effect state (same data, workspace copy is newer). */
+            for(auto it = j["effects"].begin(); it != j["effects"].end(); ++it)
+            {
+                wj["effects"][it.key()] = it.value();
+            }
+        }
+        /* Migration never arms live output. */
+        wj["output"]["live_on_startup"] = false;
+
+        StudioDocument candidate;
+        std::vector<std::string> errs, warns;
+        if(!FromJson(wj, candidate, &errs, &warns))
+        {
+            QStringList lines;
+            for(const std::string& e : errs)
+            {
+                lines << QString::fromStdString(e);
+            }
+            if(error)
+            {
+                *error = QStringLiteral("%1: migrated document: %2")
+                             .arg(path, lines.join("; "));
+            }
+            return false;
+        }
+        for(const std::string& w : mwarns)
+        {
+            warns.push_back(w);
+        }
+        if(warnings && !warns.empty())
+        {
+            QStringList lines;
+            for(const std::string& w : warns)
+            {
+                lines << QString::fromStdString(w);
+            }
+            *warnings = lines.join("; ");
+        }
+        *out = candidate;
+        if(types != nullptr)
+        {
+            *types = t;
+        }
+        return true;
+    }
+
     StudioDocument candidate;
     std::vector<std::string> errs, warns;
     if(!FromJson(j, candidate, &errs, &warns))
@@ -283,11 +441,145 @@ bool ConfigStore::LoadFile(const QString& path, StudioDocument* out,
     return true;
 }
 
+bool ConfigStore::LoadFile(const QString& path, StudioDocument* out,
+                           QString* error, QString* warnings) const
+{
+    return LoadParsed(path, out, nullptr, error, warnings);
+}
+
+bool ConfigStore::InstallTypes(StudioDocument& doc,
+                               std::vector<DevicePreset>& types,
+                               QString* error)
+{
+    QDir d(dir);
+    if(!QFileInfo::exists(PresetDir()) && !d.mkpath("presets/devices"))
+    {
+        if(error)
+        {
+            *error = QStringLiteral("cannot create %1").arg(PresetDir());
+        }
+        return false;
+    }
+    for(DevicePreset& p : types)
+    {
+        QString target = PresetDir() + "/"
+                         + QString::fromStdString(p.id) + ".device.json";
+        if(QFileInfo::exists(target))
+        {
+            /* Same content — reuse; different content — never
+               overwrite a local type silently, write a variant id
+               and remap the references. */
+            DevicePreset existing;
+            if(DevicePresetFromJsonFile(target.toStdString(), existing, nullptr)
+               && ToJson(existing) == ToJson(p))
+            {
+                continue;
+            }
+            const std::string base = p.id;
+            for(int n = 2;; n++)
+            {
+                const std::string alt = base + "-" + std::to_string(n);
+                const QString alt_path = PresetDir() + "/"
+                    + QString::fromStdString(alt) + ".device.json";
+                if(!QFileInfo::exists(alt_path))
+                {
+                    p.id = alt;
+                    for(auto& kv : doc.devices)
+                    {
+                        if(kv.second.type == base)
+                        {
+                            kv.second.type = alt;
+                        }
+                    }
+                    target = alt_path;
+                    break;
+                }
+                /* An existing -n file with identical content is a
+                   reuse hit too. */
+                DevicePreset other;
+                if(DevicePresetFromJsonFile(alt_path.toStdString(), other, nullptr)
+                   && other.id == alt)
+                {
+                    DevicePreset candidate = p;
+                    candidate.id = alt;
+                    if(ToJson(candidate) == ToJson(other))
+                    {
+                        p.id = alt;
+                        for(auto& kv : doc.devices)
+                        {
+                            if(kv.second.type == base)
+                            {
+                                kv.second.type = alt;
+                            }
+                        }
+                        target.clear();
+                        break;
+                    }
+                }
+            }
+            if(target.isEmpty())
+            {
+                continue;
+            }
+        }
+        const QByteArray bytes =
+            QByteArray::fromStdString(ToJson(p).dump(2)) + "\n";
+        if(!WriteAtomic(target, bytes, error))
+        {
+            return false;
+        }
+        /* Validate the file that actually landed before the
+           workspace is allowed to reference it. */
+        DevicePreset check;
+        std::vector<std::string> verrs;
+        if(!DevicePresetFromJsonFile(target.toStdString(), check, &verrs)
+           || check.id != p.id)
+        {
+            QFile::remove(target);
+            if(error)
+            {
+                *error = QStringLiteral("%1: written type failed"
+                                        " validation: %2")
+                    .arg(target, QString::fromStdString(
+                             verrs.empty() ? "id mismatch" : verrs.front()));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ConfigStore::Load(StudioDocument* out, QString* error, QString* warnings)
 {
-    if(!LoadFile(DocumentPath(), out, error, warnings))
+    std::vector<DevicePreset> types;
+    if(!LoadParsed(DocumentPath(), out, &types, error, warnings))
     {
         return false;
+    }
+    if(!types.empty())
+    {
+        /* v1/v2 workspace — activate the migration transactionally:
+           type files first (validated on disk), the original backed
+           up, then the compact document replaces it. Any failure
+           leaves studio.json untouched. */
+        if(!InstallTypes(*out, types, error))
+        {
+            return false;
+        }
+        QString berr;
+        if(!WriteAtomic(dir + "/studio.v2.backup.json",
+                        ReadFile(DocumentPath()), &berr))
+        {
+            if(error)
+            {
+                *error = QStringLiteral("backup failed: %1").arg(berr);
+            }
+            return false;
+        }
+        if(!WriteAtomic(DocumentPath(), Serialize(*out), error))
+        {
+            return false;
+        }
     }
     last_written = ReadFile(DocumentPath());
     ext_reported = false;

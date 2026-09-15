@@ -30,11 +30,14 @@ HEADERS += \
     config/ConfigStore.h \
     config/ConfigMigration.h \
     output/ControllerAdapter.h \
+    presets/DevicePreset.h \
+    presets/PresetRegistry.h \
     scene/SceneTypes.h \
     scene/SceneGraph.h \
     scene/JsonFields.h \
     scene/EmitterLayout.h \
     scene/SceneJson.h \
+    scene/SceneResolver.h \
     scene/BindingResolver.h \
     scene/DefaultDesk.h \
     effects/EffectTypes.h \
@@ -55,10 +58,13 @@ SOURCES += \
     config/ConfigStore.cpp \
     config/ConfigMigration.cpp \
     output/ControllerAdapter.cpp \
+    presets/DevicePreset.cpp \
+    presets/PresetRegistry.cpp \
     scene/SceneTypes.cpp \
     scene/SceneGraph.cpp \
     scene/EmitterLayout.cpp \
     scene/SceneJson.cpp \
+    scene/SceneResolver.cpp \
     scene/BindingResolver.cpp \
     scene/DefaultDesk.cpp \
     effects/EffectTypes.cpp \
@@ -77,7 +83,21 @@ RESOURCES += \
 DISTFILES += \
     plugin/metadata.json \
     ui/StudioScene.qml \
-    schemas/studio.schema.json
+    schemas/studio.schema.json \
+    schemas/device.schema.json \
+    presets/devices/desk.device.json \
+    presets/devices/monitor.device.json \
+    presets/devices/pc-case.device.json \
+    presets/devices/keyboard-104.device.json \
+    presets/devices/mouse-3zone.device.json \
+    presets/devices/fan-120.device.json \
+    presets/devices/fan-slw.device.json \
+    presets/devices/pump-360.device.json \
+    presets/devices/gpu-fan.device.json \
+    presets/devices/gpu-card.device.json \
+    presets/devices/gpu-logo.device.json \
+    presets/devices/ram-stick.device.json \
+    presets/devices/group.device.json
 
 DESTDIR      = $$PWD/out
 OBJECTS_DIR  = $$PWD/build/obj

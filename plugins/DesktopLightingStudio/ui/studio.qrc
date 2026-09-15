@@ -2,5 +2,19 @@
     <qresource prefix="/studio">
         <file alias="StudioScene.qml">StudioScene.qml</file>
         <file alias="studio.schema.json">../schemas/studio.schema.json</file>
+        <file alias="device.schema.json">../schemas/device.schema.json</file>
+        <file alias="presets/devices/desk.device.json">../presets/devices/desk.device.json</file>
+        <file alias="presets/devices/monitor.device.json">../presets/devices/monitor.device.json</file>
+        <file alias="presets/devices/pc-case.device.json">../presets/devices/pc-case.device.json</file>
+        <file alias="presets/devices/keyboard-104.device.json">../presets/devices/keyboard-104.device.json</file>
+        <file alias="presets/devices/mouse-3zone.device.json">../presets/devices/mouse-3zone.device.json</file>
+        <file alias="presets/devices/fan-120.device.json">../presets/devices/fan-120.device.json</file>
+        <file alias="presets/devices/fan-slw.device.json">../presets/devices/fan-slw.device.json</file>
+        <file alias="presets/devices/pump-360.device.json">../presets/devices/pump-360.device.json</file>
+        <file alias="presets/devices/gpu-fan.device.json">../presets/devices/gpu-fan.device.json</file>
+        <file alias="presets/devices/gpu-card.device.json">../presets/devices/gpu-card.device.json</file>
+        <file alias="presets/devices/gpu-logo.device.json">../presets/devices/gpu-logo.device.json</file>
+        <file alias="presets/devices/ram-stick.device.json">../presets/devices/ram-stick.device.json</file>
+        <file alias="presets/devices/group.device.json">../presets/devices/group.device.json</file>
     </qresource>
 </RCC>

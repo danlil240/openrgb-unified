@@ -18,6 +18,7 @@
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneJson.h"
+#include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
@@ -142,7 +143,24 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
         setStatus(QStringLiteral("autosave failed: %1").arg(msg));
     });
 
-    doc = BuildDefaultDesk();
+    /* Type library: packaged defaults underneath whatever the
+       workspace presets dir holds (loaded on each Reload). */
+    registry.SetDefaults(DefaultDevicePresets());
+
+    /* Start on the default compact workspace resolved through the
+       registry — resolution cannot fail on the bundled types, but
+       guard anyway. */
+    workspace = BuildDefaultWorkspace();
+    SceneDocument resolved;
+    if(ResolveScene(workspace, registry, resolved, nullptr))
+    {
+        doc = resolved;
+    }
+    else
+    {
+        doc = BuildDefaultDesk();
+    }
+    doc.name = workspace.meta.name;
     refreshDevices();
 }
 
@@ -548,7 +566,10 @@ void SceneBridge::refreshDevices()
 \*---------------------------------------------------------*/
 StudioDocument SceneBridge::CurrentWorkspace() const
 {
-    StudioDocument w;
+    /* Compact authoring state is authoritative — the resolved scene
+       (doc) only contributes runtime state (colors, effect,
+       brightness) that authoring doesn't carry. */
+    StudioDocument w = workspace;
     w.meta = meta;
     if(w.meta.name.empty())
     {
@@ -561,8 +582,10 @@ StudioDocument SceneBridge::CurrentWorkspace() const
     w.inputs.screen_index = screen_index;
     w.inputs.sens_pct     = audio_sens_pct;
     w.inputs.decay_pct    = ripple_decay_pct;
-    w.scene      = doc;
-    w.scene.name = w.meta.name;    /* one name home — the top level */
+    w.object_colors  = doc.object_colors;
+    w.emitter_colors = doc.emitter_colors;
+    w.brightness     = doc.brightness;
+    w.effect         = doc.effect;
     return w;
 }
 
@@ -570,11 +593,15 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
 {
     /* A saved workspace carries its effect state — loading restores
        the preset and resumes playback if it was playing. Live output
-       is deliberately not touched here; it is a runtime switch. */
+       is deliberately not touched here; it is a runtime switch.
+       w.scene is the already-resolved document (the caller resolved
+       it against the registry — resolution failure never reaches
+       here). */
     setPlaying(false);
-    doc      = w.scene;
-    doc.name = w.meta.name;
-    meta     = w.meta;
+    workspace = w;
+    doc       = w.scene;
+    doc.name  = w.meta.name;
+    meta      = w.meta;
 
     audio_sens_pct   = w.inputs.sens_pct;
     ripple_decay_pct = w.inputs.decay_pct;
@@ -601,6 +628,26 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
     }
 }
 
+void SceneBridge::ReloadPresets()
+{
+    /* Packaged defaults underneath the file layer — a missing or
+       removed type file falls back to the shipped definition, so
+       the default desk is always recoverable. Bad files report
+       errors but never block the rest of the library. */
+    registry.SetDefaults(DefaultDevicePresets());
+    registry.ClearFiles();
+    if(store != nullptr)
+    {
+        std::vector<std::string> errs;
+        registry.LoadDirectory(store->PresetDir().toStdString(), &errs);
+        if(!errs.empty())
+        {
+            emit statusMessage(QStringLiteral("presets: %1")
+                .arg(QString::fromStdString(errs.front())));
+        }
+    }
+}
+
 bool SceneBridge::LoadWorkspace()
 {
     if(!store->DocumentExists())
@@ -608,6 +655,7 @@ bool SceneBridge::LoadWorkspace()
         setStatus(QStringLiteral("no saved workspace — using default desk"));
         return false;
     }
+    ReloadPresets();
     StudioDocument w;
     QString err, warns;
     if(!store->Load(&w, &err, &warns))
@@ -617,6 +665,18 @@ bool SceneBridge::LoadWorkspace()
         setStatus(QStringLiteral("studio.json rejected: %1").arg(err));
         return false;
     }
+    SceneDocument resolved;
+    std::vector<std::string> rerrs;
+    if(!ResolveScene(w, registry, resolved, &rerrs))
+    {
+        /* Resolution failure (missing/mismatched types, dangling
+           references) leaves the current scene active too. */
+        setStatus(QStringLiteral("workspace resolve failed: %1")
+            .arg(QString::fromStdString(
+                rerrs.empty() ? "unknown" : rerrs.front())));
+        return false;
+    }
+    w.scene = resolved;
     ApplyWorkspace(w);
     store->SetClean();
     if(!warns.isEmpty())
@@ -773,6 +833,14 @@ bool SceneBridge::restoreBackup()
         setStatus(QStringLiteral("backup invalid: %1").arg(err));
         return false;
     }
+    ReloadPresets();
+    SceneDocument resolved;
+    if(!ResolveScene(w, registry, resolved, nullptr))
+    {
+        setStatus(QStringLiteral("backup resolve failed — scene kept"));
+        return false;
+    }
+    w.scene = resolved;
     ApplyWorkspace(w);
     /* The restored doc differs from studio.json until saved. */
     store->MarkDirty();
@@ -789,6 +857,14 @@ bool SceneBridge::recoverAutosave()
         setStatus(QStringLiteral("autosave invalid: %1").arg(err));
         return false;
     }
+    ReloadPresets();
+    SceneDocument resolved;
+    if(!ResolveScene(w, registry, resolved, nullptr))
+    {
+        setStatus(QStringLiteral("autosave resolve failed — scene kept"));
+        return false;
+    }
+    w.scene = resolved;
     ApplyWorkspace(w);
     store->DiscardRecovery();
     store->MarkDirty();   /* recovered edits are unsaved */
@@ -807,7 +883,11 @@ void SceneBridge::discardRecovery()
 void SceneBridge::resetScene()
 {
     setPlaying(false);
-    doc = BuildDefaultDesk();
+    workspace = BuildDefaultWorkspace();
+    SceneDocument resolved;
+    doc = ResolveScene(workspace, registry, resolved, nullptr)
+        ? resolved : BuildDefaultDesk();
+    doc.name = workspace.meta.name;
     frame.clear();
     engine.SetLayers({});
     emit presetChanged();

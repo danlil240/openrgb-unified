@@ -28,4 +28,10 @@ nlohmann::json ToJson(const SceneDocument& doc);
 bool FromJson(const nlohmann::json& j, SceneDocument& doc,
               std::vector<std::string>* errors = nullptr);
 
+/* Shared color coding: writes "#RRGGBB"; reads that or the legacy
+   packed 0x00BBGGRR integer. Used by the scene and workspace
+   serializers. */
+std::string SceneColorHex(SceneColor c);
+bool        ParseSceneColor(const nlohmann::json& v, SceneColor& out);
+
 } /* namespace studio */

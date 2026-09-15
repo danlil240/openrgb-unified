@@ -18,6 +18,7 @@
 #pragma once
 
 #include "StudioConfig.h"
+#include "../presets/DevicePreset.h"
 
 #include <QObject>
 #include <QByteArray>
@@ -44,9 +45,12 @@ public:
     QString AutosavePath()  const { return dir + "/studio.autosave.json"; }
     QString LegacyBackupPath() const { return dir + "/legacy-settings.backup.json"; }
     QString MigrationMarkerPath() const { return dir + "/migration.done"; }
+    QString PresetDir()     const { return dir + "/presets/devices"; }
 
-    /* Creates the workspace dir (+ schemas/ with a copy of the
-       bundled studio.schema.json) if needed. */
+    /* Creates the workspace dir (+ schemas/ with copies of the
+       bundled studio/device schemas and presets/devices/ with the
+       bundled *.device.json type files) if needed. Existing files
+       are never overwritten — user edits survive. */
     bool EnsureWorkspaceDir(QString* error = nullptr);
 
     bool DocumentExists() const;
@@ -77,7 +81,11 @@ public:
 
     /* Parse + validate studio.json into `out`. On failure `out` is
        untouched and `error` carries the field messages. A missing
-       file is an error here — callers check DocumentExists first. */
+       file is an error here — callers check DocumentExists first.
+       A v2/v1 workspace file migrates in place: the original is
+       backed up to studio.v2.backup.json, extracted type files are
+       validated + written under presets/devices/, then the compact
+       v3 document replaces it — all before `out` is filled. */
     bool Load(StudioDocument* out, QString* error = nullptr,
               QString* warnings = nullptr);
     bool LoadFile(const QString& path, StudioDocument* out,
@@ -121,6 +129,22 @@ private:
     QByteArray ReadFile(const QString& path) const;
     bool       WriteAtomic(const QString& path, const QByteArray& bytes,
                            QString* error);
+    /* Parse + validate any workspace JSON (v3 direct, v1/v2 through
+       the expanded-scene migration). Fills `types` with extracted
+       device presets when the source was expanded. Shared by
+       LoadFile (validation only) and Load (which also activates the
+       migration on disk). */
+    bool       LoadParsed(const QString& path, StudioDocument* out,
+                          std::vector<DevicePreset>* types,
+                          QString* error, QString* warnings) const;
+    /* Write extracted type files under presets/devices/, validating
+       each written file. An existing same-content file is reused; a
+       same-id/different-content conflict writes under a suffixed id
+       and remaps the document's references — a local type is never
+       overwritten silently. */
+    bool       InstallTypes(StudioDocument& doc,
+                            std::vector<DevicePreset>& types,
+                            QString* error);
     /* Copy the current studio.json to studio.backup.json — only if
        it still parses as a valid document (backup = last valid). */
     void       UpdateBackup();

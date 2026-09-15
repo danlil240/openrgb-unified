@@ -1,24 +1,34 @@
 /*---------------------------------------------------------*\
-|| StudioConfig.h                                            |
-||                                                           |
-||   StudioDocument — the authoritative workspace doc      |
-||   persisted as studio.json. Qt-free: candidate          |
-||   validation and deterministic serialization run under  |
-||   plain cl so tests/studio_config_test.cpp covers them. |
-||                                                           |
-||   Layout (schema v2):                                    |
-||     schema_version, name                                 |
-||     ui/camera/controls/render  — editor preferences      |
-||     inputs  — reactive input source settings             |
-||     output  — brightness + live_on_startup               |
-||     scene   — SceneJson v2 doc (name/brightness/effect   |
-||               are hoisted to the top-level sections)     |
-||     effects — preset/seed/speed/intensity/playing        |
-|||             + layers (reserved, retained verbatim)      |
-||     definitions — device/effect preset snapshots         |
-||     extensions — third-party data, retained verbatim     |
-||                                                           |
-||   SPDX-License-Identifier: GPL-2.0-or-later               |
+||| StudioConfig.h                                            |
+|||                                                           |
+|||   StudioDocument — the authoritative workspace doc     |
+|||   persisted as studio.json. Qt-free: candidate         |
+|||   validation and deterministic serialization run under |
+|||   plain cl so tests/studio_config_test.cpp covers them.|
+|||                                                           |
+|||   Layout (schema v3 — compact instances):              |
+|||     schema_version, name                               |
+|||     ui/camera/controls/render  — editor preferences    |
+|||     inputs  — reactive input source settings           |
+|||     output  — brightness + live_on_startup             |
+|||     devices — instance id -> {type,x,y,z,rx,ry,rz,     |
+|||               [parent]}; placements only, NEVER        |
+|||               expanded entities or embedded types      |
+|||     bindings — binding id -> hardware identity         |
+|||     device_settings — instance path -> per-instance    |
+|||               state (visible/locked/mirror_of/zones)   |
+|||     colors  — {objects, emitters} keyed by stable      |
+|||               instance/entity paths                    |
+|||     effects — preset/seed/speed/intensity/playing      |
+|||               + layers (reserved, retained verbatim)   |
+|||     extensions — third-party data, retained verbatim   |
+|||                                                           |
+|||   Type definitions live in external files              |
+|||   (presets/devices/*.device.json, presets/DevicePreset)|
+|||   and the expanded runtime scene is produced by        |
+|||   scene/SceneResolver — never serialized here.         |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
 \*---------------------------------------------------------*/
 
 #pragma once
@@ -27,21 +37,25 @@
 
 #include <nlohmann/json.hpp>
 
+#include <map>
 #include <string>
 #include <vector>
 
 namespace studio
 {
 
-/* Workspace schema version. Older documents are migrated on load;
-   newer ones are rejected without rewriting (no silent downgrade). */
-constexpr int STUDIO_SCHEMA_VERSION = 2;
+/* Workspace schema version. Older documents are migrated on load
+   (v2 expanded workspaces by the file store); newer ones are
+   rejected without rewriting (no silent downgrade). */
+constexpr int STUDIO_SCHEMA_VERSION = 3;
 
 /* Content caps — malformed community content must not be able to
-   destabilize the host. Generous vs. the current ~30-object desk. */
-constexpr unsigned int STUDIO_MAX_OBJECTS   = 2048;
-constexpr unsigned int STUDIO_MAX_EMITTERS  = 65536;
-constexpr unsigned int STUDIO_MAX_BINDINGS  = 512;
+   destabilize the host. Generous vs. the current ~20-instance desk. */
+constexpr unsigned int STUDIO_MAX_DEVICES     = 2048;
+constexpr unsigned int STUDIO_MAX_BINDINGS    = 512;
+constexpr unsigned int STUDIO_MAX_SETTINGS    = 8192;
+constexpr unsigned int STUDIO_MAX_ZONE_SET    = 64;
+constexpr unsigned int STUDIO_MAX_COLOR_KEYS  = 8192;
 
 struct UiPrefs
 {
@@ -92,9 +106,6 @@ struct WorkspaceMeta
     /* output.live_on_startup — defaults false; migration and
        imported documents may never enable it. */
     bool           live_on_startup = false;
-    /* Preset-library snapshots embedded in the workspace; retained
-       verbatim until the preset registry owns them. */
-    nlohmann::json definitions;
     /* Third-party extension data, retained verbatim. */
     nlohmann::json extensions;
     /* effects.layers — JSON effect layer definitions reserved for
@@ -103,15 +114,65 @@ struct WorkspaceMeta
     nlohmann::json layers = nlohmann::json::array();
 };
 
+/*---------------------------------------------------------*\
+||| Compact authoring sections.                            ||
+|||                                                           |
+|||   Instance paths: a root device instance is its        ||
+|||   devices key ("case"); a nested child-device expands  ||
+|||   as "<parent>/<entity>" ("case/case_fans"). All       ||
+|||   device_settings and colors keys are such paths or    ||
+|||   "<path>/<entity>" for a specific expanded entity.    |
+\*---------------------------------------------------------*/
+struct DeviceInstance
+{
+    std::string type;                   /* device-type id (file id)  */
+    Vec3        position;               /* meters                    */
+    Vec3        rotation_deg;           /* XYZ degrees, Rz*Ry*Rx     */
+    std::string parent;                 /* optional parent instance  */
+};
+
+struct ZoneSetting
+{
+    std::string binding;                /* bindings key; "" = unbound */
+    int         addr_base = 0;          /* first LED index in zone    */
+    bool        verified = false;       /* verified => writable       */
+};
+
+struct DeviceSettings
+{
+    bool        visible = true;
+    bool        locked  = false;
+    /* Instance-level mirror: this instance shares another
+       instance's output. Resolution marks every expanded object
+       under the source path Linked -> the corresponding object
+       under the target path (same type required, no chains). */
+    std::string mirror_of;
+    /* zone_id -> binding attachment + address base. */
+    std::map<std::string, ZoneSetting> zones;
+    /* Unknown fields, retained verbatim (forward compatibility). */
+    nlohmann::json extra;
+};
+
 struct StudioDocument
 {
     int            schema_version = STUDIO_SCHEMA_VERSION;
     WorkspaceMeta  meta;
     InputSettings  inputs;
-    /* Scene doc owns objects/bindings/colors/effect and brightness.
-       At the document level those serialize under "scene" +
-       "effects"/"output" — never duplicated. */
-    SceneDocument  scene;
+    /* devices map: instance id -> placement. */
+    std::map<std::string, DeviceInstance>  devices;
+    /* bindings map: binding id -> hardware identity. */
+    std::map<std::string, DeviceBinding>   bindings;
+    /* instance path -> per-instance state. */
+    std::map<std::string, DeviceSettings>  device_settings;
+    /* instance/entity path -> base color. */
+    std::map<std::string, SceneColor>      object_colors;
+    /* instance/entity path -> emitter index -> color. */
+    std::map<std::string, std::map<int, SceneColor>> emitter_colors;
+    float                                brightness = 1.0f;
+    EffectState                          effect;
+    /* Resolved runtime scene — filled by scene/SceneResolver on
+       load, NEVER serialized into the workspace. */
+    SceneDocument                        scene;
 };
 
 /* Deterministic serialization (nlohmann orders keys; the store
@@ -122,7 +183,9 @@ nlohmann::json ToJson(const StudioDocument& doc);
    receives the candidate and the function returns true; on failure
    `doc` is untouched and `errors` holds field-path messages.
    `warnings`, when given, collects non-fatal notes (unknown fields,
-   unknown effect presets). Never throws. */
+   unknown effect presets). Validates the compact sections only —
+   resolution against the type registry is a separate step
+   (SceneResolver), driven by the file store. Never throws. */
 bool FromJson(const nlohmann::json& j, StudioDocument& doc,
               std::vector<std::string>* errors   = nullptr,
               std::vector<std::string>* warnings = nullptr);
