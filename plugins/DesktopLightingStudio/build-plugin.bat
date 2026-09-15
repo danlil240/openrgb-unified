@@ -33,5 +33,14 @@ set "PLUGIN_DST=%~dp0..\..\OpenRGB\OpenRGB Windows 64-bit\plugins\DesktopLightin
 if not exist "%PLUGIN_DST%" mkdir "%PLUGIN_DST%"
 xcopy /y /e /i out\* "%PLUGIN_DST%\" >nul
 
+:: Plugin dependencies must live next to OpenRGB.exe - Windows does
+:: not search the plugin's own folder when resolving them.
+set "EXE_DIR=%~dp0..\..\OpenRGB\OpenRGB Windows 64-bit"
+xcopy /y /d out\Qt6*.dll "%EXE_DIR%\" >nul
+xcopy /y /d out\dxcompiler.dll "%EXE_DIR%\" >nul
+xcopy /y /d out\dxil.dll "%EXE_DIR%\" >nul
+xcopy /y /d out\opengl32sw.dll "%EXE_DIR%\" >nul
+
 echo Deployed plugin to %PLUGIN_DST%
+echo Deployed Qt runtime deps to %EXE_DIR%
 endlocal

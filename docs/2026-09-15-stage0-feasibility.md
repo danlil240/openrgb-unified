@@ -45,6 +45,15 @@ tracked as a moc dependency, so incremental rebuilds kept the stale metadata.
 `tests/plugin_meta_check` probe (`QPluginLoader::metaData()` identical to
 PluginManager's check) confirms the deployed DLL unwraps to API version 5.
 
+**Fixed load failure (second attempt):** `LoadLibrary` then failed with
+"The specified module could not be found" — Qt's plugin loader does not
+search the plugin's own directory for dependencies, so the Quick/QML/Quick3D
+runtime DLLs beside the plugin were never found. `build-plugin.bat` now also
+copies `Qt6*.dll` (+`dxcompiler`/`dxil`/`opengl32sw`) next to `OpenRGB.exe`.
+Note: a full `build-windows.bat` rebuild replaces `OpenRGB Windows 64-bit\`
+entirely — rerun `build-plugin.bat` afterward to restore plugin deps and the
+`plugins\` folder.
+
 ## Existing-plugin reuse comparison
 
 Both plugins are **GPL-2.0-only** (compatible: our plugin is a GPL OpenRGB
