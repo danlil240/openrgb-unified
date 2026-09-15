@@ -78,24 +78,39 @@ Rectangle {
                 id: objNode
                 property var obj: modelData
                 property var spec: root.bodySpec(obj)
-                property var emitterList: []
+                // Structure (positions) and colors are split: the
+                // Repeater's model is emitterPos, which only changes on
+                // a scene/layout change, so delegates persist. Per-tick
+                // updates only reassign emitterColors — bindings
+                // re-evaluate in place instead of rebuilding ~300
+                // emitter Models every frame.
+                property var emitterPos: []
+                property var emitterColors: []
 
-                function reloadEmitters() {
-                    emitterList = (typeof bridge !== "undefined") ? bridge.emittersOf(obj.id) : []
+                function reloadLayout() {
+                    var list = (typeof bridge !== "undefined") ? bridge.emittersOf(obj.id) : []
+                    emitterPos = list
+                    var cols = []
+                    for (var i = 0; i < list.length; i++) cols.push(list[i].c)
+                    emitterColors = cols
+                }
+
+                function reloadColors() {
+                    emitterColors = (typeof bridge !== "undefined") ? bridge.emitterColorsOf(obj.id) : []
                 }
 
                 position: Qt.vector3d(obj.x, obj.y, obj.z)
                 eulerRotation: Qt.vector3d(obj.rx, obj.ry, obj.rz)
                 visible: obj.visible
 
-                Component.onCompleted: reloadEmitters()
+                Component.onCompleted: reloadLayout()
 
                 Connections {
                     target: (typeof bridge !== "undefined") ? bridge : null
                     function onEmittersChanged(changedId) {
-                        if (changedId === objNode.obj.id) objNode.reloadEmitters()
+                        if (changedId === objNode.obj.id) objNode.reloadColors()
                     }
-                    function onSceneChanged() { objNode.reloadEmitters() }
+                    function onSceneChanged() { objNode.reloadLayout() }
                 }
 
                 // Body mesh — ghost shells (the case) are translucent
@@ -121,7 +136,7 @@ Rectangle {
 
                 // Emitter dots (local frame — inherits node transform)
                 Repeater3D {
-                    model: objNode.emitterList
+                    model: objNode.emitterPos
                     delegate: Node {
                         required property var modelData
 
@@ -134,8 +149,10 @@ Rectangle {
                             scale: Qt.vector3d(d, d, d)
                             materials: PrincipledMaterial {
                                 lighting: PrincipledMaterial.NoLighting
+                                property color c: (modelData.i < objNode.emitterColors.length)
+                                                  ? objNode.emitterColors[modelData.i] : "#000000"
                                 baseColor: (objNode.obj.bound === "ok" || objNode.obj.bound === "none")
-                                           ? modelData.c : Qt.darker(modelData.c, 2.5)
+                                           ? c : Qt.darker(c, 2.5)
                             }
                         }
 

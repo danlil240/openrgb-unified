@@ -230,6 +230,36 @@ QVariantList SceneBridge::emittersOf(const QString& objectId) const
     return out;
 }
 
+QVariantList SceneBridge::emitterColorsOf(const QString& objectId) const
+{
+    QVariantList out;
+    const std::string id = objectId.toStdString();
+
+    const SceneObject* obj = FindObject(doc, id);
+    if(obj == nullptr)
+    {
+        return out;
+    }
+    const SceneObject* owner = OutputOwner(doc, id);
+    if(owner == nullptr)
+    {
+        owner = obj;
+    }
+
+    const auto fit = frame.find(owner->id);
+    const bool has_frame = (fit != frame.end());
+
+    out.reserve((int)owner->emitters.size());
+    for(size_t i = 0; i < owner->emitters.size(); i++)
+    {
+        const SceneColor c = (has_frame && i < fit->second.size())
+                           ? fit->second[i]
+                           : EmitterColor(doc, owner->id, (int)i);
+        out.push_back(Hex(ScaleScene(c, doc.brightness)));
+    }
+    return out;
+}
+
 QVariantMap SceneBridge::objectInfo(const QString& objectId) const
 {
     QVariantMap m;
@@ -698,6 +728,20 @@ bool SceneBridge::BindingIsI2C(const std::string& binding_id) const
         || loc.find("smbus") != std::string::npos;
 }
 
+double SceneBridge::BindingMinPace(const std::string& binding_id) const
+{
+    /* The Lian Li wireless runtime only transmits inside its 300 ms
+       poll tick — writes just enqueue a desired upload, so pushing
+       faster than ~300 ms is pure churn. */
+    const ResolvedBinding* r = adapter.Resolution(binding_id);
+    if(r != nullptr && r->status == BindingStatus::Resolved
+       && adapter.Snapshot()[r->controller_index].location.find("Wireless:") == 0)
+    {
+        return 280.0;
+    }
+    return 33.0;
+}
+
 void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
                               const FrameColors& fc)
 {
@@ -718,6 +762,7 @@ void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
             PushPace& p = push_pace[b.id];
             i2c = BindingIsI2C(b.id);
             eff = (p.lane < 0) ? 1 : p.lane;
+            p.min_pace_ms = BindingMinPace(b.id);
             if((i2c ? 1 : eff) == lane && p.due_after <= now)
             {
                 pace = &p;   /* std::map nodes are stable */
@@ -734,7 +779,8 @@ void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
             std::chrono::duration<double, std::milli>(t1 - t0).count();
         {
             QMutexLocker pl(&pace_mutex);
-            pace->budget_ms = std::min(750.0, std::max(33.0, cost * 1.3));
+            pace->budget_ms = std::min(750.0,
+                std::max(pace->min_pace_ms, cost * 1.3));
             pace->due_after = t1 + std::chrono::milliseconds((long long)pace->budget_ms);
             pace->lane      = i2c ? 1 : (cost > 80.0 ? 1 : (cost < 40.0 ? 0 : eff));
         }

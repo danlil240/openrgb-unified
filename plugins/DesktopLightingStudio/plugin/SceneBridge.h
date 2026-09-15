@@ -77,6 +77,11 @@ public:
        return the owner's emitter layout and colors. */
     Q_INVOKABLE QVariantList emittersOf(const QString& objectId) const;
 
+    /* Colors only, same order — the per-tick update path. Keeping it
+       separate lets the QML repeater keep stable delegates instead of
+       rebuilding every emitter model each frame. */
+    Q_INVOKABLE QVariantList emitterColorsOf(const QString& objectId) const;
+
     Q_INVOKABLE QVariantMap objectInfo(const QString& objectId) const;
     Q_INVOKABLE QString     bindingReport() const;
 
@@ -140,6 +145,7 @@ private:
     void runPushLane(int lane, const SceneDocument& dc,
                      const FrameColors& fc);           /* worker: due sweep */
     bool BindingIsI2C(const std::string& binding_id) const; /* worker only */
+    double BindingMinPace(const std::string& binding_id) const; /* worker only */
     void emitFrameChanged();               /* emittersChanged for frame   */
 
     void rebuildMatrixLayouts();
@@ -176,8 +182,9 @@ private:
     struct PushPace
     {
         std::chrono::steady_clock::time_point due_after {};
-        double                              budget_ms = 33.0;
-        int                                 lane      = -1;  /* -1: unmeasured -> slow */
+        double                              budget_ms   = 33.0;
+        double                              min_pace_ms = 33.0;
+        int                                 lane        = -1;  /* -1: unmeasured -> slow */
     };
     std::map<std::string, PushPace>         push_pace;       /* under pace_mutex    */
     QMutex                                  pace_mutex;      /* guards push_pace    */
