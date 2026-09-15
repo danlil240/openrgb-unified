@@ -82,9 +82,9 @@ SceneDocument BuildDefaultDesk()
           "I2C: PawnIO SMBus PIIX4 0, address 0x19",       1, "",   0 },
         { "dimm_1",      "Corsair",           "Corsair",   "",
           "I2C: PawnIO SMBus PIIX4 0, address 0x1B",       1, "",   0 },
-        { "slw_fan_0",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 1",           0 },
-        { "slw_fan_1",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 2",           0 },
-        { "slw_fan_2",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 3",           0 },
+        { "slw_fan_0",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 1",          40 },
+        { "slw_fan_1",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 2",          40 },
+        { "slw_fan_2",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 3",          40 },
     };
 
     /*-----------------------------------------------------*\
@@ -185,17 +185,16 @@ SceneDocument BuildDefaultDesk()
         doc.object_colors["gpu_top_fan"] = MakeSceneColor(0, 180, 160);
     }
 
-    /* 3x Lian Li SL Wireless — side intake stack. Bindings likely
-       need adjusting to the real zone names once the driver
-       reports them; unresolved objects stay visible. */
+    /* 3x Lian Li SL Wireless — side intake stack. The UNI FAN
+       controller exposes one zone per fan ("Fan 1-3", 40 LEDs each),
+       so each scene fan maps 1:1 onto a physical zone. */
     for(int i = 0; i < 3; i++)
     {
         const std::string id = "slw_fan_" + std::to_string(i);
         SceneObject fan = Device(id, "SL Wireless fan " + std::to_string(i + 1),
                                  "fan_body", id,
                                  { 0.40f + 0.09f * (float)i, 0.14f, 0.05f }, { 0, 0, 0 });
-        fan.emitters = layout::Ring(12, RING_R, 0.0f, false, id);
-        fan.verified = false;   /* per-fan addressing unverified (plan) */
+        fan.emitters = layout::Ring(40, RING_R, 0.0f, false, id);
         doc.objects.push_back(fan);
         doc.object_colors[id] = MakeSceneColor(0, 180, 160);
     }
