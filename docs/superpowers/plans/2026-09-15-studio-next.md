@@ -12,11 +12,14 @@
 
 **Status:** Proposed staged plan. The visual direction is selected; detailed design remains reviewable. No implementation or deployment is included in this planning task. Each milestone has an independently testable deliverable; expand its checks into a focused implementation checklist at execution time.
 
+**User correction / implementation priority:** The in-progress v2 workspace persists expanded device entities. Replace this with v3 compact instances referencing external type JSON before continuing editor work. Type loading and runtime expansion move into milestone 1; milestone 4 builds the visual library/editor on that foundation. The full contract and examples are in design section 6. Embedded definitions/snapshots are superseded.
+
 ## Global Constraints
 
 - Keep C++17, Qt 6.8.3, qmake, and OpenRGB plugin API 5 for the first release.
 - Keep the Qt-free scene/effect core.
-- `studio.json` is the authoritative active workspace file.
+- `studio.json` is the authoritative active workspace file; external device-type JSON files own internal entities and their local transforms.
+- Every ordinary device entry contains `type`, `x`, `y`, `z`, `rx`, `ry`, `rz`, keyed by stable instance ID. Expanded entities are runtime data and must not be serialized into the workspace.
 - Hierarchy and output ownership are separate relationships.
 - A drag is one undo command, regardless of pointer event count.
 - Middle-button drag pans the camera; it never moves a device.
@@ -31,7 +34,7 @@ All paths below are relative to `plugins/DesktopLightingStudio/` unless prefixed
 
 | Milestone | Main additions | Existing integration points | Exit demonstration |
 |---|---|---|---|
-| 1. Foundations | `scene/SceneGraph.*`, `config/StudioConfig.*`, `config/ConfigStore.*`, `config/ConfigMigration.*`, `schemas/` | `SceneTypes.*`, `SceneJson.*`, `SceneBridge.*`, `EffectEngine.cpp` | Legacy desk opens in v2 JSON with unchanged output addresses and correct transforms |
+| 1. Foundations | `scene/SceneGraph.*`, `config/StudioConfig.*`, `config/ConfigStore.*`, `config/ConfigMigration.*`, `presets/DevicePreset.*`, `presets/PresetRegistry.*`, `scene/SceneResolver.*`, `schemas/` | `SceneTypes.*`, `SceneJson.*`, `SceneBridge.*`, `EffectEngine.cpp` | Legacy desk opens in compact v3 JSON with shared external types, unchanged output addresses and correct transforms |
 | 2. Editing | `editor/EditorController.*`, `editor/TransformCommands.*`, `editor/SceneObjectModel.*`, `ui/editor/` | `SceneBridge.*`, `StudioScene.qml` | Move/rotate mouse and case, middle-pan, undo, save/reopen |
 | 3. Graphics | `ui/StudioWorkspace.qml`, `ui/components/`, `ui/devices/`, `ui/materials/`, `assets/` | `StudioTab.*`, `StudioScene.qml`, `studio.qrc`, `.pro` | Attractive, coherent desk editor at multiple display scales |
 | 4. Devices | `presets/DevicePreset.*`, `presets/PresetRegistry.*`, `presets/devices/`, `ui/library/` | `DefaultDesk.*`, `EmitterLayout.*`, binding UI, store | Edit a fan preset in UI and JSON, instantiate and export it |
@@ -57,16 +60,32 @@ All paths below are relative to `plugins/DesktopLightingStudio/` unless prefixed
 
 **Files:** create `config/StudioConfig.*`, `config/ConfigStore.*`, `config/ConfigMigration.*`, `schemas/studio.schema.json`, `tests/studio_config_test.cpp`; modify `scene/SceneJson.*`, `plugin/SceneBridge.*`, `.pro`.
 
-**Contract:** validation returns field-specific errors and a complete candidate document. The store changes active state only after success. Persist settings through one store; the old host settings are a migration source only.
+**Contract:** validation returns field-specific errors and a complete candidate authoring document plus resolved runtime scene. The store changes active state only after success. Workspace settings and instance placements save to `studio.json`; device definitions save to their external type files. The old host settings and expanded v2 workspace are migration sources only. Never pass the runtime expanded scene directly to the workspace serializer.
 
 - [ ] Capture a legacy scene/input fixture and test migration of IDs, positions, colors, mirrored ownership, effect state and input settings.
 - [ ] Test malformed types, duplicate IDs, cycles, invalid scales, out-of-range LED addresses, newer versions, save failures and interrupted-save recovery.
 - [ ] Implement root configuration and schema, candidate validation, migration backup and atomic save; route all existing persistent settings through it.
 - [ ] Add dirty status, debounced autosave/recovery, and external-change detection with explicit conflict choices.
 - [ ] Expose Open config folder, Reload JSON and Save As. Open/reload failures must leave current inputs and live output state untouched.
-- [ ] Round-trip the full migrated fixture and verify there are no hidden setting changes outside `studio.json`.
+- [ ] Round-trip the full migrated fixture and verify workspace edits change only compact instance/settings fields; device type edits change their definition file.
 
-**Milestone exit:** the current desk survives migration and save/reopen, with preview/effect transform parity and recoverable edits.
+### Task 1.3: External device types and compact instances — current next priority
+
+**Files:** create `presets/DevicePreset.*`, `presets/PresetRegistry.*`, `scene/SceneResolver.*`, `presets/devices/*.device.json`, `schemas/device.schema.json`, `tests/device_preset_test.cpp`; modify `config/StudioConfig.*`, `config/ConfigMigration.*`, `config/ConfigStore.*`, `schemas/studio.schema.json`, `plugin/SceneBridge.*`, default desk loading and `.pro`.
+
+**Contract:** retain separate authoring and runtime documents. Resolve type files once per load and instantiate their local entity graph under stable instance IDs. Root placement uses `type/x/y/z/rx/ry/rz`. Child-device references reuse external types recursively, with dependency-cycle validation. Preserve the existing `SceneDocument` as an output of resolution if that minimizes implementation churn.
+
+- [ ] Test two fan instances referencing one definition: different root transforms, identical local entity layouts, correct world emitter positions, and independent physical bindings.
+- [ ] Test save/reopen retains only compact device entries; assert there are no inline `entities`, generated `emitters` or embedded type `definitions` in workspace JSON.
+- [ ] Test type reload updates all affected instances, while changing one instance position leaves its sibling and shared type file untouched.
+- [ ] Test missing/mismatched type IDs, recursive dependencies and invalid entity references leave the current scene active with field-specific errors.
+- [ ] Implement the external type registry, runtime resolver, and compact v3 serializer using design section 6's exact field names and units.
+- [ ] Replace new-workspace default generation with compact placements plus external type files. Keep legacy expanded parsing for migration.
+- [ ] Migrate expanded v2 scenes: back up originals; extract and deduplicate equivalent local definitions; preserve variants, binding identity, mirrored output, colors and effect targets; validate written type files before switching the active workspace.
+- [ ] Verify moving/rotating a device writes only the corresponding compact placement. Editing a type entity writes only that type file and rebuilds its instances after validation.
+- [ ] Run core/config/type/transform tests and inspect generated JSON for a real multi-fan desk before proceeding to milestone 2.
+
+**Milestone exit:** the current desk survives migration and save/reopen as compact v3 instances plus shared type files, with preview/effect transform parity and recoverable edits.
 
 ## Milestone 2 — direct manipulation
 
@@ -74,7 +93,7 @@ All paths below are relative to `plugins/DesktopLightingStudio/` unless prefixed
 
 **Files:** create `editor/EditorController.*`, `editor/TransformCommands.*`, `editor/SceneObjectModel.*`, `tests/studio_editor_test.cpp`; modify `plugin/SceneBridge.*`, `.pro`.
 
-**Contract:** begin gesture snapshots selected local transforms; update gesture previews; commit pushes one command; cancel restores the snapshot. A committed model change invalidates affected world transforms and key lookup, not unrelated delegates.
+**Contract:** begin gesture snapshots selected instance transforms; update gesture previews; commit pushes one command; cancel restores the snapshot. Save changes to the authoring document, then update affected runtime transforms and key lookup. Internal entity editing targets a type definition or a separately saved type variant; it never copies entities into a workspace entry.
 
 - [ ] Test a 100-update drag produces one undo command; cancelled/no-op drags produce none; undo/redo restores every affected child.
 - [ ] Implement selection, locked nodes, local/world transforms, multi-selection pivot, plane constraints, snapping and numeric edits.
@@ -118,14 +137,14 @@ All paths below are relative to `plugins/DesktopLightingStudio/` unless prefixed
 
 ## Milestone 4 — reusable device presets
 
-**Files:** create `presets/DevicePreset.*`, `presets/PresetRegistry.*`, `presets/devices/*.device.json`, `schemas/device.schema.json`, `ui/library/{DeviceLibrary,DevicePresetEditor}.qml`, `tests/device_preset_test.cpp`; modify `scene/DefaultDesk.*`, `scene/EmitterLayout.*`, configuration definitions and deployment resources.
+**Files:** extend `presets/DevicePreset.*`, `presets/PresetRegistry.*`, `presets/devices/*.device.json`, `schemas/device.schema.json`, `tests/device_preset_test.cpp` from milestone 1; create `ui/library/{DeviceLibrary,DevicePresetEditor}.qml`; modify `scene/DefaultDesk.*`, `scene/EmitterLayout.*`, configuration references and deployment resources.
 
-- [ ] Test ring/strip/matrix/point generation, invalid zone sizes, duplicate preset IDs, missing assets, revision snapshots and LED ordering.
-- [ ] Implement schema-backed registry and embedded definition snapshots. Instantiation gives each node and binding a fresh stable instance ID.
+- [ ] Extend tests for ring/strip/matrix/point generation, invalid zone sizes, duplicate preset IDs, missing assets, shared definition reload and LED ordering.
+- [ ] Expose the milestone-1 registry in the library UI. Instances reference external definitions; generated entity IDs remain stable across reloads.
 - [ ] Replace hardcoded default device descriptions with packaged JSON, retaining a minimal recoverable fallback desk if data is missing.
 - [ ] Add search, thumbnails, categories, favorites, drag/add to desk, Save variant and Create preset from selection.
 - [ ] Build visual geometry/material/zone/layout editor with immediate virtual preview and explicit local hardware binding.
-- [ ] Implement relative-asset export and explicit preset-update preview. Test editing the library cannot silently mutate an existing workspace.
+- [ ] Implement export with one file per used type and transitive dependencies, relative assets, same-ID conflict handling, and explicit validated type reload. Test all instances of a type update together without rewriting their placements.
 
 **Milestone exit:** create a 120 mm fan preset, reverse its LED order, save it as JSON, add two instances, and reopen/export without recompiling.
 

@@ -4,6 +4,8 @@ Date: 2026-09-15
 
 Status: proposed upgrade; user selected a polished 2.5D desk editor. This document defines the remaining design for review, not completed functionality.
 
+**User correction — reusable device types:** Each device type is defined once in its own JSON file, including internal entities and their local transforms. `studio.json` contains device instances with `type`, `x`, `y`, `z`, and Euler angles, keyed by stable instance ID. Expanded entities and embedded device definitions must not be serialized into the workspace. This correction supersedes the earlier embedded-snapshot design; the v2 implementation already in progress requires migration to the compact format described in section 6.
+
 ## 1. Product direction
 
 Make Studio a beautiful, direct-manipulation lighting workspace: arrange a recognizable version of your desk, choose a look, adjust it visually, and save everything in readable JSON. Everyday editing should feel closer to arranging objects in a design tool than operating hardware diagnostics.
@@ -118,11 +120,12 @@ Keep C++17, Qt 6.8.3, qmake, and OpenRGB plugin API 5 for the first release. Kee
 
 ### Boundaries
 
-- **Scene graph:** stable object IDs, parent IDs, local transforms, geometry dimensions, groups, emitters, bindings, visibility, lock state.
+- **Authored scene:** compact device instances referencing external device-type JSON files. Instance placement and per-instance settings are the editable source of truth.
+- **Runtime scene graph:** expand types into stable namespaced entity IDs, parent IDs, transforms, geometry, emitters and bindings in memory. Never serialize this expanded graph as the authored workspace.
 - **Transform math:** authored XYZ degree values retain the existing core convention; derive a normalized quaternion once and use it for rendering and world-space calculations. Matrix composition is `parentWorld × localTransform`.
 - **Editor controller:** selection, tools, transform transactions, undo, alignment, grouping; does not write files or talk to hardware directly.
 - **Document store:** whole-document validation, migrations, atomic saves, autosave/recovery, external-file change detection.
-- **Preset registry:** read device/effect JSON libraries, instantiate immutable versions, expose searchable metadata.
+- **Preset registry:** resolve external device/effect JSON types, validate dependencies, expand instances for rendering and effects, expose searchable metadata. Shared type changes apply on validated reload; type variants are separate files.
 - **Presentation models:** stable `QAbstractItemModel`/`QAbstractListModel` roles, granular changes for transforms and colors. Avoid rebuilding the entire scene on every drag tick.
 - **Render components:** viewport, input controller, gizmos, device families, materials, environment, panels.
 - **Existing effects/output:** consume the same evaluated scene transform graph. Rebuild key-event origin lookup when a keyboard or ancestor moves. Retain per-transport pacing and latest-frame coalescing.
@@ -133,7 +136,7 @@ Hierarchy and output ownership are separate relationships. `parent_id` determine
 
 ## 6. JSON-first configuration and presets
 
-**`studio.json` is the authoritative active workspace file:** UI preferences, camera, controls, render settings, inputs, output preferences, bindings, scene layout, active effects, and saved colors. Device and effect preset files form reusable libraries. Exported layout JSON files are optional reusable documents, not a second hidden settings store.
+**`studio.json` owns workspace settings and device placement. Each external type JSON owns its reusable device definition.** A fan's body, hub, diffuser, emitter positions, materials and local transforms are defined once in `presets/devices/fan-120.device.json`. Every placed fan references that type and supplies only its own position and Euler angles. Keep physical bindings, paint overrides and visibility/lock state in separate workspace sections keyed by instance ID; they must not copy device geometry.
 
 Store the workspace under OpenRGB's resolved user configuration directory in a `DesktopLightingStudio` subdirectory. Locate it through the host's available configuration API at implementation time. Provide Open config folder, Reload JSON, Save, Save As, Import, Export, and Restore backup actions. Avoid fixed usernames or repository paths in shipped defaults.
 
@@ -150,12 +153,12 @@ DesktopLightingStudio/
   schemas/
 ```
 
-Suggested top-level contract (illustrative valid JSON; an empty scene is allowed):
+Revised top-level contract (proposed schema v3, replacing the implemented expanded v2 format):
 
 ```json
 {
   "$schema": "schemas/studio.schema.json",
-  "schema_version": 2,
+  "schema_version": 3,
   "name": "My desk",
   "ui": { "theme": "graphite", "reduced_motion": false },
   "camera": { "view": "desk", "projection": "orthographic" },
@@ -163,14 +166,21 @@ Suggested top-level contract (illustrative valid JSON; an empty scene is allowed
   "render": { "quality": "balanced", "bloom": true },
   "inputs": { "audio": false, "keys": false, "screen": false },
   "output": { "brightness": 0.6, "live_on_startup": false },
-  "scene": { "nodes": [], "bindings": [], "object_colors": {}, "emitter_colors": {} },
+  "devices": {
+    "fan_front_top": { "type": "fan-120", "x": 0.38, "y": 0.30, "z": 0.05, "rx": 90, "ry": 0, "rz": 0 },
+    "fan_front_bottom": { "type": "fan-120", "x": 0.38, "y": 0.16, "z": 0.05, "rx": 90, "ry": 0, "rz": 0 }
+  },
+  "bindings": {},
+  "device_settings": {},
+  "colors": { "objects": {}, "emitters": {} },
   "effects": { "playing": false, "layers": [], "seed": 42 },
-  "definitions": { "devices": [], "effects": [] },
   "extensions": {}
 }
 ```
 
-Preset definitions describe device families, dimensions, asset references, materials, child parts, zone requirements, and emitter layout generators (`ring`, `strip`, `matrix`, `points`). Binding hints describe compatible hardware, not a user's serial number or automatically verified mapping. Presets cannot grant hardware verification.
+The object keys (`fan_front_top`, `fan_front_bottom`) are stable instance IDs, so the device entry needs no extra `id` field. `x/y/z` are meters; `rx/ry/rz` are Euler degrees using `Rz * Ry * Rx`, matching the shared transform contract. `type: "fan-120"` resolves deterministically to `presets/devices/fan-120.device.json`, whose `id` must match. Reject missing types and duplicate IDs; never choose whichever file is found first.
+
+Type definitions describe device families, dimensions, asset references, materials, internal entity transforms, zones and emitter generators (`ring`, `strip`, `matrix`, `points`). Explicit point layouts are supported for irregular hardware. Binding hints describe compatible hardware, not a user's serial number or automatically verified mapping. Presets cannot grant hardware verification.
 
 Example device-preset shape:
 
@@ -178,21 +188,43 @@ Example device-preset shape:
 {
   "$schema": "../../schemas/device.schema.json",
   "schema_version": 1,
-  "id": "generic.fan.120mm.8led",
-  "revision": 1,
+  "id": "fan-120",
   "name": "120 mm RGB fan — 8 LEDs",
   "category": "fan",
-  "geometry": { "family": "fan", "size_m": [0.12, 0.025, 0.12] },
-  "appearance": { "body_color": "#202028", "roughness": 0.45 },
+  "entities": {
+    "frame": {
+      "geometry": "fan_frame", "size_m": [0.12, 0.025, 0.12],
+      "x": 0, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 0,
+      "appearance": { "body_color": "#202028", "roughness": 0.45 }
+    },
+    "hub": {
+      "geometry": "fan_hub", "size_m": [0.04, 0.02, 0.04],
+      "x": 0, "y": 0.004, "z": 0, "rx": 0, "ry": 0, "rz": 0
+    },
+    "diffuser": {
+      "geometry": "fan_ring", "size_m": [0.11, 0.004, 0.11],
+      "x": 0, "y": 0.013, "z": 0, "rx": 0, "ry": 0, "rz": 0,
+      "zone": "ring"
+    }
+  },
   "zones": [
     {
       "id": "ring",
+      "entity": "diffuser",
       "led_count": 8,
       "layout": { "type": "ring", "radius_m": 0.052, "start_angle_deg": 0, "reverse": false }
     }
   ]
 }
 ```
+
+All entity positions are local to the device origin (or to an optional internal `parent` entity). Zone layouts are local to their named entity. Loading two fan instances expands two visual assemblies in memory, with IDs such as `fan_front_top/diffuser`, while storing the fan definition only once on disk. World emitter placement is `instance transform × entity hierarchy transforms × local emitter position`.
+
+Nested assemblies use the same references: a case type may declare child devices with `type`, position and Euler angles. These are local mounting positions; it must not copy the fan's entities. Reject recursive type dependencies. A user-customized case layout can be saved as a new case type, keeping the main file compact. Per-instance root `parent` references are optional when an independently placed device must follow another instance; root position/rotation are then relative to that parent.
+
+For custom internal geometry, create/edit a type or Save as variant. The workspace must never grow a full inline copy through overrides. Hardware bindings and sparse per-LED paint remain instance-specific data, keyed by stable instance/entity/zone IDs.
+
+The runtime resolver is an adapter: `compact workspace + type library → SceneDocument → renderer/effects/output`. The existing expanded `SceneDocument` may remain the internal representation. Saving serializes the compact authoring document, not `ToJson(expandedScene)`. Moving a fan modifies only its instance transform; editing its hub modifies the type file. This separation is required before continuing editor work.
 
 ### Editing and compatibility rules
 
@@ -204,7 +236,9 @@ Example device-preset shape:
 - Save through `QSaveFile` or equivalent atomic replacement. Keep the last valid backup and a debounced recovery file. Save errors remain visible and never show “Saved.”
 - Detect external edits. If the workspace is clean, offer Reload; if dirty, offer Keep current / Reload disk / Save current as copy. Never overwrite unsaved edits automatically.
 - Import existing OpenRGB `DesktopLightingStudio` settings once when no dedicated workspace exists. Back up the original, migrate scene and input settings, preserve IDs, LED addresses and world placement, then use the new store exclusively. Do not restart migration after a user intentionally creates an empty scene.
-- Scene documents embed the versions of device/effect definitions they use. Those snapshots are authoritative for that workspace. Library edits affect newly added devices; Apply preset update is explicit, undoable, and shows the differences.
+- Type files remain authoritative for all their instances. Validate changes and rebuild affected instances together on explicit Reload; no embedded snapshots. To change just one fan's design, save a new type variant and change that instance's `type`.
+- Back up and migrate the in-progress expanded v2 workspace to v3. Extract reusable definitions to separate type files; preserve local part positions, world placement, colors, effect targets, IDs and hardware bindings. Deduplicate only structurally equivalent definitions after excluding instance placement and physical identity; preserve differences as variants. Write/validate type dependencies before atomically activating the new workspace. Keep the original intact on any failure.
+- Portable export contains `studio.json` plus one copy of each referenced type and asset, including transitive dependencies. Import detects same-ID/different-content conflicts and offers reuse only for identical definitions or import under a new ID with all references remapped. Do not overwrite a local type silently.
 - Export removes local device serial/location identifiers by default and uses relative packaged asset paths. Imported bindings require local resolution; shared presets never enable live output by themselves.
 - Enforce file/object/emitter/asset-size limits and local asset paths in import validation; malformed community content must not destabilize the host.
 
@@ -233,7 +267,7 @@ Prioritize editing the existing effects well before inventing another effect eng
 
 ## 9. Delivery order
 
-1. **Scene and JSON foundations:** consistent transforms, hierarchy, migration, transactional persistence.
+1. **Scene and JSON foundations:** consistent transforms, external device-type files, compact instance schema, runtime expansion, hierarchy, migration, transactional persistence.
 2. **Direct editor:** middle-button pan, selection, move/rotate, numeric inspector, snapping, undo.
 3. **Visual identity:** unified workspace, detailed devices, materials, lighting, quality tiers.
 4. **Device library:** JSON presets, browser, visual preset editor, portable export.
