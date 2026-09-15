@@ -32,6 +32,7 @@ HEADERS += \
     output/ControllerAdapter.h \
     scene/SceneTypes.h \
     scene/SceneGraph.h \
+    scene/JsonFields.h \
     scene/EmitterLayout.h \
     scene/SceneJson.h \
     scene/BindingResolver.h \

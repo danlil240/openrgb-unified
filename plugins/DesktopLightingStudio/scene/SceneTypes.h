@@ -85,10 +85,12 @@ struct SceneObject
                                             /* is mirror_of, below.      */
     Transform               transform;      /* local to parent frame     */
     Vec3                    size_m;         /* body geometry dimensions  */
-                                            /* in meters (pre-scale);    */
-                                            /* {0,0,0} = geometry's      */
-                                            /* canonical size. Separate  */
-                                            /* from transform.scale.     */
+                                            /* in meters (pre-scale); a  */
+                                            /* 0 component falls back to */
+                                            /* the geometry's canonical  */
+                                            /* axis (ResolvedBodySize).  */
+                                            /* Separate from transform.  */
+                                            /* scale.                    */
     std::string             binding;        /* DeviceBinding id          */
     std::string             mirror_of;      /* source object id (Linked) */
     std::string             geometry;       /* decor/body mesh hint      */
@@ -152,6 +154,26 @@ struct SceneDocument
 
 const SceneObject* FindObject(const SceneDocument& doc, const std::string& id);
 SceneObject*       FindObject(SceneDocument& doc, const std::string& id);
+
+/*---------------------------------------------------------*\
+||| Body size contract — the ONE place it is decided:     ||
+|||   size_m is authored body dimensions in meters        ||
+|||   (pre-scale); a component <= 0 falls back to the     ||
+|||   geometry's canonical axis size, so {0,0,0} means    ||
+|||   "canonical size" for every known geometry — decor   ||
+|||   bodies included. Validation (size_m >= 0, finite),  ||
+|||   the schema doc, and the renderer all share this     ||
+|||   rule; the bridge publishes ResolvedBodySize to QML. ||
+\*---------------------------------------------------------*/
+
+/* Canonical body dimensions per geometry (meters); {0,0,0} for
+   geometry the renderer doesn't know (such objects render no
+   body mesh). */
+Vec3 CanonicalBodySize(const std::string& geometry);
+
+/* Effective body size: authored size_m with per-axis canonical
+   fallback. */
+Vec3 ResolvedBodySize(const SceneObject& o);
 
 /* The object that owns the output addresses for id — follows
    mirror_of on Linked objects. Returns nullptr if unresolvable. */

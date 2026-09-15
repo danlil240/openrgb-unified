@@ -216,6 +216,36 @@ static void TestExternalChange()
        watcher a moment then check the signal fired again */
     CHECK(WaitFor([&ext_count]() { return ext_count >= 2; }),
           "ext: file deletion detected");
+
+    /* Regression: the file watch is dropped on delete. Without the
+       directory watch re-arming it, a recreated studio.json would go
+       unwatched and the next Save would silently overwrite an
+       unwarned external change. */
+    const int after_delete = ext_count;
+    {
+        StudioDocument c = DocA();
+        c.meta.name = "Recreated externally";
+        QFile rf(store.DocumentPath());
+        rf.open(QIODevice::WriteOnly | QIODevice::Text);
+        rf.write(QByteArray::fromStdString(ToJson(c).dump(2)));
+        rf.close();
+    }
+    CHECK(WaitFor([&]() { return ext_count > after_delete; }),
+          "ext: file recreation detected");
+
+    /* ... and the re-armed file watch keeps working for later
+       external edits, not just the recreation event itself. */
+    const int after_recreate = ext_count;
+    {
+        StudioDocument d = DocA();
+        d.meta.name = "Edited after recreate";
+        QFile ef(store.DocumentPath());
+        ef.open(QIODevice::WriteOnly | QIODevice::Text);
+        ef.write(QByteArray::fromStdString(ToJson(d).dump(2)));
+        ef.close();
+    }
+    CHECK(WaitFor([&]() { return ext_count > after_recreate; }),
+          "ext: edits after recreate still detected");
 }
 
 static void TestMigrationMarkers()

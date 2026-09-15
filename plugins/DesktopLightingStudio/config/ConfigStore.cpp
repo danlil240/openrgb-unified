@@ -41,6 +41,11 @@ ConfigStore::ConfigStore(const QString& workspace_dir, QObject* parent)
     watcher = new QFileSystemWatcher(this);
     connect(watcher, &QFileSystemWatcher::fileChanged,
             this, &ConfigStore::OnWatcherFired);
+    /* The file watch is dropped when studio.json is deleted or
+       replaced (temp+rename editors) — only the directory watch
+       lets us notice a later recreation. */
+    connect(watcher, &QFileSystemWatcher::directoryChanged,
+            this, &ConfigStore::OnDirectoryChanged);
 }
 
 bool ConfigStore::EnsureWorkspaceDir(QString* error)
@@ -285,6 +290,7 @@ bool ConfigStore::Load(StudioDocument* out, QString* error, QString* warnings)
         return false;
     }
     last_written = ReadFile(DocumentPath());
+    ext_reported = false;
     WatchDocument();
     return true;
 }
@@ -320,6 +326,7 @@ bool ConfigStore::Save(const StudioDocument& doc, QString* error)
         return false;
     }
     last_written = bytes;
+    ext_reported = false;
     WatchDocument();
     SetClean();
     DiscardRecovery();   /* the autosave is now stale */
@@ -412,6 +419,14 @@ void ConfigStore::DiscardRecovery()
 
 void ConfigStore::WatchDocument()
 {
+    /* Watch the workspace dir itself: the per-file watch vanishes
+       with the file, so without this a deleted studio.json that is
+       later recreated would go unwatched — and the next Save would
+       silently overwrite an unwarned external change. */
+    if(QFileInfo(dir).isDir() && !watcher->directories().contains(dir))
+    {
+        watcher->addPath(dir);
+    }
     if(DocumentExists() && !watcher->files().contains(DocumentPath()))
     {
         watcher->addPath(DocumentPath());
@@ -431,13 +446,40 @@ void ConfigStore::OnWatcherFired(const QString& path)
     change_timer->start();
 }
 
+void ConfigStore::OnDirectoryChanged(const QString& path)
+{
+    if(QDir(path) != QDir(dir))
+    {
+        return;
+    }
+    /* Anything in the workspace dir changed: our own QSaveFile
+       churn, autosave/backup writes, external edits — and, the case
+       this exists for, studio.json reappearing after a delete. The
+       debounced content compare sorts signal from noise. */
+    WatchDocument();
+    change_timer->start();
+}
+
 void ConfigStore::EvaluateExternalChange()
 {
+    /* Re-arm here too: a temp+rename save can fire the watcher while
+       the path briefly doesn't exist, so the file watch is only
+       re-addable once the rename has landed. */
+    WatchDocument();
     const QByteArray cur = ReadFile(DocumentPath());
     if(!cur.isEmpty() && cur == last_written)
     {
-        return;   /* our own save */
+        ext_reported = false;   /* disk back in sync with ours —
+                                   the next divergence is a new event */
+        return;
     }
+    if(ext_reported && cur == ext_content)
+    {
+        return;   /* this exact external state already reported —
+                     dir-watch noise must not re-prompt the UI */
+    }
+    ext_reported = true;
+    ext_content  = cur;
     emit externalChange();
 }
 

@@ -673,6 +673,77 @@ static void TestEffectsSection()
         CHECK(!FromJson(j, doc, &errors) && HasError(errors, "playing"),
               "effects: playing wrong type rejected");
     }
+
+    /* effects.seed is a uint32 — remix() spans the whole unsigned
+       range, so seeds >= 2^31 must survive the round-trip (the old
+       get<int> read wrapped them negative and killed the load). */
+    {
+        json j = good;
+        j["effects"]["seed"] = 0xFFFFFFFFu;
+        StudioDocument doc;
+        CHECK(FromJson(j, doc, &errors)
+              && doc.scene.effect.seed == 0xFFFFFFFFu,
+              "effects: seed 0xFFFFFFFF loads");
+        CHECK(ToJson(doc)["effects"]["seed"] == 0xFFFFFFFFu,
+              "effects: seed 0xFFFFFFFF re-serializes");
+    }
+    {
+        json j = good;
+        j["effects"]["seed"] = 3000000000u;   /* > 2^31, < 2^32 */
+        StudioDocument doc;
+        CHECK(FromJson(j, doc, &errors)
+              && doc.scene.effect.seed == 3000000000u,
+              "effects: seed > 2^31 loads");
+    }
+    {
+        json j = good;
+        j["effects"]["seed"] = 4294967296ull; /* past uint32 */
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
+              "effects: seed > UINT32_MAX rejected");
+    }
+    {
+        json j = good;
+        j["effects"]["seed"] = -5;
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "seed"),
+              "effects: negative seed rejected");
+    }
+
+    /* effects.layers is reserved for milestone 5 — retained
+       verbatim like definitions/extensions, never dropped. */
+    {
+        json j = good;
+        j["effects"]["layers"] = json::array({
+            {{"primitive", "wave"}, {"speed", 2.0},
+             {"custom", {{"x", 1}, {"y", "two"}}}},
+        });
+        StudioDocument doc;
+        errors.clear();
+        CHECK(FromJson(j, doc, &errors) && errors.empty()
+              && doc.meta.layers == j["effects"]["layers"],
+              "effects: layers retained verbatim");
+        CHECK(ToJson(doc)["effects"]["layers"] == j["effects"]["layers"],
+              "effects: layers survive re-serialization");
+    }
+    {
+        json j = good;
+        j["effects"]["layers"] = json::object();
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "layers"),
+              "effects: layers wrong type rejected");
+    }
+    {
+        json j = good;
+        j["effects"].erase("layers");
+        StudioDocument doc;
+        CHECK(FromJson(j, doc, &errors)
+              && ToJson(doc)["effects"]["layers"].empty(),
+              "effects: missing layers writes []");
+    }
 }
 
 /*---------------------------------------------------------*\

@@ -239,6 +239,13 @@ QVariantList SceneBridge::objectList() const
         m["dx"] = o.size_m.x;
         m["dy"] = o.size_m.y;
         m["dz"] = o.size_m.z;
+        /* Resolved body size (size_m with per-axis canonical
+           fallback) — the renderer consumes this so the "0 axis =
+           canonical" contract lives in the core, not in QML. */
+        const Vec3 body = ResolvedBodySize(o);
+        m["bx"] = body.x;
+        m["by"] = body.y;
+        m["bz"] = body.z;
         m["visible"]  = o.visible;
         m["verified"] = o.verified;
         m["emitters"] = (int)o.emitters.size();

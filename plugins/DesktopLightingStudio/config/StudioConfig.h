@@ -14,6 +14,7 @@
 ||     scene   — SceneJson v2 doc (name/brightness/effect   |
 ||               are hoisted to the top-level sections)     |
 ||     effects — preset/seed/speed/intensity/playing        |
+|||             + layers (reserved, retained verbatim)      |
 ||     definitions — device/effect preset snapshots         |
 ||     extensions — third-party data, retained verbatim     |
 ||                                                           |
@@ -96,6 +97,10 @@ struct WorkspaceMeta
     nlohmann::json definitions;
     /* Third-party extension data, retained verbatim. */
     nlohmann::json extensions;
+    /* effects.layers — JSON effect layer definitions reserved for
+       milestone 5; an array retained verbatim so hand-authored
+       layers survive a save untouched. */
+    nlohmann::json layers = nlohmann::json::array();
 };
 
 struct StudioDocument

@@ -44,6 +44,17 @@ public:
             m["sx"]=1.0; m["sy"]=1.0; m["sz"]=1.0;
             m["dx"]=0.0; m["dy"]=0.0; m["dz"]=0.0;
         };
+        // bx/by/bz = the core's ResolvedBodySize (size_m + canonical
+        // per-axis fallback) — mirror what the real bridge publishes.
+        auto resolveBody = [](QVariantMap& m) {
+            studio::SceneObject o;
+            o.geometry = m["geometry"].toString().toStdString();
+            o.size_m   = { (float)m["dx"].toDouble(),
+                           (float)m["dy"].toDouble(),
+                           (float)m["dz"].toDouble() };
+            const studio::Vec3 s = studio::ResolvedBodySize(o);
+            m["bx"]=s.x; m["by"]=s.y; m["bz"]=s.z;
+        };
 
         QVariantMap desk;   desk["id"]="desk";   desk["label"]="Desk"; desk["kind"]="decor";
         desk["geometry"]="desk"; desk["x"]=0.0; desk["y"]=-0.02; desk["z"]=0.1;
@@ -63,6 +74,7 @@ public:
         kbd["visible"]=true; kbd["verified"]=true; kbd["emitters"]=21; kbd["bound"]="ok";
         fill(kbd);
 
+        resolveBody(desk); resolveBody(fan); resolveBody(kbd);
         return { desk, fan, kbd };
     }
     QString selectedId() const { return m_sel; }

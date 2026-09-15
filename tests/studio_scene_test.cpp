@@ -1491,6 +1491,103 @@ static void TestEngineWorldGraph()
           "key lookup: ripple originates at moved keys");
 }
 
+/*---------------------------------------------------------*\
+||| effect.seed is a uint32 spanning the full range —       ||
+||| remix() produces seeds >= 2^31 roughly half the time,   ||
+||| and a saved document must still load.                   ||
+\*---------------------------------------------------------*/
+static void TestEffectSeedBounds()
+{
+    using namespace studio;
+
+    SceneDocument doc = BuildDefaultDesk();
+    doc.effect.preset = "comet";
+    doc.effect.seed   = 0xFFFFFFFFu;
+
+    std::vector<std::string> errors;
+    SceneDocument back;
+    CHECK(FromJson(ToJson(doc), back, &errors)
+          && back.effect.seed == 0xFFFFFFFFu,
+          "seed: 0xFFFFFFFF round-trips");
+
+    nlohmann::json j = ToJson(doc);
+    j["effect"]["seed"] = 3000000000u;   /* > 2^31, < 2^32 */
+    errors.clear();
+    CHECK(FromJson(j, back, &errors) && back.effect.seed == 3000000000u,
+          "seed: > 2^31 loads");
+
+    j["effect"]["seed"] = 4294967296ull; /* > uint32 range */
+    errors.clear();
+    CHECK(!FromJson(j, back, &errors) && errors.size() > 0,
+          "seed: > UINT32_MAX rejected");
+
+    j["effect"]["seed"] = -1;
+    errors.clear();
+    CHECK(!FromJson(j, back, &errors), "seed: negative rejected");
+
+    j["effect"]["seed"] = 1.5;
+    errors.clear();
+    CHECK(!FromJson(j, back, &errors), "seed: non-integer rejected");
+}
+
+/*---------------------------------------------------------*\
+||| Body size contract: a size_m component of 0 falls     ||
+||| back to the geometry's canonical axis size — schema,  ||
+||| validator, and renderer agree (ResolvedBodySize).     ||
+\*---------------------------------------------------------*/
+static void TestBodySizeContract()
+{
+    using namespace studio;
+
+    SceneObject desk;
+    desk.geometry = "desk";
+    desk.size_m   = { 0.0f, 0.0f, 0.0f };
+    const Vec3 full = ResolvedBodySize(desk);
+    CHECK(full.x > 0.0f && full.y > 0.0f && full.z > 0.0f,
+          "body: all-zero size_m falls back to canonical (decor)");
+
+    /* partial size: authored axes kept, zero axes canonical */
+    desk.size_m = { 0.9f, 0.0f, 0.0f };
+    const Vec3 part = ResolvedBodySize(desk);
+    CHECK(Near(part.x, 0.9f)
+          && Near(part.y, CanonicalBodySize("desk").y)
+          && Near(part.z, CanonicalBodySize("desk").z),
+          "body: partial size_m fills canonical axes");
+
+    desk.size_m = { 1.0f, 2.0f, 3.0f };
+    const Vec3 authored = ResolvedBodySize(desk);
+    CHECK(Near(authored.x, 1.0f) && Near(authored.y, 2.0f)
+          && Near(authored.z, 3.0f),
+          "body: authored size_m wins");
+
+    /* every geometry the renderer knows has a non-zero canonical */
+    const char* known[] = { "desk", "case_shell", "monitor", "mouse_body",
+                            "gpu_body", "keyboard_body", "fan_body",
+                            "ram_body", "pump_body" };
+    bool all = true;
+    for(const char* g : known)
+    {
+        const Vec3 c = CanonicalBodySize(g);
+        if(c.x <= 0.0f || c.y <= 0.0f || c.z <= 0.0f)
+        {
+            all = false;
+        }
+    }
+    CHECK(all, "body: all known geometries have canonical sizes");
+    CHECK(CanonicalBodySize("no_such_geo").x == 0.0f,
+          "body: unknown geometry has no canonical");
+
+    /* the validator agrees: {0,0,0} is schema-valid (canonical is a
+       render fallback, not a validation error) */
+    SceneDocument doc;
+    SceneObject d2;
+    d2.id = "d2"; d2.kind = ObjectKind::Decor; d2.geometry = "desk";
+    doc.objects.push_back(d2);
+    std::vector<std::string> errs;
+    CHECK(ValidateSceneGraph(doc, &errs) && errs.empty(),
+          "body: zero size_m is valid");
+}
+
 int main()
 {
     TestTransform();
@@ -1498,6 +1595,8 @@ int main()
     TestWorldGraph();
     TestGraphValidation();
     TestJsonHierarchy();
+    TestEffectSeedBounds();
+    TestBodySizeContract();
     TestDefaultDeskGroups();
     TestEngineWorldGraph();
     TestRing();

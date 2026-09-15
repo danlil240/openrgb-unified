@@ -6,9 +6,10 @@
 
 #include "StudioConfig.h"
 #include "../scene/SceneJson.h"
+#include "../scene/JsonFields.h"
 #include "../effects/Presets.h"
 
-#include <cmath>
+#include <cstdint>
 #include <set>
 
 namespace studio
@@ -16,90 +17,11 @@ namespace studio
 namespace
 {
 
-bool IsInt(const nlohmann::json& v)
-{
-    return v.is_number_integer() || v.is_number_unsigned();
-}
-
-void AddErr(std::vector<std::string>& errs, const std::string& path,
-            const std::string& msg)
-{
-    errs.push_back(path + ": " + msg);
-}
-
-/*---------------------------------------------------------*\
-|| Checked field readers — collect "<path>: expected ..." ||
-|| errors instead of throwing.                            ||
-\*---------------------------------------------------------*/
-std::string FieldStr(const nlohmann::json& j, const char* key,
-                     const std::string& def, const std::string& path,
-                     std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_string())
-    {
-        AddErr(errs, path + "." + key, "expected string");
-        return def;
-    }
-    return j[key].get<std::string>();
-}
-
-bool FieldBool(const nlohmann::json& j, const char* key,
-               bool def, const std::string& path,
-               std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_boolean())
-    {
-        AddErr(errs, path + "." + key, "expected boolean");
-        return def;
-    }
-    return j[key].get<bool>();
-}
-
-double FieldNum(const nlohmann::json& j, const char* key,
-                double def, const std::string& path,
-                std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_number())
-    {
-        AddErr(errs, path + "." + key, "expected number");
-        return def;
-    }
-    const double v = j[key].get<double>();
-    if(!std::isfinite(v))
-    {
-        AddErr(errs, path + "." + key, "expected finite number");
-        return def;
-    }
-    return v;
-}
-
-long long FieldInt(const nlohmann::json& j, const char* key,
-                   long long def, const std::string& path,
-                   std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!IsInt(j[key]))
-    {
-        AddErr(errs, path + "." + key, "expected integer");
-        return def;
-    }
-    return j[key].get<long long>();
-}
+/* The checked field readers (IsInt/AddErr/FieldStr/FieldBool/
+   FieldNum/FieldInt/FieldI32/FieldU32) are shared in
+   scene/JsonFields.h - one copy for the scene and config
+   validators; this file keeps only the workspace-specific
+   Section/FieldEnum helpers. */
 
 /* If `key` exists on j it must be an object; returns the member or
    nullptr when absent/invalid. */
@@ -159,8 +81,10 @@ nlohmann::json ToJson(const StudioDocument& doc)
         {"speed",     doc.scene.effect.speed},
         {"intensity", doc.scene.effect.intensity},
         {"playing",   doc.scene.effect.playing},
-        /* Reserved: JSON layer definitions (milestone 5) land here. */
-        {"layers",    nlohmann::json::array()},
+        /* Reserved for JSON layer definitions (milestone 5);
+           retained verbatim like definitions/extensions. */
+        {"layers",    doc.meta.layers.is_array() ? doc.meta.layers
+                                                 : nlohmann::json::array()},
     };
 
     nlohmann::json j;
@@ -328,9 +252,10 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                                       "inputs", errs);
         const long long idx = FieldInt(*s, "screen_index",
             out.inputs.screen_index, "inputs", errs);
-        if(idx < 0)
+        if(idx < 0 || idx > 2147483647ll)
         {
-            AddErr(errs, "inputs.screen_index", "expected >= 0");
+            AddErr(errs, "inputs.screen_index",
+                   "expected integer in 0..2147483647");
         }
         else
         {
@@ -395,12 +320,10 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
         have_effect = true;
         preset = FieldStr(*s, "preset", std::string(), "effects", errs);
         effect_j["preset"] = preset;
-        const long long seed = FieldInt(*s, "seed", 0, "effects", errs);
-        if(seed < 0)
-        {
-            AddErr(errs, "effects.seed", "expected unsigned integer");
-        }
-        effect_j["seed"] = (unsigned int)(seed < 0 ? 0 : seed);
+        /* Full-range uint32 read — the old long-long read +
+           (unsigned int) cast wrapped seeds > UINT32_MAX and a
+           >= 2^31 seed never survived scene validation. */
+        effect_j["seed"] = FieldU32(*s, "seed", 0, "effects", errs);
         const double speed = FieldNum(*s, "speed", 1.0, "effects", errs);
         if(speed <= 0.0)
         {
@@ -416,9 +339,19 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
         effect_j["intensity"] = intensity;
         effect_j["playing"] = FieldBool(*s, "playing", false,
                                         "effects", errs);
-        if(s->contains("layers") && !s->at("layers").is_array())
+        if(s->contains("layers"))
         {
-            AddErr(errs, "effects.layers", "expected array");
+            if(!s->at("layers").is_array())
+            {
+                AddErr(errs, "effects.layers", "expected array");
+            }
+            else
+            {
+                /* Reserved for milestone 5 — retained verbatim like
+                   definitions/extensions so a hand-authored layers
+                   array is never destroyed by a save. */
+                out.meta.layers = s->at("layers");
+            }
         }
     }
 

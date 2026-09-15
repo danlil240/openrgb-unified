@@ -125,6 +125,7 @@ private:
        it still parses as a valid document (backup = last valid). */
     void       UpdateBackup();
     void       OnWatcherFired(const QString& path);
+    void       OnDirectoryChanged(const QString& path);
     void       EvaluateExternalChange();
     void       WriteAutosave();
 
@@ -136,6 +137,12 @@ private:
     QTimer*                 change_timer  = nullptr;
     std::function<StudioDocument()> snapshot_fn;
     QByteArray              last_written;   /* content we last wrote/read */
+    /* Directory watching makes every workspace write land in the
+       debounced evaluator — remember the on-disk content already
+       reported so unchanged state doesn't re-signal externalChange
+       (e.g. autosave churn while the file is missing/different). */
+    QByteArray              ext_content;
+    bool                    ext_reported  = false;
     bool                    dirty_state   = false;
     int                     autosave_ms   = 2000;
 };

@@ -10,25 +10,24 @@ Rectangle {
     property string dbg: ""
     property real camYaw: cameraOrigin.eulerRotation.y
 
-    // Canonical body specs. size_m (obj.dx/dy/dz) carries authored
-    // body dimensions in meters — decor bodies require it; device
-    // bodies fall back to per-geometry canonical sizes when it is 0.
+    // Canonical body specs. The bridge publishes the resolved body
+    // size (obj.bx/by/bz): authored size_m with a per-axis fallback
+    // to the geometry's canonical size — a 0 component means
+    // "canonical axis" (the contract is owned by ResolvedBodySize in
+    // the scene core so schema, validator, and renderer agree).
     // #Cube/#Cylinder/#Sphere are 100-unit primitives, so scale =
     // meters / 100. transform.scale stays dimensionless on the node.
-    function bodySize(obj, canonical) {
-        return obj.dx > 0 ? [obj.dx, obj.dy, obj.dz] : canonical
-    }
     function bodySpec(obj) {
         switch (obj.geometry) {
-        case "desk":          return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#4a3b32" }
-        case "case_shell":    return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#e8e8ec", ghost: true }
-        case "monitor":       return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#0a0a0c" }
-        case "mouse_body":    return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#22222a" }
-        case "gpu_body":      return { src: "#Cube",     size: [obj.dx, obj.dy, obj.dz],            c: "#e8e8ec" }
-        case "keyboard_body": return { src: "#Cube",     size: bodySize(obj, [0.45, 0.03, 0.145]),  c: "#1c1c22" }
-        case "fan_body":      return { src: "#Cylinder", size: bodySize(obj, [0.125, 0.028, 0.125]), c: "#202028" }
-        case "ram_body":      return { src: "#Cube",     size: bodySize(obj, [0.135, 0.045, 0.008]), c: "#18181f" }
-        case "pump_body":     return { src: "#Cylinder", size: bodySize(obj, [0.055, 0.045, 0.055]), c: "#22242c" }
+        case "desk":          return { src: "#Cube",     c: "#4a3b32" }
+        case "case_shell":    return { src: "#Cube",     c: "#e8e8ec", ghost: true }
+        case "monitor":       return { src: "#Cube",     c: "#0a0a0c" }
+        case "mouse_body":    return { src: "#Cube",     c: "#22222a" }
+        case "gpu_body":      return { src: "#Cube",     c: "#e8e8ec" }
+        case "keyboard_body": return { src: "#Cube",     c: "#1c1c22" }
+        case "fan_body":      return { src: "#Cylinder", c: "#202028" }
+        case "ram_body":      return { src: "#Cube",     c: "#18181f" }
+        case "pump_body":     return { src: "#Cylinder", c: "#22242c" }
         default:              return null
         }
     }
@@ -165,9 +164,9 @@ Rectangle {
                     visible: objNode.spec !== null
                     source: objNode.spec ? objNode.spec.src : "#Cube"
                     scale: objNode.spec
-                           ? Qt.vector3d(objNode.spec.size[0] / 100,
-                                         objNode.spec.size[1] / 100,
-                                         objNode.spec.size[2] / 100)
+                           ? Qt.vector3d(objNode.obj.bx / 100,
+                                         objNode.obj.by / 100,
+                                         objNode.obj.bz / 100)
                            : Qt.vector3d(0, 0, 0)
                     materials: PrincipledMaterial {
                         baseColor: objNode.spec ? objNode.spec.c : "#000000"

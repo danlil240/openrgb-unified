@@ -42,6 +42,35 @@ SceneObject* FindObject(SceneDocument& doc, const std::string& id)
     return nullptr;
 }
 
+/* Canonical body dimensions in meters for every geometry the
+   renderer knows (ui/StudioScene.qml's bodySpec). These double as
+   the per-axis fallback when a size_m component is <= 0, so a
+   decor body authored without size_m still renders instead of
+   collapsing to an invisible zero-volume mesh. */
+Vec3 CanonicalBodySize(const std::string& geometry)
+{
+    if(geometry == "desk")          return { 1.4f,   0.04f,  0.75f  };
+    if(geometry == "case_shell")    return { 0.21f,  0.47f,  0.46f  };
+    if(geometry == "monitor")       return { 0.62f,  0.36f,  0.02f  };
+    if(geometry == "mouse_body")    return { 0.066f, 0.04f,  0.117f };
+    if(geometry == "gpu_body")      return { 0.30f,  0.05f,  0.13f  };
+    if(geometry == "keyboard_body") return { 0.45f,  0.03f,  0.145f };
+    if(geometry == "fan_body")      return { 0.125f, 0.028f, 0.125f };
+    if(geometry == "ram_body")      return { 0.135f, 0.045f, 0.008f };
+    if(geometry == "pump_body")     return { 0.055f, 0.045f, 0.055f };
+    return { 0.0f, 0.0f, 0.0f };
+}
+
+Vec3 ResolvedBodySize(const SceneObject& o)
+{
+    const Vec3 c = CanonicalBodySize(o.geometry);
+    return {
+        o.size_m.x > 0.0f ? o.size_m.x : c.x,
+        o.size_m.y > 0.0f ? o.size_m.y : c.y,
+        o.size_m.z > 0.0f ? o.size_m.z : c.z,
+    };
+}
+
 const SceneObject* OutputOwner(const SceneDocument& doc, const std::string& id)
 {
     const SceneObject* obj = FindObject(doc, id);

@@ -103,7 +103,7 @@
               "position": { "$ref": "#/definitions/vec3" },
               "rotation": { "$ref": "#/definitions/vec3", "description": "Euler XYZ degrees, Rz*Ry*Rx order." },
               "scale": { "$ref": "#/definitions/vec3", "description": "Dimensionless; every component must be > 0." },
-              "size_m": { "$ref": "#/definitions/vec3", "description": "Body dimensions in meters (pre-scale); {0,0,0} = geometry canonical size." },
+              "size_m": { "$ref": "#/definitions/vec3", "description": "Body dimensions in meters (pre-scale); each component >= 0, and a 0 component falls back to the geometry's canonical axis size ({0,0,0} = full canonical size)." },
               "binding": { "type": "string", "description": "DeviceBinding id; must resolve when set." },
               "mirror_of": { "type": "string", "description": "Linked objects only; must name a non-linked object." },
               "geometry": { "type": "string" },
@@ -145,13 +145,13 @@
       "type": "object",
       "properties": {
         "preset": { "type": "string" },
-        "seed": { "type": "integer", "minimum": 0 },
+        "seed": { "type": "integer", "minimum": 0, "maximum": 4294967295, "description": "uint32 remix seed — remix() spans the full unsigned range." },
         "speed": { "type": "number", "exclusiveMinimum": 0 },
         "intensity": { "type": "number", "minimum": 0, "maximum": 1 },
         "playing": { "type": "boolean" },
         "layers": {
           "type": "array",
-          "description": "Reserved for JSON effect layer definitions."
+          "description": "Reserved for JSON effect layer definitions; retained verbatim on save/load."
         }
       }
     },

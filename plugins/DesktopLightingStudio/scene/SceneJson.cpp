@@ -6,6 +6,7 @@
 
 #include "SceneJson.h"
 #include "SceneGraph.h"
+#include "JsonFields.h"
 
 #include <cstdio>
 #include <unordered_map>
@@ -26,85 +27,9 @@ static nlohmann::json ToJson(const Vec3& v)
     return nlohmann::json::object({{"x", v.x}, {"y", v.y}, {"z", v.z}});
 }
 
-static bool IsInt(const nlohmann::json& v)
-{
-    return v.is_number_integer() || v.is_number_unsigned();
-}
-
-static void AddErr(std::vector<std::string>& errs, const std::string& path,
-                   const std::string& msg)
-{
-    errs.push_back(path + ": " + msg);
-}
-
-/*---------------------------------------------------------*\
-|| Checked readers — record "<path>: expected ..." errors  ||
-|| instead of throwing on malformed hand-edited files.     ||
-\*---------------------------------------------------------*/
-static std::string FieldStr(const nlohmann::json& j, const char* key,
-                            const std::string& def, const std::string& path,
-                            std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_string())
-    {
-        AddErr(errs, path + "." + key, "expected string");
-        return def;
-    }
-    return j[key].get<std::string>();
-}
-
-static float FieldNum(const nlohmann::json& j, const char* key,
-                      float def, const std::string& path,
-                      std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_number())
-    {
-        AddErr(errs, path + "." + key, "expected number");
-        return def;
-    }
-    return j[key].get<float>();
-}
-
-static int FieldInt(const nlohmann::json& j, const char* key,
-                    int def, const std::string& path,
-                    std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!IsInt(j[key]))
-    {
-        AddErr(errs, path + "." + key, "expected integer");
-        return def;
-    }
-    return j[key].get<int>();
-}
-
-static bool FieldBool(const nlohmann::json& j, const char* key,
-                      bool def, const std::string& path,
-                      std::vector<std::string>& errs)
-{
-    if(!j.contains(key))
-    {
-        return def;
-    }
-    if(!j[key].is_boolean())
-    {
-        AddErr(errs, path + "." + key, "expected boolean");
-        return def;
-    }
-    return j[key].get<bool>();
-}
-
+/* The checked field readers (IsInt/AddErr/FieldStr/FieldNum/
+   FieldInt/FieldI32/FieldU32/FieldBool) are shared in JsonFields.h -
+   one copy for the scene and config validators. */
 static Vec3 Vec3From(const nlohmann::json& j, const Vec3& def,
                      const std::string& path, std::vector<std::string>& errs)
 {
@@ -118,9 +43,9 @@ static Vec3 Vec3From(const nlohmann::json& j, const Vec3& def,
         return def;
     }
     Vec3 v = def;
-    v.x = FieldNum(j, "x", def.x, path, errs);
-    v.y = FieldNum(j, "y", def.y, path, errs);
-    v.z = FieldNum(j, "z", def.z, path, errs);
+    v.x = (float)FieldNum(j, "x", def.x, path, errs);
+    v.y = (float)FieldNum(j, "y", def.y, path, errs);
+    v.z = (float)FieldNum(j, "z", def.z, path, errs);
     return v;
 }
 
@@ -279,7 +204,7 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
         AddErr(errs, "version", "expected integer");
         return false;
     }
-    const int version = j["version"].get<int>();
+    const long long version = j["version"].get<long long>();
     if(version < 1)
     {
         AddErr(errs, "version", "expected >= 1");
@@ -293,9 +218,9 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
     }
 
     SceneDocument out;
-    out.version    = version;
+    out.version    = (int)version;
     out.name       = FieldStr(j, "name", std::string(), "root", errs);
-    out.brightness = FieldNum(j, "brightness", 1.0f, "root", errs);
+    out.brightness = (float)FieldNum(j, "brightness", 1.0, "root", errs);
 
     if(j.contains("bindings") && !j["bindings"].is_array())
     {
@@ -319,10 +244,12 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
             b.vendor          = FieldStr(jb, "vendor", std::string(), path, errs);
             b.serial          = FieldStr(jb, "serial", std::string(), path, errs);
             b.location        = FieldStr(jb, "location", std::string(), path, errs);
-            b.device_type     = FieldInt(jb, "device_type", -1, path, errs);
+            b.device_type     = FieldI32(jb, "device_type", -1, path, errs);
             b.zone_name       = FieldStr(jb, "zone_name", std::string(), path, errs);
-            b.zone_leds       = (unsigned int)std::max(0,
-                                    FieldInt(jb, "zone_leds", 0, path, errs));
+            const long long leds = FieldInt(jb, "zone_leds", 0, path, errs);
+            b.zone_leds       = leds <= 0 ? 0u
+                              : (leds > 4294967295ll ? 4294967295u
+                                                     : (unsigned int)leds);
             if(b.id.empty())
             {
                 AddErr(errs, path + ".id", "missing or empty");
@@ -412,7 +339,7 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
                     e.local_pos = Vec3From(je.value("pos", nlohmann::json()),
                                            Vec3{}, ep + ".pos", errs);
                     e.group     = FieldStr(je, "group", std::string(), ep, errs);
-                    e.address   = FieldInt(je, "address", -1, ep, errs);
+                    e.address   = FieldI32(je, "address", -1, ep, errs);
                     o.emitters.push_back(e);
                 }
             }
@@ -507,17 +434,12 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
         else
         {
             out.effect.preset    = FieldStr(effect, "preset", std::string(), "effect", errs);
-            const int seed       = FieldInt(effect, "seed", 0, "effect", errs);
-            if(seed < 0)
-            {
-                AddErr(errs, "effect.seed", "expected unsigned integer");
-            }
-            else
-            {
-                out.effect.seed = (unsigned int)seed;
-            }
-            out.effect.speed     = FieldNum(effect, "speed", 1.0f, "effect", errs);
-            out.effect.intensity = FieldNum(effect, "intensity", 1.0f, "effect", errs);
+            /* remix() spans the whole uint32 — a get<int>-style read
+               would wrap seeds >= 2^31 negative and make a saved
+               document unloadable. */
+            out.effect.seed      = FieldU32(effect, "seed", 0, "effect", errs);
+            out.effect.speed     = (float)FieldNum(effect, "speed", 1.0, "effect", errs);
+            out.effect.intensity = (float)FieldNum(effect, "intensity", 1.0, "effect", errs);
             out.effect.playing   = FieldBool(effect, "playing", false, "effect", errs);
         }
     }
