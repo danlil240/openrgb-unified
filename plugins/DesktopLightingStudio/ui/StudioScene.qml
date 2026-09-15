@@ -98,10 +98,12 @@ Rectangle {
                     function onSceneChanged() { objNode.reloadEmitters() }
                 }
 
-                // Body mesh
+                // Body mesh — ghost shells (the case) are translucent
+                // containers; leaving them pickable would swallow every
+                // pick aimed at hardware inside them.
                 Model {
                     objectName: "obj|" + objNode.obj.id
-                    pickable: true
+                    pickable: !(objNode.spec && objNode.spec.ghost)
                     visible: objNode.spec !== null
                     source: objNode.spec ? objNode.spec.src : "#Cube"
                     scale: objNode.spec
@@ -120,18 +122,39 @@ Rectangle {
                 // Emitter dots (local frame — inherits node transform)
                 Repeater3D {
                     model: objNode.emitterList
-                    delegate: Model {
+                    delegate: Node {
                         required property var modelData
-                        objectName: "emit|" + objNode.obj.id + "|" + modelData.i
-                        pickable: true
-                        source: "#Sphere"
-                        position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
-                        property real d: root.emitterSize(objNode.obj) / 100
-                        scale: Qt.vector3d(d, d, d)
-                        materials: PrincipledMaterial {
-                            lighting: PrincipledMaterial.NoLighting
-                            baseColor: (objNode.obj.bound === "ok" || objNode.obj.bound === "none")
-                                       ? modelData.c : Qt.darker(modelData.c, 2.5)
+
+                        // Visible dot — not pickable itself (too small);
+                        // the proxy below handles picking.
+                        Model {
+                            source: "#Sphere"
+                            position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
+                            property real d: root.emitterSize(objNode.obj) / 100
+                            scale: Qt.vector3d(d, d, d)
+                            materials: PrincipledMaterial {
+                                lighting: PrincipledMaterial.NoLighting
+                                baseColor: (objNode.obj.bound === "ok" || objNode.obj.bound === "none")
+                                           ? modelData.c : Qt.darker(modelData.c, 2.5)
+                            }
+                        }
+
+                        // Invisible pick proxy ~2.6x the dot so LEDs are
+                        // actually hittable with a mouse.
+                        Model {
+                            objectName: "emit|" + objNode.obj.id + "|" + modelData.i
+                            pickable: true
+                            source: "#Sphere"
+                            position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
+                            property real pd: root.emitterSize(objNode.obj) * 2.6 / 100
+                            scale: Qt.vector3d(pd, pd, pd)
+                            castsShadows: false
+                            materials: PrincipledMaterial {
+                                lighting: PrincipledMaterial.NoLighting
+                                baseColor: "#00000000"
+                                opacity: 0.0
+                                depthDrawMode: PrincipledMaterial.NeverDepthDraw
+                            }
                         }
                     }
                 }

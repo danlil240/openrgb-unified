@@ -78,11 +78,13 @@ SceneDocument BuildDefaultDesk()
         { "gpu_fan_r",   "MASTER",            "",          "", "",  2, "Right Fan",       0 },
         { "gpu_fan_m",   "MASTER",            "",          "", "",  2, "Middle Fan",      0 },
         { "gpu_fan_l",   "MASTER",            "",          "", "",  2, "Left Fan",        0 },
-        { "dimm_0",      "Corsair",           "Corsair",   "", "",  1, "",                0 },
-        { "dimm_1",      "Corsair",           "Corsair",   "", "",  1, "",                0 },
-        { "slw_fan_0",   "Lian Li",           "",          "", "", -1, "Fan 1",           0 },
-        { "slw_fan_1",   "Lian Li",           "",          "", "", -1, "Fan 2",           0 },
-        { "slw_fan_2",   "Lian Li",           "",          "", "", -1, "Fan 3",           0 },
+        { "dimm_0",      "Corsair",           "Corsair",   "",
+          "I2C: PawnIO SMBus PIIX4 0, address 0x19",       1, "",   0 },
+        { "dimm_1",      "Corsair",           "Corsair",   "",
+          "I2C: PawnIO SMBus PIIX4 0, address 0x1B",       1, "",   0 },
+        { "slw_fan_0",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 1",           0 },
+        { "slw_fan_1",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 2",           0 },
+        { "slw_fan_2",   "UNI FAN",           "Lian Li",   "", "", -1, "Fan 3",           0 },
     };
 
     /*-----------------------------------------------------*\
@@ -199,8 +201,9 @@ SceneDocument BuildDefaultDesk()
     }
 
     /* Corsair DIMMs — two 10-LED strips. Identical controllers, so the
-       bindings intentionally go Ambiguous until a location/serial is
-       captured during identification. */
+       bindings disambiguate by I2C location (0x19/0x1B). Which address
+       is which physical slot needs a visual flash check; swap the
+       locations in the bindings if dimm_0/dimm_1 are reversed. */
     for(int i = 0; i < 2; i++)
     {
         const std::string id = "dimm_" + std::to_string(i);

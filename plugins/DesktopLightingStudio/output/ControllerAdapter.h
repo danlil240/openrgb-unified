@@ -59,6 +59,12 @@ private:
        Device object bound to it contributes its emitters. */
     std::string PushZone(const SceneDocument& doc, const std::string& binding_id);
 
+    /* Switch the zone (or device, when per-zone modes aren't supported)
+       into a mode with MODE_FLAG_HAS_PER_LED_COLOR. Called lazily from
+       PushZone so hardware modes only change during a live push. */
+    bool EnsurePerLedMode(RGBControllerInterface* ctrl, int zone_index,
+                          ZoneSnapshot& zs);
+
     OpenRGBPluginAPIInterface*          api;
     std::vector<ControllerSnapshot>     snapshot;
     std::vector<RGBControllerInterface*> live;

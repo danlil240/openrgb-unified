@@ -146,22 +146,16 @@ std::string ControllerAdapter::PushZone(const SceneDocument& doc,
         return "zone not found";
     }
 
-    const ZoneSnapshot& zs = snapshot[Resolution(binding_id)->controller_index].zones[zi];
-    if(!zs.has_per_led)
-    {
-        return "active mode has no per-LED color";
-    }
+    ZoneSnapshot& zs = snapshot[Resolution(binding_id)->controller_index].zones[zi];
 
-    /* Every verified Device object bound to this zone contributes its
-       mapped emitters; unmapped addresses are never touched. */
-    unsigned int written = 0;
+    /* Collect writes from verified Device objects BEFORE touching
+       modes — a zone bound only to unverified objects must not get a
+       mode switch it can't use. */
+    std::vector<std::pair<unsigned int, SceneColor>> writes;
     for(const SceneObject& obj : doc.objects)
     {
-        if(obj.kind != ObjectKind::Device || obj.binding != binding_id)
-        {
-            continue;
-        }
-        if(!obj.verified)
+        if(obj.kind != ObjectKind::Device || obj.binding != binding_id
+           || !obj.verified)
         {
             continue;
         }
@@ -172,19 +166,73 @@ std::string ControllerAdapter::PushZone(const SceneDocument& doc,
             {
                 continue;
             }
-            ctrl->SetColor(zs.start_idx + (unsigned int)addr,
-                           ScaleColor(EmitterColor(doc, obj.id, (int)e), doc.brightness));
-            written++;
+            writes.emplace_back(zs.start_idx + (unsigned int)addr,
+                                ScaleColor(EmitterColor(doc, obj.id, (int)e),
+                                           doc.brightness));
         }
     }
 
-    if(written == 0)
+    if(writes.empty())
     {
         return "no mapped emitters (unverified or unbound)";
     }
 
+    if(!EnsurePerLedMode(ctrl, zi, zs))
+    {
+        return "no per-LED mode available on this zone";
+    }
+
+    for(const auto& w : writes)
+    {
+        ctrl->SetColor(w.first, w.second);
+    }
     ctrl->UpdateZoneLEDs(zi);
     return "";
+}
+
+bool ControllerAdapter::EnsurePerLedMode(RGBControllerInterface* ctrl,
+                                         int zone_index, ZoneSnapshot& zs)
+{
+    if(zs.has_per_led)
+    {
+        return true;
+    }
+
+    /* Per-zone modes when the controller supports them (motherboard
+       ARGB headers, multi-zone devices). */
+    if(ctrl->SupportsPerZoneModes())
+    {
+        const unsigned int count = ctrl->GetZoneModeCount((unsigned int)zone_index);
+        for(unsigned int m = 0; m < count; m++)
+        {
+            if(ctrl->GetZoneModeFlags((unsigned int)zone_index, m)
+               & MODE_FLAG_HAS_PER_LED_COLOR)
+            {
+                ctrl->SetZoneActiveMode((unsigned int)zone_index, (int)m);
+                ctrl->UpdateZoneMode(zone_index);
+                zs.has_per_led = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* Device-level modes (keyboards, mice, DIMMs). */
+    const unsigned int count = ctrl->GetModeCount();
+    for(unsigned int m = 0; m < count; m++)
+    {
+        if(ctrl->GetModeFlags(m) & MODE_FLAG_HAS_PER_LED_COLOR)
+        {
+            if(ctrl->GetActiveMode() != (int)m)
+            {
+                ctrl->SetActiveMode((int)m);
+                ctrl->UpdateMode();
+            }
+            zs.has_per_led = true;
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string ControllerAdapter::PushObject(const SceneDocument& doc,
