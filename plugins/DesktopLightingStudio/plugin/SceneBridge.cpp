@@ -18,7 +18,6 @@
 #include "../scene/DefaultDesk.h"
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneGraph.h"
-#include "../scene/SceneJson.h"
 #include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
 #include "../effects/Presets.h"
