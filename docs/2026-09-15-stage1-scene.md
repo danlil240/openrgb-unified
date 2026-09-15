@@ -4,9 +4,25 @@ Date: 2026-09-15. Branch: `desktop-lighting-studio`.
 Parent plan: `docs/2026-09-15-desktop-lighting-studio-plan.md`.
 Stage 0 record: `docs/2026-09-15-stage0-feasibility.md`.
 
-**Status:** scene core + output adapter + bridge/UI implemented and built;
-scene tests green (52 checks). Live verification pending — deploy blocked
-by a running OpenRGB holding the old plugin DLL.
+**Status:** verified working in the elevated host (2026-09-15). Orbit,
+zoom, selection, per-emitter painting, and live output all confirmed —
+including the three Lian Li SL Wireless fans after their zone map
+(`Fan 1-3`, 40 LEDs each) was confirmed.
+
+Fixes landed during verification:
+
+- `OrbitCameraController.origin` must be a `Node` (camera re-parented
+  under an orbit origin); a `vector3d` left the controller dead.
+- `Qt.keyboardModifiers()` does not exist — replaced with paired
+  `TapHandler`s using `acceptedModifiers` (Shift paints, plain selects).
+- Ghost bodies (case shell) are non-pickable so interior picks land;
+  each LED got an invisible ~2.6x pick proxy.
+- `PushZone` lazily switches zones/devices into a per-LED mode before
+  writing — hardware only has to be in Direct/Custom on first push.
+- DIMM bindings disambiguate by I2C location (0x19/0x1B); Lian Li
+  bindings match `UNI FAN` + vendor `Lian Li`.
+- Smart App Control blocks fresh DLL hashes at random — relink until
+  `NativeLibrary.Load` passes, then xcopy (see Stage 0 doc).
 
 ## Scope for this stage
 

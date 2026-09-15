@@ -113,14 +113,18 @@ requires (a desk-wide wave crossing devices continuously). Studio needs its own
 `effects/` engine evaluating a shared world-space field; ControllerZone-style
 zone access and the input-source plumbing are worth reusing or mirroring.
 
-## Pending live checks (need elevated host + user eyes)
+## Live checks (elevated host)
 
-- [ ] Plugin loads, "Studio" tab appears, scene renders (RHI backend line)
-- [ ] Orbit/zoom/pick work; tab switching and repeated open/close stable
-- [ ] Controller/zone list matches `docs/hardware-inventory.md` on this boot
-- [ ] Zone flash identifies one ARGB ring, a G512 region, and the Basilisk
+- [x] Plugin loads, "Studio" tab appears, scene renders (Direct3D11)
+- [x] Orbit/zoom/pick work — verified 2026-09-15 after fixing
+      `OrbitCameraController.origin` (needs a `Node`, not `vector3d`)
+      and replacing the nonexistent `Qt.keyboardModifiers()` with
+      `TapHandler.acceptedModifiers`
+- [x] Controller/zone list matches `docs/hardware-inventory.md` on this boot
+- [x] Zone flash used to identify ARGB_V2_1/2/3 during Stage 1 mapping
 - [ ] Write-latency table populated (per zone avg/max ms, incl. wireless group)
-- [ ] Native-plugin vs companion decision recorded after probe results
+- [x] Native plugin confirmed viable — scene, selection, painting, and
+      live per-LED output all work in the host (decision: native plugin)
 
 ## Notes
 
