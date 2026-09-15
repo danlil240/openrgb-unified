@@ -16,6 +16,8 @@
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneJson.h"
 #include "../effects/Presets.h"
+#include "../inputs/KeyMap.h"
+#include "../inputs/ScreenSampler.h"
 #include "OpenRGBPluginInterface.h"
 
 #include <algorithm>
@@ -93,12 +95,23 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     connect(play_timer, &QTimer::timeout, this, &SceneBridge::tick);
     play_clock = new QElapsedTimer();
 
+    /* Input providers stamp events on the play clock so ripple ages
+       share the evaluation time base. */
+    input_bus.SetNow([this]() { return play_t.load(); });
+    screen_in = new ScreenSampler(&input_bus, this);
+
     doc = BuildDefaultDesk();
     refreshDevices();
 }
 
 SceneBridge::~SceneBridge()
 {
+    /* Input sources disconnect before teardown — hooks and capture
+       threads join here, never outliving the bridge. */
+    audio_in.Stop();
+    key_in.Stop();
+    screen_in->Stop();
+
     /* Detached push workers hold `this` — give in-flight writes a
        moment to finish before the bridge is torn down. */
     play_timer->stop();
@@ -403,6 +416,7 @@ void SceneBridge::refreshDevices()
         adapter.Refresh(doc);
     }
     rebuildMatrixLayouts();
+    rebuildKeyLookup();
     emit sceneChanged();
 }
 
@@ -414,7 +428,15 @@ bool SceneBridge::saveScene()
         return false;
     }
     nlohmann::json j;
-    j["scene"] = ToJson(doc);
+    j["scene"]  = ToJson(doc);
+    j["inputs"] = {
+        { "audio",        audio_on         },
+        { "keys",         key_on           },
+        { "screen",       screen_on        },
+        { "screen_index", screen_index     },
+        { "sens_pct",     audio_sens_pct   },
+        { "decay_pct",    ripple_decay_pct },
+    };
     api->SetSettings("DesktopLightingStudio", j);
     api->SaveSettings();
     setStatus(QStringLiteral("scene saved (%1 objects)").arg((int)doc.objects.size()));
@@ -428,6 +450,21 @@ bool SceneBridge::loadScene()
         return false;
     }
     const nlohmann::json j = api->GetSettings("DesktopLightingStudio");
+
+    /* Input toggles persist beside the scene — a saved scene restores
+       the sources it was using. */
+    if(j.is_object() && j.contains("inputs") && j["inputs"].is_object())
+    {
+        const nlohmann::json& in = j["inputs"];
+        audio_sens_pct   = in.value("sens_pct", 100);
+        ripple_decay_pct = in.value("decay_pct", 100);
+        setScreenIndex(in.value("screen_index", 0));
+        setAudioInput(in.value("audio", false));
+        setKeyInput(in.value("keys", false));
+        setScreenInput(in.value("screen", false));
+        emit inputsChanged();
+    }
+
     if(!j.is_object() || !j.contains("scene") || !FromJson(j["scene"], doc))
     {
         setStatus(QStringLiteral("no saved scene — using default desk"));
@@ -505,6 +542,16 @@ void SceneBridge::rebuildEffect()
     {
         layers = BuildPreset(doc.effect.preset, doc.effect.seed);
         ApplyGlobalParams(layers, doc.effect.speed, doc.effect.intensity);
+        /* User-adjustable ripple decay — scales the age decay on
+           ripple layers (Stage 3 reactive presets). */
+        const float decay_mult = ripple_decay_pct / 100.0f;
+        for(EffectLayer& L : layers)
+        {
+            if(L.primitive == "ripple")
+            {
+                L.density *= decay_mult;
+            }
+        }
     }
     engine.SetLayers(layers);
 }
@@ -522,7 +569,26 @@ void SceneBridge::playPreset(const QString& presetId)
         doc.effect.preset = id;
         doc.effect.seed   = 0;
         play_t            = 0.0;
+        input_bus.ClearEvents();   /* old-clock events would age wrong */
         emit presetChanged();
+    }
+    /* A reactive preset auto-enables its input source — the toggle
+       stays visible and can be switched off. */
+    const PresetInfo* info = FindPreset(id);
+    if(info != nullptr)
+    {
+        if(info->needs == "audio"  && !audio_on)
+        {
+            setAudioInput(true);
+        }
+        if(info->needs == "key"    && !key_on)
+        {
+            setKeyInput(true);
+        }
+        if(info->needs == "screen" && !screen_on)
+        {
+            setScreenInput(true);
+        }
     }
     rebuildEffect();
     setPlaying(true);
@@ -606,13 +672,45 @@ void SceneBridge::tick()
     }
     if(play_clock->isValid())
     {
-        play_t += play_clock->nsecsElapsed() / 1e9;
+        play_t = play_t.load() + play_clock->nsecsElapsed() / 1e9;
     }
     play_clock->restart();
 
-    engine.Evaluate(doc, play_t, frame);
+    /* Snapshot input signals; resolve key VK codes to emitter world
+       positions (unmapped keys stay position-less and spawn at the
+       layer's origin). */
+    InputState in = input_bus.Snapshot(6.0);
+    for(InputEvent& e : in.events)
+    {
+        if(e.source == "key" && !e.has_pos)
+        {
+            const auto it = key_pos.find(e.code);
+            if(it != key_pos.end())
+            {
+                e.pos     = it->second;
+                e.has_pos = true;
+            }
+        }
+    }
+
+    engine.Evaluate(doc, play_t.load(), frame, &in);
     emitFrameChanged();
     schedulePush();
+
+    /* Surface provider state transitions (listening / capture
+       unavailable / off) without spamming repeats. */
+    std::string ins;
+    if(audio_on)  { ins += audio_in.Status(); }
+    if(key_on)    { if(!ins.empty()) { ins += "  "; } ins += key_in.Status(); }
+    if(screen_on) { if(!ins.empty()) { ins += "  "; } ins += screen_in->Status().toStdString(); }
+    if(ins != last_input_status)
+    {
+        last_input_status = ins;
+        if(!ins.empty())
+        {
+            setStatus(QString::fromStdString(ins));
+        }
+    }
 }
 
 void SceneBridge::emitFrameChanged()
@@ -909,6 +1007,126 @@ void SceneBridge::rebuildMatrixLayouts()
                             ((float)rows - 1) * pitch * 0.5f };
         obj.emitters = layout::KeyboardMatrix(rows, cols, map.data(), 0xFFFFFFFFu,
                                             pitch, pitch, origin, obj.id);
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Stage 3 — reactive inputs                                |
+|||                                                           |
+|||   Providers write into the bus from their own threads; |
+|||   tick() snapshots into the engine. Scenes stay fully  |
+|||   editable with every source off — reactive primitives |
+|||   simply contribute nothing on an empty InputState.    |
+\*---------------------------------------------------------*/
+void SceneBridge::setAudioInput(bool on)
+{
+    if(audio_on == on)
+    {
+        return;
+    }
+    audio_on = on;
+    if(on)
+    {
+        audio_in.SetSensitivity(audio_sens_pct / 100.0f);
+        audio_in.Start(&input_bus);
+    }
+    else
+    {
+        audio_in.Stop();
+        input_bus.SetAudioLevel(0.0f);
+    }
+    last_input_status.clear();
+    emit inputsChanged();
+}
+
+void SceneBridge::setKeyInput(bool on)
+{
+    if(key_on == on)
+    {
+        return;
+    }
+    key_on = on;
+    if(on)
+    {
+        key_in.Start(&input_bus);
+    }
+    else
+    {
+        key_in.Stop();
+    }
+    last_input_status.clear();
+    emit inputsChanged();
+}
+
+void SceneBridge::setScreenInput(bool on)
+{
+    if(screen_on == on)
+    {
+        return;
+    }
+    screen_on = on;
+    if(on)
+    {
+        screen_in->Start(screen_index);
+    }
+    else
+    {
+        screen_in->Stop();
+    }
+    last_input_status.clear();
+    emit inputsChanged();
+}
+
+void SceneBridge::setScreenIndex(int index)
+{
+    if(index < 0 || index == screen_index)
+    {
+        return;
+    }
+    screen_index = index;
+    if(screen_on)
+    {
+        screen_in->SetScreenIndex(index);
+    }
+    emit inputsChanged();
+}
+
+void SceneBridge::setAudioSensitivityPct(int pct)
+{
+    audio_sens_pct = qBound(25, pct, 200);
+    audio_in.SetSensitivity(audio_sens_pct / 100.0f);
+    emit inputsChanged();
+}
+
+void SceneBridge::setRippleDecayPct(int pct)
+{
+    ripple_decay_pct = qBound(50, pct, 300);
+    rebuildEffect();
+    emit inputsChanged();
+}
+
+/* vk -> world position of that key's emitter, built from the bound
+   keyboard's own LED names ("Key: Q" ...) — the hardware layout, not
+   a guessed grid. Rebuilt on device refresh. */
+void SceneBridge::rebuildKeyLookup()
+{
+    key_pos.clear();
+    for(const SceneObject& obj : doc.objects)
+    {
+        if(obj.kind != ObjectKind::Device || obj.layout != "matrix_map"
+           || obj.binding.empty())
+        {
+            continue;
+        }
+        for(const Emitter& e : obj.emitters)
+        {
+            const int vk = VkForKeyName(adapter.LEDName(obj.binding, e.address));
+            if(vk >= 0)
+            {
+                /* First emitter wins if two LEDs share a name. */
+                key_pos.emplace(vk, TransformPoint(obj.transform, e.local_pos));
+            }
+        }
     }
 }
 

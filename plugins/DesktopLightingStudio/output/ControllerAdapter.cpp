@@ -120,6 +120,24 @@ bool ControllerAdapter::ZoneMatrix(const std::string& binding_id,
     return true;
 }
 
+std::string ControllerAdapter::LEDName(const std::string& binding_id,
+                                       int address) const
+{
+    RGBControllerInterface* ctrl = ControllerFor(binding_id);
+    const int zi = ZoneIndexFor(binding_id);
+    if(ctrl == nullptr || zi < 0 || address < 0)
+    {
+        return std::string();
+    }
+    const unsigned int led = ctrl->GetZoneStartIndex((unsigned int)zi)
+                           + (unsigned int)address;
+    if(led >= ctrl->GetLEDCount())
+    {
+        return std::string();
+    }
+    return ctrl->GetLEDName(led);
+}
+
 static SceneColor ScaleColor(SceneColor c, float brightness)
 {
     const unsigned int r = (unsigned int)((c & 0xFF) * brightness) & 0xFF;

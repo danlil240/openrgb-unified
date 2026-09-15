@@ -20,6 +20,9 @@
 #include "../scene/SceneTypes.h"
 #include "../output/ControllerAdapter.h"
 #include "../effects/EffectEngine.h"
+#include "../inputs/InputBus.h"
+#include "../inputs/AudioLoopback.h"
+#include "../inputs/KeyHook.h"
 
 #include <atomic>
 #include <chrono>
@@ -33,6 +36,7 @@ class QUndoStack;
 
 namespace studio
 {
+class ScreenSampler;
 
 class SceneBridge : public QObject
 {
@@ -51,6 +55,9 @@ class SceneBridge : public QObject
     Q_PROPERTY(int effectSpeedPct READ effectSpeedPct NOTIFY effectParamsChanged)
     Q_PROPERTY(int effectIntensityPct READ effectIntensityPct NOTIFY effectParamsChanged)
     Q_PROPERTY(QVariantList presetList READ presetList CONSTANT)
+    Q_PROPERTY(bool audioInput READ audioInput NOTIFY inputsChanged)
+    Q_PROPERTY(bool keyInput READ keyInput NOTIFY inputsChanged)
+    Q_PROPERTY(bool screenInput READ screenInput NOTIFY inputsChanged)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -72,6 +79,14 @@ public:
     int             effectSpeedPct() const;
     int             effectIntensityPct() const;
     QVariantList    presetList() const;
+
+    /* Stage 3 — reactive input sources */
+    bool            audioInput()  const { return audio_on; }
+    bool            keyInput()    const { return key_on; }
+    bool            screenInput() const { return screen_on; }
+    int             screenIndex() const { return screen_index; }
+    int             audioSensitivityPct() const { return audio_sens_pct; }
+    int             rippleDecayPct() const { return ripple_decay_pct; }
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -108,6 +123,14 @@ public slots:
     void setEffectSpeedPct(int pct);
     void setEffectIntensityPct(int pct);
 
+    /* Stage 3 — reactive input sources */
+    void setAudioInput(bool on);
+    void setKeyInput(bool on);
+    void setScreenInput(bool on);
+    void setScreenIndex(int index);
+    void setAudioSensitivityPct(int pct);
+    void setRippleDecayPct(int pct);
+
 signals:
     void sceneChanged();
     void emittersChanged(const QString& objectId);
@@ -122,6 +145,7 @@ signals:
     void playingChanged();
     void presetChanged();
     void effectParamsChanged();
+    void inputsChanged();
 
 private:
     friend class SceneColorCommand;
@@ -149,6 +173,7 @@ private:
     void emitFrameChanged();               /* emittersChanged for frame   */
 
     void rebuildMatrixLayouts();
+    void rebuildKeyLookup();             /* vk -> emitter world pos    */
     void setStatus(const QString& text);
 
     OpenRGBPluginAPIInterface*  api;
@@ -165,12 +190,13 @@ private:
 
     /* Stage 2 playback state. `frame` holds the last evaluated effect
        colors (owner id -> per-emitter); it stays valid while paused so
-       preview and hardware keep the frozen frame. */
+       preview and hardware keep the frozen frame. `play_t` is atomic:
+       input providers read it (via the bus clock) off the UI thread. */
     EffectEngine                engine;
     FrameColors                 frame;
     QTimer*                     play_timer  = nullptr;
     QElapsedTimer*              play_clock  = nullptr;
-    double                      play_t      = 0.0;
+    std::atomic<double>         play_t      { 0.0 };
     bool                        playing_state = false;
     /* Frame pushes run on two serialized lanes so a slow transport
        can't starve fast devices: lane 1 owns I2C/SMBus bindings and
@@ -194,6 +220,21 @@ private:
     std::atomic<bool>                       lane_again[2]     { false, false };
     QMutex                                  fast_io_mutex;   /* lane 0 writes */
     std::string                             last_push_err;   /* UI thread */
+
+    /* Stage 3 — reactive inputs. The bus stamps events on the play
+       clock so ring ages are consistent with evaluation time. */
+    InputBus                              input_bus;
+    AudioLoopback                         audio_in;
+    KeyHook                               key_in;
+    ScreenSampler*                        screen_in  = nullptr;
+    bool                                  audio_on   = false;
+    bool                                  key_on     = false;
+    bool                                  screen_on  = false;
+    int                                   screen_index      = 0;
+    int                                   audio_sens_pct    = 100;
+    int                                   ripple_decay_pct  = 100;
+    std::map<int, Vec3>                   key_pos;     /* vk -> world pos */
+    std::string                           last_input_status;
 };
 
 } /* namespace studio */

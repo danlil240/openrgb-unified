@@ -69,4 +69,14 @@ private:
     QSlider*                intensity_slider = nullptr;
     QLabel*                 speed_label     = nullptr;
     QLabel*                 intensity_label = nullptr;
+
+    /* Stage 3 — input sources row */
+    QCheckBox*              audio_check     = nullptr;
+    QCheckBox*              key_check       = nullptr;
+    QCheckBox*              screen_check    = nullptr;
+    QComboBox*              screen_combo    = nullptr;
+    QSlider*                sens_slider     = nullptr;
+    QSlider*                decay_slider    = nullptr;
+    QLabel*                 sens_label      = nullptr;
+    QLabel*                 decay_label     = nullptr;
 };

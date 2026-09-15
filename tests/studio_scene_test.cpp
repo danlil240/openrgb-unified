@@ -16,6 +16,9 @@
 #include "effects/EffectTypes.h"
 #include "effects/EffectEngine.h"
 #include "effects/Presets.h"
+#include "inputs/InputBus.h"
+#include "inputs/OnsetDetect.h"
+#include "inputs/KeyMap.h"
 
 #include <cmath>
 #include <cstdio>
@@ -537,7 +540,7 @@ static void TestPresetsAndRemix()
 {
     using namespace studio;
 
-    CHECK(PresetList().size() == 6, "six presets registered");
+    CHECK(PresetList().size() == 9, "nine presets registered");
     for(const PresetInfo& p : PresetList())
     {
         const auto layers = BuildPreset(p.id, 1);
@@ -587,6 +590,371 @@ static void TestPresetsAndRemix()
     }
 }
 
+/*---------------------------------------------------------*\
+||| Stage 3 — reactive inputs                                |
+\*---------------------------------------------------------*/
+static int GreenOf(studio::SceneColor c) { return (int)((c >> 8) & 0xFF); }
+static int BlueOf(studio::SceneColor c)  { return (int)((c >> 16) & 0xFF); }
+static int MaxCh(studio::SceneColor c)
+{
+    const int r = RedOf(c), g = GreenOf(c), b = BlueOf(c);
+    return r > g ? (r > b ? r : b) : (g > b ? g : b);
+}
+
+static void TestInputBus()
+{
+    using namespace studio;
+
+    double now = 10.0;
+    InputBus bus;
+    bus.SetNow([&now]() { return now; });
+
+    /* Events stamp on the supplied clock and snapshot fresh. */
+    bus.PushEvent("key", 1.0f, 0x51);
+    bus.SetAudioLevel(0.6f);
+    InputState s = bus.Snapshot(6.0);
+    CHECK(s.events.size() == 1, "bus: event snapshot");
+    CHECK(s.events[0].source == "key" && s.events[0].code == 0x51
+          && !s.events[0].has_pos, "bus: event fields");
+    CHECK(Near((float)s.events[0].t, 10.0f), "bus: event stamped on now()");
+    CHECK(Near(s.audio_level, 0.6f), "bus: audio level snapshot");
+
+    /* Events older than max_age are dropped. */
+    now = 20.0;
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty(), "bus: stale event pruned");
+    now = 14.0;
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.size() == 1, "bus: event inside window kept");
+
+    /* The queue is bounded — a burst can't grow memory, newest win. */
+    bus.ClearEvents();
+    for(int i = 0; i < 120; i++)
+    {
+        bus.PushEvent("key", 1.0f, i);
+    }
+    s = bus.Snapshot(60.0);
+    CHECK(s.events.size() == 96, "bus: cap enforced");
+    CHECK(s.events.back().code == 119, "bus: newest events kept");
+
+    /* Screen grid and audio level round-trip through the snapshot. */
+    bus.SetScreenGrid(2, 1, { ColorF{1,0,0,1}, ColorF{0,0,1,1} });
+    s = bus.Snapshot(6.0);
+    CHECK(s.screen_cols == 2 && s.screen_rows == 1
+          && s.screen_cells.size() == 2
+          && Near(s.screen_cells[0].r, 1.0f)
+          && Near(s.screen_cells[1].b, 1.0f), "bus: screen grid");
+
+    bus.ClearAll();
+    s = bus.Snapshot(6.0);
+    CHECK(s.events.empty() && s.screen_cells.empty()
+          && Near(s.audio_level, 0.0f), "bus: ClearAll resets");
+}
+
+static void TestOnsetDetect()
+{
+    using namespace studio;
+
+    /* Silence: the output level decays to zero. */
+    OnsetDetect quiet;
+    for(int i = 0; i < 80; i++)
+    {
+        quiet.Feed(0.0f, 0.05);
+    }
+    CHECK(quiet.Level() < 0.05f, "onset: silence decays to ~0");
+
+    /* Sharp spike over a quiet baseline: one onset, then refractory. */
+    OnsetDetect det;
+    det.SetSensitivity(1.0f);
+    for(int i = 0; i < 60; i++)
+    {
+        det.Feed(0.02f, 0.05);
+    }
+    const float s1 = det.Feed(0.9f, 0.05);
+    const float s2 = det.Feed(0.9f, 0.05);
+    CHECK(s1 > 0.5f, "onset: spike detected");
+    CHECK(s2 == 0.0f, "onset: refractory blocks repeat");
+    CHECK(det.Level() > 0.3f, "onset: level follows spike");
+
+    /* Sustained loud input adapts — the slow envelope catches up and
+       onsets stop firing instead of machine-gunning. */
+    for(int i = 0; i < 300; i++)
+    {
+        det.Feed(0.9f, 0.05);
+    }
+    bool any = false;
+    for(int i = 0; i < 40; i++)
+    {
+        any = (det.Feed(0.9f, 0.05) > 0.0f) || any;
+    }
+    CHECK(!any, "onset: sustained level adapts");
+
+    /* Sensitivity moves the over-threshold factor: a 3x spike fires
+       at full sensitivity but not at minimum. */
+    OnsetDetect lo;
+    lo.SetSensitivity(0.0f);
+    for(int i = 0; i < 60; i++)
+    {
+        lo.Feed(0.02f, 0.05);
+    }
+    CHECK(lo.Feed(0.06f, 0.05) == 0.0f, "onset: min sensitivity ignores small spike");
+    OnsetDetect hi;
+    hi.SetSensitivity(1.0f);
+    for(int i = 0; i < 60; i++)
+    {
+        hi.Feed(0.02f, 0.05);
+    }
+    CHECK(hi.Feed(0.06f, 0.05) > 0.0f, "onset: max sensitivity catches small spike");
+}
+
+static void TestKeyMap()
+{
+    using namespace studio;
+
+    CHECK(VkForKeyName("Key: Q") == 0x51, "keymap: Key: Q");
+    CHECK(VkForKeyName("Key: Escape") == 0x1B, "keymap: Escape");
+    CHECK(VkForKeyName("Key: 1") == 0x31, "keymap: digit 1");
+    CHECK(VkForKeyName("Key: Space") == 0x20, "keymap: space");
+    CHECK(VkForKeyName("Key: F1") == 0x70, "keymap: F1");
+    CHECK(VkForKeyName("Key: F12") == 0x7B, "keymap: F12");
+    CHECK(VkForKeyName("Key: Number Pad 1") == 0x61, "keymap: numpad 1");
+    CHECK(VkForKeyName("Key: Left Windows") == 0x5B, "keymap: LWin");
+    CHECK(VkForKeyName("Key: Right Alt") == 0xA5, "keymap: RAlt");
+    CHECK(VkForKeyName("Key: Enter (ISO)") == 0x0D, "keymap: ISO enter");
+    CHECK(VkForKeyName("Caps Lock Indicator") == -1, "keymap: indicator ignored");
+    CHECK(VkForKeyName("Key: Fn") == -1, "keymap: Fn has no VK");
+    CHECK(VkForKeyName("Logo") == -1, "keymap: non-key LED ignored");
+    CHECK(VkForKeyName("") == -1, "keymap: empty ignored");
+    CHECK(VkForKeyName("key: q") == -1, "keymap: exact match required");
+}
+
+static void TestRipplePrimitive()
+{
+    using namespace studio;
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("near",     0.3f));
+    doc.objects.push_back(OneLedDevice("far",      0.6f));
+    doc.objects.push_back(OneLedDevice("farthest", 1.0f));
+
+    /* Ring spawned at t=0 at the world origin, speed 1 m/s,
+       band half-width 5 cm, decay 1/s. */
+    EffectLayer rip;
+    rip.primitive = "ripple";
+    rip.source    = "key";
+    rip.speed     = 1.0f;
+    rip.scale     = 0.05f;
+    rip.density   = 1.0f;
+    rip.opacity   = 1.0f;
+    rip.palette   = MakePalette({ MakeSceneColor(0, 255, 0),
+                                  MakeSceneColor(255, 0, 0) });
+
+    InputEvent ev;
+    ev.source = "key"; ev.code = 0x51; ev.t = 0.0;
+    ev.pos = { 0, 0, 0 }; ev.has_pos = true; ev.strength = 1.0f;
+    InputState in;
+    in.events.push_back(ev);
+
+    EffectEngine engine;
+    engine.SetLayers({ rip });
+    FrameColors frame;
+
+    /* t=0.3: ring front at 0.3 m — near lit, far/farthest dark. */
+    engine.Evaluate(doc, 0.3, frame, &in);
+    CHECK(MaxCh(frame["near"][0]) > 40, "ripple: ring front lights emitter");
+    CHECK(MaxCh(frame["far"][0]) < 5, "ripple: inside band is dark");
+    CHECK(MaxCh(frame["farthest"][0]) < 5, "ripple: ahead of ring is dark");
+
+    /* t=0.6: the ring reaches the 0.6 m emitter. */
+    engine.Evaluate(doc, 0.6, frame, &in);
+    CHECK(MaxCh(frame["far"][0]) > 40, "ripple: ring propagates outward");
+
+    /* A non-matching source contributes nothing. */
+    InputState in2;
+    InputEvent ae;
+    ae.source = "audio"; ae.t = 0.0; ae.has_pos = true; ae.strength = 1.0f;
+    in2.events.push_back(ae);
+    engine.Evaluate(doc, 0.3, frame, &in2);
+    CHECK(MaxCh(frame["near"][0]) < 5, "ripple: source filter");
+
+    /* Position-less events spawn at the layer origin. */
+    EffectLayer rip2 = rip;
+    rip2.origin = { 1.0f, 0.0f, 0.0f };
+    engine.SetLayers({ rip2 });
+    InputState in3;
+    InputEvent ev2;
+    ev2.source = "key"; ev2.t = 0.05; ev2.has_pos = false; ev2.strength = 1.0f;
+    in3.events.push_back(ev2);
+    engine.Evaluate(doc, 0.05, frame, &in3);
+    CHECK(MaxCh(frame["farthest"][0]) > 40, "ripple: origin fallback");
+    CHECK(MaxCh(frame["near"][0]) < 5, "ripple: origin fallback not at event");
+
+    /* Old events decay away (age 5.3 s at decay 1/s -> amp < 0.01). */
+    engine.SetLayers({ rip });
+    InputState in4;
+    in4.events.push_back(ev);
+    engine.Evaluate(doc, 5.3, frame, &in4);
+    CHECK(MaxCh(frame["near"][0]) < 5, "ripple: old event decayed");
+
+    /* Events from the future (clock reset) are ignored. */
+    InputState in5;
+    InputEvent fe = ev; fe.t = 10.0;
+    in5.events.push_back(fe);
+    engine.Evaluate(doc, 0.3, frame, &in5);
+    CHECK(MaxCh(frame["near"][0]) < 5, "ripple: future event ignored");
+
+    /* No input at all -> null state -> painted base only (black). */
+    engine.Evaluate(doc, 0.3, frame, nullptr);
+    CHECK(MaxCh(frame["near"][0]) == 0, "ripple: null input dark");
+
+    /* Determinism: same doc+t+input -> identical frame. */
+    FrameColors a, b;
+    engine.Evaluate(doc, 0.3, a, &in);
+    engine.Evaluate(doc, 0.3, b, &in);
+    CHECK(a == b, "ripple: deterministic");
+}
+
+static void TestScreenField()
+{
+    using namespace studio;
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("left",  -0.31f));
+    doc.objects.push_back(OneLedDevice("mid",    0.0f));
+    doc.objects.push_back(OneLedDevice("right",  0.31f));
+
+    /* 0.62 m screen centered at the origin; 2x1 red|blue grid. */
+    EffectLayer sf;
+    sf.primitive = "screenfield";
+    sf.origin    = { 0.0f, 0.0f, 0.0f };
+    sf.scale     = 0.62f;
+    sf.opacity   = 1.0f;
+
+    InputState in;
+    in.screen_cols = 2;
+    in.screen_rows = 1;
+    in.screen_cells = { ColorF{1,0,0,1}, ColorF{0,0,1,1} };
+
+    EffectEngine engine;
+    engine.SetLayers({ sf });
+    FrameColors frame;
+    engine.Evaluate(doc, 0.0, frame, &in);
+    CHECK(RedOf(frame["left"][0]) > 200 && BlueOf(frame["left"][0]) < 30,
+          "screenfield: left cell red");
+    CHECK(BlueOf(frame["right"][0]) > 200 && RedOf(frame["right"][0]) < 30,
+          "screenfield: right cell blue");
+    CHECK(RedOf(frame["mid"][0]) > 90 && RedOf(frame["mid"][0]) < 165
+          && BlueOf(frame["mid"][0]) > 90 && BlueOf(frame["mid"][0]) < 165,
+          "screenfield: center blends");
+
+    /* Empty grid -> the layer contributes nothing (base = black). */
+    InputState empty;
+    engine.Evaluate(doc, 0.0, frame, &empty);
+    CHECK(MaxCh(frame["left"][0]) < 5, "screenfield: empty grid dark");
+
+    /* Malformed grid (fewer cells than cols*rows) is rejected. */
+    InputState bad;
+    bad.screen_cols = 3;
+    bad.screen_rows = 1;
+    bad.screen_cells = in.screen_cells;
+    engine.Evaluate(doc, 0.0, frame, &bad);
+    CHECK(MaxCh(frame["left"][0]) < 5, "screenfield: malformed grid rejected");
+}
+
+static void TestLevelPrimitive()
+{
+    using namespace studio;
+
+    SceneDocument doc;
+    doc.objects.push_back(OneLedDevice("dev", 0.0f));
+
+    EffectLayer lv;
+    lv.primitive = "level";
+    lv.opacity   = 1.0f;
+    lv.palette   = MakePalette({ MakeSceneColor(255, 255, 255) });
+
+    EffectEngine engine;
+    engine.SetLayers({ lv });
+    FrameColors frame;
+
+    InputState quiet, loud;
+    quiet.audio_level = 0.0f;
+    loud.audio_level  = 0.9f;
+    engine.Evaluate(doc, 1.0, frame, &quiet);
+    CHECK(MaxCh(frame["dev"][0]) < 5, "level: silent = dark");
+    engine.Evaluate(doc, 1.0, frame, &loud);
+    CHECK(MaxCh(frame["dev"][0]) > 180, "level: loud = lit");
+}
+
+static void TestReactivePresets()
+{
+    using namespace studio;
+
+    /* The three reactive presets exist, declare their input need,
+       and build layers; the original six declare none. */
+    CHECK(FindPreset("shockwave") != nullptr
+          && FindPreset("shockwave")->needs == "audio", "shockwave needs audio");
+    CHECK(FindPreset("keyripple") != nullptr
+          && FindPreset("keyripple")->needs == "key", "keyripple needs key");
+    CHECK(FindPreset("ambient") != nullptr
+          && FindPreset("ambient")->needs == "screen", "ambient needs screen");
+    for(const char* pid : { "aurora", "reactor", "comet",
+                            "chrome", "portal", "embers" })
+    {
+        CHECK(FindPreset(pid) != nullptr && FindPreset(pid)->needs.empty(),
+              "non-reactive preset has no input need");
+    }
+
+    /* Under a synthetic input snapshot each reactive preset produces
+       output on the default desk. The key event sits on the mouse
+       wheel so the expanding ring has emitters to strike (the desk
+       keyboard's emitters only exist once its binding resolves). */
+    SceneDocument doc = BuildDefaultDesk();
+
+    InputState in;
+    in.audio_level = 0.7f;
+    InputEvent ke;
+    ke.source = "key"; ke.t = 0.9; ke.strength = 1.0f;
+    ke.pos = { 0.26f, 0.045f, 0.235f }; ke.has_pos = true;
+    in.events.push_back(ke);
+    in.screen_cols = 4;
+    in.screen_rows = 2;
+    in.screen_cells.assign(8, ColorF{ 0.2f, 0.6f, 1.0f, 1.0f });
+
+    for(const char* pid : { "shockwave", "keyripple", "ambient" })
+    {
+        EffectEngine engine;
+        engine.SetLayers(BuildPreset(pid, 1));
+        FrameColors frame;
+        engine.Evaluate(doc, 0.95, frame, &in);
+        CHECK(!frame.empty(), "reactive preset produces a frame");
+        bool lit = false;
+        for(const auto& kv : frame)
+        {
+            for(const SceneColor c : kv.second)
+            {
+                lit = lit || MaxCh(c) > 30;
+            }
+        }
+        CHECK(lit, "reactive preset lights something under input");
+    }
+
+    /* keyripple with no events still composites its base layer. */
+    EffectEngine engine;
+    engine.SetLayers(BuildPreset("keyripple", 1));
+    InputState none;
+    FrameColors frame;
+    engine.Evaluate(doc, 1.0, frame, &none);
+    CHECK(!frame.empty(), "keyripple frame without events");
+
+    /* Presets stay deterministic under the same input. */
+    engine.SetLayers(BuildPreset("ambient", 1));
+    FrameColors a, b;
+    engine.Evaluate(doc, 0.95, a, &in);
+    engine.Evaluate(doc, 0.95, b, &in);
+    CHECK(a == b, "reactive preset deterministic");
+}
+
 int main()
 {
     TestTransform();
@@ -602,6 +970,13 @@ int main()
     TestNoiseAndMasks();
     TestEngineMirrorAndJson();
     TestPresetsAndRemix();
+    TestInputBus();
+    TestOnsetDetect();
+    TestKeyMap();
+    TestRipplePrimitive();
+    TestScreenField();
+    TestLevelPrimitive();
+    TestReactivePresets();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

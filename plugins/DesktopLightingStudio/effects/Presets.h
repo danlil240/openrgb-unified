@@ -22,6 +22,8 @@ struct PresetInfo
     std::string id;
     std::string name;
     std::string description;
+    std::string needs;          /* required input source: "audio" |   */
+                                /* "key" | "screen" | "" = none       */
 };
 
 /* Fixed preset order for the scene-card strip. */

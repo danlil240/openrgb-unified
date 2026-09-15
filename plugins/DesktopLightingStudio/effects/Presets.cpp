@@ -280,17 +280,102 @@ static std::vector<EffectLayer> Embers(unsigned int seed)
 }
 
 /*---------------------------------------------------------*\
+||| Stage 3 — reactive presets                              |
+|||                                                           |
+|||   Ripple params: speed = ring expansion m/s, scale =   |
+|||   band half-width (m), density = age decay (1/s),       |
+|||   origin = spawn point for position-less events.       |
+\*---------------------------------------------------------*/
+static std::vector<EffectLayer> BassShockwave(unsigned int seed)
+{
+    RemixRng rng(seed);
+
+    /* Audio onsets launch expanding rings from inside the case. */
+    EffectLayer ring;
+    ring.primitive = "ripple";
+    ring.source    = "audio";
+    ring.origin    = { 0.47f, 0.22f, -0.10f };        /* case interior  */
+    ring.speed     = rng.Range(0.55f, 0.85f);         /* m/s outward    */
+    ring.scale     = rng.Range(0.05f, 0.09f);         /* band half-width */
+    ring.density   = rng.Range(1.6f, 2.4f);           /* decay 1/s      */
+    ring.opacity   = 1.0f;
+    ring.palette   = MakePalette({
+        { 0.00f, ToColorF(MakeSceneColor(255, 240, 200)) },  /* hot hit */
+        { 0.35f, ToColorF(MakeSceneColor(255, 90,  60))  },
+        { 0.70f, ToColorF(MakeSceneColor(160, 32,  160)) },
+        { 1.00f, ToColorF(MakeSceneColor(24,  8,   48))  },  /* cooled  */
+    });
+
+    /* Loudness-following teal wash so sustained bass still breathes
+       between onsets. */
+    EffectLayer glow;
+    glow.primitive = "level";
+    glow.blend     = BlendMode::Screen;
+    glow.opacity   = 0.5f;
+    glow.palette   = MakePalette({
+        { 0.0f,  ToColorF(MakeSceneColor(0,   30,  40))  },
+        { 1.0f,  ToColorF(MakeSceneColor(40,  220, 200)) },
+    });
+
+    return { Base(MakeSceneColor(8, 6, 14)), ring, glow };
+}
+
+static std::vector<EffectLayer> KeyRipple(unsigned int seed)
+{
+    RemixRng rng(seed);
+
+    /* Key presses spawn rings at the pressed key; position-less
+       fallback lands at the keyboard center. */
+    EffectLayer ring;
+    ring.primitive = "ripple";
+    ring.source    = "key";
+    ring.origin    = { -0.06f, 0.04f, 0.26f };        /* keyboard center */
+    ring.speed     = rng.Range(0.45f, 0.7f);          /* m/s — reaches the case in ~1s */
+    ring.scale     = rng.Range(0.03f, 0.06f);         /* band half-width */
+    ring.density   = rng.Range(1.8f, 2.6f);           /* decay 1/s      */
+    ring.opacity   = 1.0f;
+    ring.palette   = MakePalette({
+        { 0.00f, ToColorF(MakeSceneColor(220, 245, 255)) },  /* press flash */
+        { 0.40f, ToColorF(MakeSceneColor(80,  160, 255)) },
+        { 1.00f, ToColorF(MakeSceneColor(16,  32,  80))  },
+    });
+
+    return { Base(MakeSceneColor(6, 10, 18)), ring };
+}
+
+static std::vector<EffectLayer> ScreenAtmosphere(unsigned int seed)
+{
+    RemixRng rng(seed);
+    (void)rng;      /* deterministic look; remix perturbs nothing */
+
+    /* Monitor decor sits at (0.0, 0.32, -0.22) with a 0.62 m face —
+       emitters sample the screen cell they sit in front of. */
+    EffectLayer field;
+    field.primitive = "screenfield";
+    field.origin    = { 0.0f, 0.32f, -0.22f };
+    field.scale     = 0.62f;                          /* screen width (m) */
+    field.opacity   = 1.0f;
+
+    /* A faint warm base keeps unlit regions readable when the
+       screen goes dark. */
+    return { Base(MakeSceneColor(10, 8, 12), 0.6f), field };
+}
+
+/*---------------------------------------------------------*\
 ||| Registry                                                |
 \*---------------------------------------------------------*/
 const std::vector<PresetInfo>& PresetList()
 {
     static const std::vector<PresetInfo> presets = {
-        { "aurora",  "Aurora",        "Teal/violet ribbons sweeping the desk"    },
-        { "reactor", "Reactor",       "Spinning rings, climbing RAM, key pulses" },
-        { "comet",   "Comet",         "A bright head chasing a desk loop"        },
-        { "chrome",  "Liquid chrome", "Slow pearlescent gradients"               },
-        { "portal",  "Portal",        "Waves expanding out of the case"          },
-        { "embers",  "Embers",        "Warm noise with rising sparks"            },
+        { "aurora",    "Aurora",           "Teal/violet ribbons sweeping the desk",    ""       },
+        { "reactor",   "Reactor",          "Spinning rings, climbing RAM, key pulses", ""       },
+        { "comet",     "Comet",            "A bright head chasing a desk loop",        ""       },
+        { "chrome",    "Liquid chrome",    "Slow pearlescent gradients",               ""       },
+        { "portal",    "Portal",           "Waves expanding out of the case",          ""       },
+        { "embers",    "Embers",           "Warm noise with rising sparks",            ""       },
+        { "shockwave", "Bass shockwave",   "Audio onsets launch spatial rings",        "audio"  },
+        { "keyripple", "Key ripple",       "Key presses ripple out to the desk",       "key"    },
+        { "ambient",   "Screen atmosphere","Screen colors wash over the setup",        "screen" },
     };
     return presets;
 }
@@ -309,12 +394,15 @@ const PresetInfo* FindPreset(const std::string& id)
 
 std::vector<EffectLayer> BuildPreset(const std::string& id, unsigned int seed)
 {
-    if(id == "aurora")  return Aurora(seed);
-    if(id == "reactor") return Reactor(seed);
-    if(id == "comet")   return Comet(seed);
-    if(id == "chrome")  return LiquidChrome(seed);
-    if(id == "portal")  return Portal(seed);
-    if(id == "embers")  return Embers(seed);
+    if(id == "aurora")    return Aurora(seed);
+    if(id == "reactor")   return Reactor(seed);
+    if(id == "comet")     return Comet(seed);
+    if(id == "chrome")    return LiquidChrome(seed);
+    if(id == "portal")    return Portal(seed);
+    if(id == "embers")    return Embers(seed);
+    if(id == "shockwave") return BassShockwave(seed);
+    if(id == "keyripple") return KeyRipple(seed);
+    if(id == "ambient")   return ScreenAtmosphere(seed);
     return {};
 }
 

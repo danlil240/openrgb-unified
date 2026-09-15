@@ -329,14 +329,138 @@ static ColorF EvalNoise(const EffectLayer& L, const EvalInput& in)
     return out;
 }
 
+/*---------------------------------------------------------*\
+|||| Reactive primitives — consume the caller-supplied      |
+|||| InputState. Null input -> zero coverage.               |
+\*---------------------------------------------------------*/
+static bool SourceMatches(const EffectLayer& L, const InputEvent& e)
+{
+    return L.source.empty() || e.source == L.source;
+}
+
+/* ripple — each matching input event expands a ring from its
+   position (or the layer origin when the event has none).
+   radius = speed*age; amplitude decays as exp(-density*age);
+   the band is a gaussian of half-width `scale`. Coverage sums
+   across events; color comes from the strongest contributor,
+   sampled by normalized age so rings cool as they expand. */
+static ColorF EvalRipple(const EffectLayer& L, const EvalInput& in)
+{
+    ColorF out;
+    out.a = 0.0f;
+    if(in.input == nullptr)
+    {
+        return out;
+    }
+    const Vec3  p     = SamplePos(L, in);
+    const float width = (L.scale > 1e-4f) ? L.scale : 0.05f;
+    const float decay = (L.density > 0.0f) ? L.density : 1.0f;
+
+    float cov = 0.0f, best = 0.0f, best_u = 0.0f;
+    for(const InputEvent& e : in.input->events)
+    {
+        if(!SourceMatches(L, e))
+        {
+            continue;
+        }
+        const float age = (float)(in.t - e.t);
+        if(age < 0.0f)
+        {
+            continue;   /* event predates a play_t reset */
+        }
+        const float amp = e.strength * std::exp(-decay * age);
+        if(amp < 0.01f)
+        {
+            continue;   /* fully decayed */
+        }
+        const Vec3  o = e.has_pos ? e.pos : L.origin;
+        const Vec3  d { p.x - o.x, p.y - o.y, p.z - o.z };
+        const float r    = L.speed * age;
+        const float band = std::exp(-(Length(d) - r) * (Length(d) - r)
+                                    / (width * width));
+        const float c = amp * band;
+        cov += c;
+        if(c > best)
+        {
+            best   = c;
+            best_u = 1.0f - std::exp(-decay * age);   /* young -> palette head */
+        }
+    }
+    out   = L.palette.Sample(best_u);
+    out.a = Clamp01(cov) * L.opacity;
+    return out;
+}
+
+/* screenfield — planar projection of the smoothed screen grid onto
+   the scene: origin = screen center, scale = screen width (m),
+   height = width * 9/16. Edges clamp so emitters below the screen
+   pick up the nearest row — ambilight-style. */
+static ColorF EvalScreenField(const EffectLayer& L, const EvalInput& in)
+{
+    ColorF out;
+    out.a = 0.0f;
+    if(in.input == nullptr || in.input->screen_cols < 1
+       || in.input->screen_rows < 1
+       || (int)in.input->screen_cells.size()
+              < in.input->screen_cols * in.input->screen_rows)
+    {
+        return out;
+    }
+    const Vec3  p = SamplePos(L, in);
+    const float w = (L.scale > 1e-3f) ? L.scale : 0.6f;
+    const float h = w * 0.5625f;
+    const float u = Clamp01((p.x - L.origin.x) / w + 0.5f);
+    const float v = Clamp01(0.5f - (p.y - L.origin.y) / h);
+
+    const float fx = u * (float)(in.input->screen_cols - 1);
+    const float fy = v * (float)(in.input->screen_rows - 1);
+    const int   x0 = (int)fx, y0 = (int)fy;
+    const int   x1 = (x0 + 1 < in.input->screen_cols) ? x0 + 1 : x0;
+    const int   y1 = (y0 + 1 < in.input->screen_rows) ? y0 + 1 : y0;
+    const float tx = fx - (float)x0, ty = fy - (float)y0;
+
+    const std::vector<ColorF>& cells = in.input->screen_cells;
+    const int cols = in.input->screen_cols;
+    const ColorF& c00 = cells[y0 * cols + x0];
+    const ColorF& c10 = cells[y0 * cols + x1];
+    const ColorF& c01 = cells[y1 * cols + x0];
+    const ColorF& c11 = cells[y1 * cols + x1];
+    out.r = (c00.r * (1 - tx) + c10.r * tx) * (1 - ty)
+          + (c01.r * (1 - tx) + c11.r * tx) * ty;
+    out.g = (c00.g * (1 - tx) + c10.g * tx) * (1 - ty)
+          + (c01.g * (1 - tx) + c11.g * tx) * ty;
+    out.b = (c00.b * (1 - tx) + c10.b * tx) * (1 - ty)
+          + (c01.b * (1 - tx) + c11.b * tx) * ty;
+    out.a = L.opacity;
+    return out;
+}
+
+/* level — a wash that follows the smoothed audio level. */
+static ColorF EvalLevel(const EffectLayer& L, const EvalInput& in)
+{
+    ColorF out;
+    out.a = 0.0f;
+    if(in.input == nullptr)
+    {
+        return out;
+    }
+    const float lvl = Clamp01(in.input->audio_level);
+    out   = L.palette.Sample(lvl);
+    out.a = lvl * L.opacity;
+    return out;
+}
+
 ColorF EvalPrimitive(const EffectLayer& L, const EvalInput& in)
 {
-    if(L.primitive == "wave")     return EvalWave(L, in);
-    if(L.primitive == "pulse")    return EvalPulse(L, in);
-    if(L.primitive == "gradient") return EvalGradient(L, in);
-    if(L.primitive == "spin")     return EvalSpin(L, in);
-    if(L.primitive == "comet")    return EvalComet(L, in);
-    if(L.primitive == "noise")    return EvalNoise(L, in);
+    if(L.primitive == "wave")        return EvalWave(L, in);
+    if(L.primitive == "pulse")       return EvalPulse(L, in);
+    if(L.primitive == "gradient")    return EvalGradient(L, in);
+    if(L.primitive == "spin")        return EvalSpin(L, in);
+    if(L.primitive == "comet")       return EvalComet(L, in);
+    if(L.primitive == "noise")       return EvalNoise(L, in);
+    if(L.primitive == "ripple")      return EvalRipple(L, in);
+    if(L.primitive == "screenfield") return EvalScreenField(L, in);
+    if(L.primitive == "level")       return EvalLevel(L, in);
 
     /* "static" and unknown primitives: flat palette[0] */
     ColorF out = L.palette.stops.empty() ? ColorF{} : L.palette.stops[0].color;

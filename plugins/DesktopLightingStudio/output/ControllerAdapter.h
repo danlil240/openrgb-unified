@@ -43,6 +43,11 @@ public:
                     unsigned int& rows, unsigned int& cols,
                     std::vector<unsigned int>& map) const;
 
+    /* LED name for `address` (LED index inside the bound zone), e.g.
+       "Key: Q". Empty string when unresolved or out of range — used
+       to map key events to emitter positions. */
+    std::string LEDName(const std::string& binding_id, int address) const;
+
     /* Write every mapped emitter of `object` (and objects sharing its
        resolved zone) to hardware. Returns a human-readable status;
        empty string = success. Refuses unverified objects and zones

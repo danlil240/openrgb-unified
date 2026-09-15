@@ -16,6 +16,9 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    "%STUDIO%\effects\EffectTypes.cpp" ^
    "%STUDIO%\effects\EffectEngine.cpp" ^
    "%STUDIO%\effects\Presets.cpp" ^
+   "%STUDIO%\inputs\InputBus.cpp" ^
+   "%STUDIO%\inputs\OnsetDetect.cpp" ^
+   "%STUDIO%\inputs\KeyMap.cpp" ^
    /Fo:out\ /Fe:out\studio_scene_test.exe
 if errorlevel 1 exit /b %errorlevel%
 out\studio_scene_test.exe

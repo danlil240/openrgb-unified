@@ -10,7 +10,7 @@ namespace studio
 {
 
 void EffectEngine::Evaluate(const SceneDocument& doc, double t,
-                            FrameColors& frame) const
+                            FrameColors& frame, const InputState* input) const
 {
     frame.clear();
     if(layers.empty())
@@ -41,6 +41,7 @@ void EffectEngine::Evaluate(const SceneDocument& doc, double t,
             in.object  = &obj;
             in.emitter = &e;
             in.t       = t;
+            in.input   = input;
 
             ColorF acc = ToColorF(EmitterColor(doc, obj.id, (int)i));
             for(const EffectLayer& layer : layers)

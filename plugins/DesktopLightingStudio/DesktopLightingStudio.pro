@@ -7,6 +7,9 @@
 
 QT          += core gui widgets quick quickwidgets quick3d
 
+# WASAPI loopback + LL key hook (Stage 3 inputs)
+win32:LIBS  += -lole32 -luser32
+
 TEMPLATE     = lib
 CONFIG      += plugin c++17 release
 CONFIG      -= debug debug_and_release
@@ -31,7 +34,13 @@ HEADERS += \
     scene/DefaultDesk.h \
     effects/EffectTypes.h \
     effects/EffectEngine.h \
-    effects/Presets.h
+    effects/Presets.h \
+    inputs/InputBus.h \
+    inputs/OnsetDetect.h \
+    inputs/KeyMap.h \
+    inputs/AudioLoopback.h \
+    inputs/KeyHook.h \
+    inputs/ScreenSampler.h
 
 SOURCES += \
     plugin/DesktopLightingStudio.cpp \
@@ -45,7 +54,13 @@ SOURCES += \
     scene/DefaultDesk.cpp \
     effects/EffectTypes.cpp \
     effects/EffectEngine.cpp \
-    effects/Presets.cpp
+    effects/Presets.cpp \
+    inputs/InputBus.cpp \
+    inputs/OnsetDetect.cpp \
+    inputs/KeyMap.cpp \
+    inputs/AudioLoopback.cpp \
+    inputs/KeyHook.cpp \
+    inputs/ScreenSampler.cpp
 
 RESOURCES += \
     ui/studio.qrc

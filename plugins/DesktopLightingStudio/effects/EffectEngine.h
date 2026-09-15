@@ -27,8 +27,11 @@ public:
        order) over each emitter's painted color and store the result
        in frame[obj.id][index]. Objects no layer touches get no
        frame entry — downstream falls back to painted colors.
-       Linked copies are skipped: they display their owner's frame. */
-    void Evaluate(const SceneDocument& doc, double t, FrameColors& frame) const;
+       Linked copies are skipped: they display their owner's frame.
+       `input` carries reactive signals (audio onsets, key events,
+       screen grid); nullptr disables reactive primitives. */
+    void Evaluate(const SceneDocument& doc, double t, FrameColors& frame,
+                  const InputState* input = nullptr) const;
 
 private:
     std::vector<EffectLayer> layers;

@@ -10,6 +10,7 @@
 
 #include "StudioTab.h"
 #include "SceneBridge.h"
+#include "../inputs/ScreenSampler.h"
 
 #include <QAbstractButton>
 #include <QButtonGroup>
@@ -215,6 +216,56 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     fx_row->addWidget(intensity_label);
 
     /*-----------------------------------------------------*\
+    | Inputs row (Stage 3) — reactive signal sources         |
+    \*-----------------------------------------------------*/
+    QWidget*     inputs_bar = new QWidget(this);
+    QHBoxLayout* inputs_row = new QHBoxLayout(inputs_bar);
+    inputs_row->setContentsMargins(8, 4, 8, 4);
+
+    inputs_row->addWidget(new QLabel(QStringLiteral("Inputs"), inputs_bar));
+
+    audio_check = new QCheckBox(QStringLiteral("Audio"), inputs_bar);
+    audio_check->setToolTip(QStringLiteral(
+        "WASAPI loopback on the default output — onsets drive shockwave rings"));
+    inputs_row->addWidget(audio_check);
+
+    inputs_row->addWidget(new QLabel(QStringLiteral("Sens"), inputs_bar));
+    sens_slider = new QSlider(Qt::Horizontal, inputs_bar);
+    sens_slider->setRange(25, 200);
+    sens_slider->setValue(bridge->audioSensitivityPct());
+    sens_slider->setMaximumWidth(90);
+    sens_label = new QLabel(QStringLiteral("%1%").arg(bridge->audioSensitivityPct()), inputs_bar);
+    sens_label->setMinimumWidth(38);
+    inputs_row->addWidget(sens_slider);
+    inputs_row->addWidget(sens_label);
+
+    key_check = new QCheckBox(QStringLiteral("Keys"), inputs_bar);
+    key_check->setToolTip(QStringLiteral(
+        "Low-level keyboard hook — key presses spawn ripples at the mapped key"));
+    inputs_row->addWidget(key_check);
+
+    screen_check = new QCheckBox(QStringLiteral("Screen"), inputs_bar);
+    screen_check->setToolTip(QStringLiteral(
+        "Sample the display — ambient colors wash over the setup"));
+    inputs_row->addWidget(screen_check);
+
+    screen_combo = new QComboBox(inputs_bar);
+    screen_combo->setMinimumWidth(140);
+    inputs_row->addWidget(screen_combo);
+
+    inputs_row->addStretch(1);
+    inputs_row->addWidget(new QLabel(QStringLiteral("Decay"), inputs_bar));
+    decay_slider = new QSlider(Qt::Horizontal, inputs_bar);
+    decay_slider->setRange(50, 300);
+    decay_slider->setValue(bridge->rippleDecayPct());
+    decay_slider->setMaximumWidth(90);
+    decay_slider->setToolTip(QStringLiteral("Ripple ring lifetime — higher decays faster"));
+    decay_label = new QLabel(QStringLiteral("%1%").arg(bridge->rippleDecayPct()), inputs_bar);
+    decay_label->setMinimumWidth(38);
+    inputs_row->addWidget(decay_slider);
+    inputs_row->addWidget(decay_label);
+
+    /*-----------------------------------------------------*\
     | Device-inspection bar (Stage 0 measurements)          |
     \*-----------------------------------------------------*/
     QWidget*        bar     = new QWidget(this);
@@ -250,6 +301,7 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     layout->addWidget(quick_widget, 1);
     layout->addWidget(scene_bar);
     layout->addWidget(fx_bar);
+    layout->addWidget(inputs_bar);
     layout->addWidget(bar);
     layout->addWidget(results_box);
     layout->addWidget(status_label);
@@ -335,6 +387,48 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     connect(bridge, &studio::SceneBridge::presetChanged,       this, sync_fx);
     connect(bridge, &studio::SceneBridge::effectParamsChanged, this, sync_fx);
     sync_fx();
+
+    /*-----------------------------------------------------*\
+    | Inputs row wiring                                     |
+    \*-----------------------------------------------------*/
+    screen_combo->addItems(studio::ScreenSampler::DisplayNames());
+    screen_combo->setCurrentIndex(bridge->screenIndex());
+
+    connect(audio_check, &QCheckBox::toggled,
+            bridge, &studio::SceneBridge::setAudioInput);
+    connect(key_check, &QCheckBox::toggled,
+            bridge, &studio::SceneBridge::setKeyInput);
+    connect(screen_check, &QCheckBox::toggled,
+            bridge, &studio::SceneBridge::setScreenInput);
+    connect(screen_combo, &QComboBox::currentIndexChanged,
+            bridge, &studio::SceneBridge::setScreenIndex);
+    connect(sens_slider, &QSlider::valueChanged,
+            bridge, &studio::SceneBridge::setAudioSensitivityPct);
+    connect(decay_slider, &QSlider::valueChanged,
+            bridge, &studio::SceneBridge::setRippleDecayPct);
+
+    auto sync_inputs = [this]()
+    {
+        QSignalBlocker b_audio(audio_check);
+        QSignalBlocker b_key(key_check);
+        QSignalBlocker b_screen(screen_check);
+        QSignalBlocker b_combo(screen_combo);
+        QSignalBlocker b_sens(sens_slider);
+        QSignalBlocker b_decay(decay_slider);
+        audio_check->setChecked(bridge->audioInput());
+        key_check->setChecked(bridge->keyInput());
+        screen_check->setChecked(bridge->screenInput());
+        if(bridge->screenIndex() < screen_combo->count())
+        {
+            screen_combo->setCurrentIndex(bridge->screenIndex());
+        }
+        sens_slider->setValue(bridge->audioSensitivityPct());
+        decay_slider->setValue(bridge->rippleDecayPct());
+        sens_label->setText(QStringLiteral("%1%").arg(bridge->audioSensitivityPct()));
+        decay_label->setText(QStringLiteral("%1%").arg(bridge->rippleDecayPct()));
+    };
+    connect(bridge, &studio::SceneBridge::inputsChanged, this, sync_inputs);
+    sync_inputs();
 
     connect(bridge, &studio::SceneBridge::selectionChanged, this, [this]()
     {
