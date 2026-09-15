@@ -655,7 +655,6 @@ bool SceneBridge::LoadWorkspace()
         setStatus(QStringLiteral("no saved workspace — using default desk"));
         return false;
     }
-    ReloadPresets();
     StudioDocument w;
     QString err, warns;
     if(!store->Load(&w, &err, &warns))
@@ -665,6 +664,12 @@ bool SceneBridge::LoadWorkspace()
         setStatus(QStringLiteral("studio.json rejected: %1").arg(err));
         return false;
     }
+    /* The registry must load AFTER Load: a v1/v2 file migrates in
+       place inside it, and InstallTypes lands the extracted
+       *.device.json files that the compact doc's device types
+       reference. Loading the registry first would resolve the
+       just-migrated workspace against a stale library and fail. */
+    ReloadPresets();
     SceneDocument resolved;
     std::vector<std::string> rerrs;
     if(!ResolveScene(w, registry, resolved, &rerrs))

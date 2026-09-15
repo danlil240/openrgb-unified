@@ -47,46 +47,6 @@ const SceneObject* StructuralSource(const SceneDocument& scene,
     return &o;
 }
 
-/* Structural signature — placement (position/rotation) and
-   physical identity (binding, verified, group names, address
-   base) are deliberately absent so equivalent definitions
-   deduplicate. Emitter addresses are normalized to the lowest
-   address, which becomes the instance's zone addr_base. */
-nlohmann::json Signature(const SceneDocument& scene, const SceneObject& o)
-{
-    if(o.kind == ObjectKind::Group)
-    {
-        return "group";
-    }
-    const SceneObject* src = StructuralSource(scene, o);
-    int min_addr = std::numeric_limits<int>::max();
-    for(const Emitter& e : src->emitters)
-    {
-        if(e.address >= 0 && e.address < min_addr)
-        {
-            min_addr = e.address;
-        }
-    }
-    if(min_addr == std::numeric_limits<int>::max())
-    {
-        min_addr = 0;
-    }
-    nlohmann::json sig;
-    sig["g"]  = src->geometry;
-    sig["s"]  = { src->size_m.x, src->size_m.y, src->size_m.z };
-    sig["sc"] = { src->transform.scale.x, src->transform.scale.y,
-                  src->transform.scale.z };
-    sig["l"]  = src->layout;
-    nlohmann::json em = nlohmann::json::array();
-    for(const Emitter& e : src->emitters)
-    {
-        em.push_back({ e.local_pos.x, e.local_pos.y, e.local_pos.z,
-                       e.address >= 0 ? e.address - min_addr : -1 });
-    }
-    sig["e"] = em;
-    return sig;
-}
-
 /* Emitter addresses contiguous from `base`? Then the zone can use
    addr_base instead of explicit per-point addresses. */
 bool ContiguousAddresses(const std::vector<Emitter>& emitters, int& base)
@@ -117,6 +77,42 @@ bool ContiguousAddresses(const std::vector<Emitter>& emitters, int& base)
         }
     }
     return seen.size() == emitters.size();
+}
+
+/* Structural signature — placement (position/rotation) and
+   physical identity (binding, verified, group names) are
+   deliberately absent so equivalent definitions deduplicate.
+   Emitter addresses: a CONTIGUOUS run normalizes to its base
+   (the instance carries it as zone addr_base — same strip on a
+   different address window is the same type). A sparse or mixed
+   map keeps ABSOLUTE addresses instead: layout.addresses are
+   absolute, so collapsing {0,2,4} and {10,12,14} into one type
+   would hand the second instance the first's physical LEDs. */
+nlohmann::json Signature(const SceneDocument& scene, const SceneObject& o)
+{
+    if(o.kind == ObjectKind::Group)
+    {
+        return "group";
+    }
+    const SceneObject* src = StructuralSource(scene, o);
+    int base = 0;
+    const bool contiguous = ContiguousAddresses(src->emitters, base);
+    nlohmann::json sig;
+    sig["g"]  = src->geometry;
+    sig["s"]  = { src->size_m.x, src->size_m.y, src->size_m.z };
+    sig["sc"] = { src->transform.scale.x, src->transform.scale.y,
+                  src->transform.scale.z };
+    sig["l"]  = src->layout;
+    nlohmann::json em = nlohmann::json::array();
+    for(const Emitter& e : src->emitters)
+    {
+        em.push_back({ e.local_pos.x, e.local_pos.y, e.local_pos.z,
+                       e.address < 0 ? -1
+                       : contiguous  ? e.address - base
+                                     : e.address });
+    }
+    sig["e"] = em;
+    return sig;
 }
 
 /* Build the DevicePreset for one structural source object. The

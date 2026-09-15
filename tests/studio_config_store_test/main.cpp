@@ -19,6 +19,9 @@
 #include "config/ConfigStore.h"
 #include "config/ConfigMigration.h"
 #include "scene/DefaultDesk.h"
+#include "scene/SceneJson.h"
+#include "scene/SceneResolver.h"
+#include "presets/PresetRegistry.h"
 
 #include <cstdio>
 #include <functional>
@@ -60,7 +63,7 @@ static studio::StudioDocument DocA()
 {
     studio::StudioDocument w = studio::BuildDefaultWorkspace();
     w.meta.name = "Store fixture";
-    w.meta.brightness = 0.7f;
+    w.brightness = 0.7f;
     w.inputs.audio = true;
     w.inputs.sens_pct = 175;
     w.object_colors["pc_case/front"] = 0xA0B0C0u;
@@ -86,12 +89,29 @@ static void TestSaveLoadBackup()
     const QByteArray bytes_a = ReadAll(store.DocumentPath());
     /* pretty-printed two-space JSON */
     CHECK(bytes_a.contains("\n  \"schema_version\": 3"), "store: 2-space pretty print");
-    CHECK(bytes_a.contains("\"devices\"") && !bytes_a.contains("\"emitters\""),
-          "store: compact instances only");
+    {
+        /* Compact v3: instances + shared sections only — no inline
+           entities, generated emitters or embedded definitions.
+           (colors.emitters is a legit v3 section — per-emitter
+           paint, not generated layout.) */
+        const nlohmann::json dj =
+            nlohmann::json::parse(bytes_a.constData());
+        bool compact = dj.contains("devices")
+                       && !dj.contains("scene")
+                       && !dj.contains("entities")
+                       && !dj.contains("definitions");
+        for(const auto& kv : dj["devices"].items())
+        {
+            compact = compact && !kv.value().contains("emitters")
+                      && !kv.value().contains("entities")
+                      && !kv.value().contains("geometry");
+        }
+        CHECK(compact, "store: compact instances only");
+    }
     CHECK(bytes_a.contains("\"#"), "store: hex colors on disk");
 
     /* A second save snapshots the previous file as last-valid backup. */
-    a.meta.brightness = 0.4f;
+    a.brightness = 0.4f;
     CHECK(store.Save(a, &err), "store: second save");
     CHECK(ReadAll(store.BackupPath()) == bytes_a, "store: backup holds last valid");
     CHECK(!store.dirty(), "store: clean after save");
@@ -150,7 +170,7 @@ static void TestAutosaveRecovery()
     /* Provider serves the edited state. */
     StudioDocument edited = DocA();
     edited.meta.name = "Edited desk";
-    edited.meta.brightness = 0.2f;
+    edited.brightness = 0.2f;
     store.SetSnapshotProvider([&edited]() { return edited; });
     store.SetAutosaveDelayMs(30);
 
@@ -248,6 +268,74 @@ static void TestExternalChange()
     }
     CHECK(WaitFor([&]() { return ext_count > after_recreate; }),
           "ext: edits after recreate still detected");
+}
+
+static void TestV2FileMigration()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+    ConfigStore store(tmp.path());
+    store.EnsureWorkspaceDir();
+
+    /* An expanded v2 workspace — what older builds saved. */
+    const SceneDocument scene = BuildDefaultDesk();
+    const nlohmann::json v2 = {
+        {"schema_version", 2},
+        {"name", "Old expanded desk"},
+        {"scene", ToJson(scene)},
+        {"inputs", {{"audio", true}, {"sens_pct", 140}}},
+    };
+    {
+        QFile f(store.DocumentPath());
+        f.open(QIODevice::WriteOnly | QIODevice::Text);
+        f.write(QByteArray::fromStdString(v2.dump(2)));
+        f.close();
+    }
+
+    StudioDocument w;
+    QString err, warns;
+    CHECK(store.Load(&w, &err, &warns), "v2: load migrates in place");
+    if(!err.isEmpty())
+    {
+        std::printf("  (load error: %s)\n", err.toUtf8().constData());
+    }
+    CHECK(QFileInfo::exists(store.WorkspaceDir() + "/studio.v2.backup.json"),
+          "v2: original backed up");
+    CHECK(!QDir(store.PresetDir()).entryList(QStringList("*.device.json"),
+                                            QDir::Files).isEmpty(),
+          "v2: extracted types installed");
+    CHECK(w.devices.size() == scene.objects.size(),
+          "v2: every object became an instance");
+    CHECK(w.meta.name == "Old expanded desk"
+          && w.inputs.audio && w.inputs.sens_pct == 140,
+          "v2: workspace sections carried over");
+    CHECK(!w.meta.live_on_startup,
+          "v2: migration never arms live output");
+
+    /* The on-disk file is compact v3 — no expanded content
+       (colors.emitters is a legit v3 section; what must be gone
+       is the v2 "scene" blob and inline definitions). */
+    const QByteArray bytes = ReadAll(store.DocumentPath());
+    const nlohmann::json dj = nlohmann::json::parse(bytes.constData());
+    CHECK(dj.value("schema_version", 0) == 3
+          && !dj.contains("scene") && !dj.contains("definitions")
+          && dj.contains("devices"),
+          "v2: studio.json rewritten compact");
+
+    /* The activation contract: a registry loaded AFTER Load (which
+       is when the extracted type files exist) resolves the migrated
+       workspace — the order SceneBridge::LoadWorkspace must use. */
+    PresetRegistry reg;
+    std::vector<std::string> lerrs;
+    reg.LoadDirectory(store.PresetDir().toStdString(), &lerrs);
+    SceneDocument resolved;
+    std::vector<std::string> rerrs;
+    CHECK(ResolveScene(w, reg, resolved, &rerrs),
+          "v2: migrated workspace resolves against fresh registry");
+    if(!rerrs.empty())
+    {
+        std::printf("  (resolve: %s)\n", rerrs.front().c_str());
+    }
 }
 
 static void TestMigrationMarkers()
@@ -371,6 +459,7 @@ int main(int argc, char** argv)
     TestSaveFailure();
     TestAutosaveRecovery();
     TestExternalChange();
+    TestV2FileMigration();
     TestMigrationMarkers();
     TestMigrationRetry();
 

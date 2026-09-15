@@ -56,6 +56,11 @@ constexpr unsigned int STUDIO_MAX_BINDINGS    = 512;
 constexpr unsigned int STUDIO_MAX_SETTINGS    = 8192;
 constexpr unsigned int STUDIO_MAX_ZONE_SET    = 64;
 constexpr unsigned int STUDIO_MAX_COLOR_KEYS  = 8192;
+/* Expansion caps — enforced by SceneResolver while instances
+   unfold into the runtime scene (many devices x fat types must not
+   allocate unboundedly). Same bounds the v2 scene validator used. */
+constexpr unsigned int STUDIO_MAX_OBJECTS     = 2048;
+constexpr unsigned int STUDIO_MAX_EMITTERS    = 65536;
 
 struct UiPrefs
 {

@@ -17,12 +17,18 @@ STUDIO = ../../plugins/DesktopLightingStudio
 INCLUDEPATH += $$STUDIO ../../OpenRGB/dependencies/json
 
 HEADERS += \
-    $$STUDIO/config/ConfigStore.h
+    $$STUDIO/config/ConfigStore.h \
+    $$STUDIO/presets/DevicePreset.h \
+    $$STUDIO/presets/PresetRegistry.h \
+    $$STUDIO/scene/SceneResolver.h
 
 SOURCES += main.cpp \
     $$STUDIO/config/ConfigStore.cpp \
     $$STUDIO/config/StudioConfig.cpp \
     $$STUDIO/config/ConfigMigration.cpp \
+    $$STUDIO/presets/DevicePreset.cpp \
+    $$STUDIO/presets/PresetRegistry.cpp \
+    $$STUDIO/scene/SceneResolver.cpp \
     $$STUDIO/scene/SceneTypes.cpp \
     $$STUDIO/scene/SceneGraph.cpp \
     $$STUDIO/scene/EmitterLayout.cpp \

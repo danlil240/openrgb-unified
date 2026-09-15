@@ -437,7 +437,7 @@ static StudioDocument TwoFanWorkspace()
     bb.id              = "bus_b";
     bb.controller_name = "Ctrl B";
     bb.zone_name       = "Z2";
-    bb.zone_leds       = 8;
+    bb.zone_leds       = 16;   /* addr_base 8 + 8 LEDs must fit */
     w.bindings["bus_b"] = bb;
 
     w.device_settings["fan_a"].zones["ring"] =
@@ -666,6 +666,94 @@ static void TestResolveFailures()
               && HasError(verrs, "parent"),
               "resolve: instance parent cycle rejected at parse");
     }
+    {
+        /* LED bounds — the v2 contract: an address must be < the
+           bound zone's led count. fan_a sits on bus_a (8 LEDs);
+           addr_base 4 pushes addresses 4..11 out of range. */
+        StudioDocument bad = w;
+        bad.device_settings["fan_a"].zones["ring"].addr_base = 4;
+        SceneDocument doc;
+        CHECK(!ResolveScene(bad, reg, doc, &errors)
+              && HasError(errors, "out of range")
+              && HasError(errors, "zones.ring"),
+              "bounds: addr_base + led_count > zone_leds rejected");
+    }
+    {
+        /* boundary: addr_base 0 on the 8-LED zone fits exactly */
+        StudioDocument ok = w;
+        ok.device_settings["fan_a"].zones["ring"].addr_base = 0;
+        SceneDocument doc;
+        CHECK(ResolveScene(ok, reg, doc, &errors),
+              "bounds: in-range zone resolves");
+    }
+    {
+        /* an unbound zone can't be bounds-checked — no error */
+        StudioDocument unbound = w;
+        unbound.device_settings["fan_a"].zones["ring"].binding.clear();
+        SceneDocument doc;
+        CHECK(ResolveScene(unbound, reg, doc, &errors),
+              "bounds: unbound zone resolves");
+    }
+}
+
+/*---------------------------------------------------------*\
+|||| Expansion caps — the v2 scene validator's bounds,    ||
+|||| enforced while instances unfold.                     ||
+\*---------------------------------------------------------*/
+static void TestResolveCaps()
+{
+    std::vector<std::string> errors;
+
+    /* Object cap: 700 fan instances x (group + 2 entities) =
+       2100 objects > STUDIO_MAX_OBJECTS (2048). */
+    {
+        const PresetRegistry reg = TestReg();
+        StudioDocument w;
+        DeviceInstance d;
+        d.type = "fan-120";
+        for(int i = 0; i < 700; i++)
+        {
+            w.devices["fan_" + std::to_string(i)] = d;
+        }
+        SceneDocument doc;
+        CHECK(!ResolveScene(w, reg, doc, &errors)
+              && HasError(errors, "object count exceeds cap"),
+              "caps: object expansion limited");
+    }
+    /* Emitter cap: one entity carrying 17 zones of 4096-LED rings
+       = 69632 emitters > STUDIO_MAX_EMITTERS (65536), while the
+       object count stays tiny — the emitter limit is what trips. */
+    {
+        DevicePreset fat;
+        fat.id   = "fat";
+        fat.name = "Over-fed strip";
+        PresetEntity e;
+        e.id       = "body";
+        e.geometry = "fan_ring";
+        e.zone     = "z0";
+        fat.entities["body"] = e;
+        for(int i = 0; i < 17; i++)
+        {
+            DeviceZone z;
+            z.id        = "z" + std::to_string(i);
+            z.entity    = "body";
+            z.led_count = 4096;
+            z.layout.type = "ring";
+            z.layout.radius_m = 0.05f;
+            fat.zones.push_back(z);
+        }
+        PresetRegistry reg;
+        CHECK(reg.Add(fat, &errors), "caps: fat type registers");
+        StudioDocument w;
+        DeviceInstance d;
+        d.type = "fat";
+        w.devices["one"] = d;
+        SceneDocument doc;
+        errors.clear();
+        CHECK(!ResolveScene(w, reg, doc, &errors)
+              && HasError(errors, "emitter count exceeds cap"),
+              "caps: emitter expansion limited");
+    }
 }
 
 /*---------------------------------------------------------*\
@@ -735,11 +823,20 @@ static void TestTypeReload()
     CHECK(reg.LoadDirectory(dir.string(), &errors), "reload: initial load");
 
     StudioDocument w = TwoFanWorkspace();
+    /* The edited type doubles to 16 LEDs — the bound zones must
+       have room (fan_a: 0..15, fan_b: addr_base 8 -> 8..23). */
+    w.bindings["bus_a"].zone_leds = 16;
+    w.bindings["bus_b"].zone_leds = 24;
     SceneDocument doc;
     CHECK(ResolveScene(w, reg, doc, &errors), "reload: initial resolve");
-    CHECK(FindObject(doc, "fan_a/diffuser")->emitters.size() == 8
-          && FindObject(doc, "fan_b/diffuser")->emitters.size() == 8,
-          "reload: 8 emitters before edit");
+    const SceneObject* da = FindObject(doc, "fan_a/diffuser");
+    const SceneObject* db = FindObject(doc, "fan_b/diffuser");
+    CHECK(da != nullptr && db != nullptr, "reload: diffusers exist");
+    if(da != nullptr && db != nullptr)
+    {
+        CHECK(da->emitters.size() == 8 && db->emitters.size() == 8,
+              "reload: 8 emitters before edit");
+    }
 
     /* edit the TYPE file — 16 LEDs now — and reload: both instances
        update together. */
@@ -747,8 +844,10 @@ static void TestTypeReload()
     reg.ClearFiles();
     CHECK(reg.LoadDirectory(dir.string(), &errors), "reload: edited load");
     CHECK(ResolveScene(w, reg, doc, &errors), "reload: edited resolve");
-    CHECK(FindObject(doc, "fan_a/diffuser")->emitters.size() == 16
-          && FindObject(doc, "fan_b/diffuser")->emitters.size() == 16,
+    da = FindObject(doc, "fan_a/diffuser");
+    db = FindObject(doc, "fan_b/diffuser");
+    CHECK(da != nullptr && db != nullptr
+          && da->emitters.size() == 16 && db->emitters.size() == 16,
           "reload: type edit rebuilds all instances");
 
     /* moving one instance touches only its placement — the sibling
@@ -758,8 +857,11 @@ static void TestTypeReload()
     SceneDocument moved_doc;
     CHECK(ResolveScene(moved, reg, moved_doc, &errors),
           "reload: moved resolve");
-    CHECK(Near(FindObject(moved_doc, "fan_a")->transform.position.x, 0.40f)
-          && Near(FindObject(moved_doc, "fan_b")->transform.position.x, -0.30f),
+    const SceneObject* ma = FindObject(moved_doc, "fan_a");
+    const SceneObject* mb = FindObject(moved_doc, "fan_b");
+    CHECK(ma != nullptr && mb != nullptr
+          && Near(ma->transform.position.x, 0.40f)
+          && Near(mb->transform.position.x, -0.30f),
           "reload: instance move is placement-only");
 }
 
@@ -877,6 +979,130 @@ static void TestMigration()
 }
 
 /*---------------------------------------------------------*\
+|||| Migration — sparse emitter maps: objects with the     ||
+|||| same non-contiguous address PATTERN at different      ||
+|||| bases must not collapse into one type — absolute      ||
+|||| addresses are physical identity.                       ||
+\*---------------------------------------------------------*/
+static void TestMigrationSparseAddresses()
+{
+    SceneDocument scene;
+    scene.name = "Sparse";
+
+    DeviceBinding b;
+    b.id              = "ctrl";
+    b.controller_name = "Ctrl";
+    b.zone_name       = "Z";
+    b.zone_leds       = 16;
+    scene.bindings.push_back(b);
+
+    auto strip = [&](const std::string& id, float x,
+                     const int* addrs) {
+        SceneObject o;
+        o.id       = id;
+        o.label    = id;
+        o.kind     = ObjectKind::Device;
+        o.geometry = "led_strip";
+        o.binding  = "ctrl";
+        o.transform.position = { x, 0.0f, 0.0f };
+        for(int i = 0; i < 3; i++)
+        {
+            Emitter e;
+            e.local_pos = { 0.01f * (float)i, 0.0f, 0.0f };
+            e.group     = id;
+            e.address   = addrs[i];
+            o.emitters.push_back(e);
+        }
+        scene.objects.push_back(o);
+    };
+    const int a_addr[3] = { 0, 2, 4 };
+    const int b_addr[3] = { 10, 12, 14 };
+    strip("strip_a", 0.0f, a_addr);
+    strip("strip_b", 0.5f, b_addr);
+
+    StudioDocument w;
+    std::vector<DevicePreset> types;
+    std::vector<std::string> errors, warnings;
+    CHECK(MigrateExpandedScene(scene, w, types, &errors, &warnings),
+          "sparse: migration succeeds");
+    if(!errors.empty())
+    {
+        std::printf("  (sparse errors: %s)\n", errors.front().c_str());
+    }
+
+    /* The sparse patterns are variants, not one shared type. */
+    CHECK(w.devices["strip_a"].type != w.devices["strip_b"].type,
+          "sparse: shifted sparse maps become variants");
+
+    PresetRegistry reg;
+    for(const DevicePreset& p : types)
+    {
+        CHECK(reg.Add(p, &errors), "sparse: extracted type validates");
+    }
+    SceneDocument resolved;
+    CHECK(ResolveScene(w, reg, resolved, &errors),
+          "sparse: migrated workspace resolves");
+    const SceneObject* ra = FindObject(resolved, "strip_a/body");
+    const SceneObject* rb = FindObject(resolved, "strip_b/body");
+    CHECK(ra != nullptr && rb != nullptr
+          && ra->emitters.size() == 3 && rb->emitters.size() == 3,
+          "sparse: emitters preserved");
+    if(ra != nullptr && rb != nullptr
+       && ra->emitters.size() == 3 && rb->emitters.size() == 3)
+    {
+        CHECK(ra->emitters[0].address == 0
+              && ra->emitters[1].address == 2
+              && ra->emitters[2].address == 4,
+              "sparse: first instance addresses absolute");
+        CHECK(rb->emitters[0].address == 10
+              && rb->emitters[1].address == 12
+              && rb->emitters[2].address == 14,
+              "sparse: second instance keeps its own base");
+    }
+
+    /* And contiguous strips at different bases still dedupe —
+       addr_base is instance state there. */
+    SceneDocument cont;
+    cont.bindings.push_back(b);
+    auto cstrip = [&](const std::string& id, int base0) {
+        SceneObject o;
+        o.id       = id;
+        o.kind     = ObjectKind::Device;
+        o.geometry = "led_strip";
+        o.binding  = "ctrl";
+        for(int i = 0; i < 4; i++)
+        {
+            Emitter e;
+            e.local_pos = { 0.01f * (float)i, 0.0f, 0.0f };
+            e.address   = base0 + i;
+            o.emitters.push_back(e);
+        }
+        cont.objects.push_back(o);
+    };
+    cstrip("s0", 0);
+    cstrip("s1", 8);
+    StudioDocument cw;
+    std::vector<DevicePreset> ctypes;
+    errors.clear();
+    CHECK(MigrateExpandedScene(cont, cw, ctypes, &errors, &warnings),
+          "sparse: contiguous migration succeeds");
+    CHECK(cw.devices["s0"].type == cw.devices["s1"].type,
+          "sparse: shifted contiguous maps share one type");
+    PresetRegistry creg;
+    for(const DevicePreset& p : ctypes)
+    {
+        creg.Add(p, &errors);
+    }
+    SceneDocument cr;
+    CHECK(ResolveScene(cw, creg, cr, &errors),
+          "sparse: contiguous resolve");
+    const SceneObject* cs = FindObject(cr, "s1/body");
+    CHECK(cs != nullptr && cs->emitters.size() == 4
+          && cs->emitters[0].address == 8,
+          "sparse: contiguous addr_base preserved");
+}
+
+/*---------------------------------------------------------*\
 ||| The packaged default: compact workspace + default      ||
 ||| presets resolve to the same desk BuildDefaultDesk()    ||
 ||| produces (transform/effect parity).                    ||
@@ -933,6 +1159,8 @@ int main()
     TestCompactRoundTrip();
     TestTypeReload();
     TestMigration();
+    TestMigrationSparseAddresses();
+    TestResolveCaps();
     TestDefaultWorkspaceParity();
 
     std::printf("%d checks, %d failures\n", checks, failures);

@@ -23,6 +23,83 @@ const float DEF_RING_R    = 0.052f;
 const float DEF_FAN_FACE  = 0.016f;
 const float DEF_PUMP_FACE = 0.024f;
 
+/*---------------------------------------------------------*\
+|| UNI FAN SL Wireless (SL V3) — 40 LEDs per fan, but NOT ||
+|| a ring. The frame carries two identical LED strips on   ||
+|| opposite edges; each strip is a 12-LED angular run along|
+|| the front-face diffuser plus an 8-LED bar on the side   ||
+|| face. Strip B is strip A rotated 180 deg about the fan  ||
+|| axis, so address order walks the physical chain:        ||
+||   [0..11]  front run A  (-x -> +x, top edge)            ||
+||   [12..19] side bar A   (+x -> -x on the +z side face)  ||
+||   [20..31] front run B  (+x -> -x, bottom edge)         ||
+||   [32..39] side bar B   (-x -> +x on the -z side face)  ||
+|| The packaged preset and the expanded default desk share ||
+|| this table — TestDefaultWorkspaceParity compares the    ||
+|| resolved world positions of both.                       ||
+\*---------------------------------------------------------*/
+const Vec3 SLW_LED_POINTS[40] = {
+    /* strip A — front-face run */
+    { -0.0540f, DEF_FAN_FACE,  0.0160f },
+    { -0.0478f, DEF_FAN_FACE,  0.0284f },
+    { -0.0416f, DEF_FAN_FACE,  0.0408f },
+    { -0.0347f, DEF_FAN_FACE,  0.0520f },
+    { -0.0208f, DEF_FAN_FACE,  0.0520f },
+    { -0.0069f, DEF_FAN_FACE,  0.0520f },
+    {  0.0069f, DEF_FAN_FACE,  0.0520f },
+    {  0.0208f, DEF_FAN_FACE,  0.0520f },
+    {  0.0347f, DEF_FAN_FACE,  0.0520f },
+    {  0.0416f, DEF_FAN_FACE,  0.0408f },
+    {  0.0478f, DEF_FAN_FACE,  0.0284f },
+    {  0.0540f, DEF_FAN_FACE,  0.0160f },
+    /* strip A — side-face bar */
+    {  0.0490f, 0.0f,          0.0625f },
+    {  0.0350f, 0.0f,          0.0625f },
+    {  0.0210f, 0.0f,          0.0625f },
+    {  0.0070f, 0.0f,          0.0625f },
+    { -0.0070f, 0.0f,          0.0625f },
+    { -0.0210f, 0.0f,          0.0625f },
+    { -0.0350f, 0.0f,          0.0625f },
+    { -0.0490f, 0.0f,          0.0625f },
+    /* strip B — front-face run (strip A rotated 180 deg) */
+    {  0.0540f, DEF_FAN_FACE, -0.0160f },
+    {  0.0478f, DEF_FAN_FACE, -0.0284f },
+    {  0.0416f, DEF_FAN_FACE, -0.0408f },
+    {  0.0347f, DEF_FAN_FACE, -0.0520f },
+    {  0.0208f, DEF_FAN_FACE, -0.0520f },
+    {  0.0069f, DEF_FAN_FACE, -0.0520f },
+    { -0.0069f, DEF_FAN_FACE, -0.0520f },
+    { -0.0208f, DEF_FAN_FACE, -0.0520f },
+    { -0.0347f, DEF_FAN_FACE, -0.0520f },
+    { -0.0416f, DEF_FAN_FACE, -0.0408f },
+    { -0.0478f, DEF_FAN_FACE, -0.0284f },
+    { -0.0540f, DEF_FAN_FACE, -0.0160f },
+    /* strip B — side-face bar */
+    { -0.0490f, 0.0f,         -0.0625f },
+    { -0.0350f, 0.0f,         -0.0625f },
+    { -0.0210f, 0.0f,         -0.0625f },
+    { -0.0070f, 0.0f,         -0.0625f },
+    {  0.0070f, 0.0f,         -0.0625f },
+    {  0.0210f, 0.0f,         -0.0625f },
+    {  0.0350f, 0.0f,         -0.0625f },
+    {  0.0490f, 0.0f,         -0.0625f },
+};
+
+std::vector<Emitter> SlwEmitters(const std::string& group)
+{
+    std::vector<Emitter> out;
+    out.reserve(40);
+    for(int i = 0; i < 40; i++)
+    {
+        Emitter e;
+        e.local_pos = SLW_LED_POINTS[i];
+        e.group     = group;
+        e.address   = i;
+        out.push_back(e);
+    }
+    return out;
+}
+
 PresetEntity Part(const std::string& id, const std::string& geometry,
                   const Vec3& size, const Vec3& pos, const Vec3& rot,
                   const std::string& zone = std::string())
@@ -174,7 +251,19 @@ std::vector<DevicePreset> DefaultDevicePresets()
                                 "Lian Li SL Wireless fan — 40 LEDs", "fan");
         p.entities["body"] = Part("body", "fan_body",
             { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
-        p.zones.push_back(RingZone("ring", "body", 40, DEF_RING_R, DEF_FAN_FACE));
+        /* Two edge strips, not a ring — explicit SLW_LED_POINTS.
+           Zone keeps the id "ring" so existing workspaces that
+           bound it stay valid. */
+        DeviceZone z;
+        z.id           = "ring";
+        z.entity       = "body";
+        z.led_count    = 40;
+        z.layout.type  = "points";
+        for(const Vec3& v : SLW_LED_POINTS)
+        {
+            z.layout.points.push_back(v);
+        }
+        p.zones.push_back(z);
         out.push_back(p);
     }
     {
@@ -586,10 +675,11 @@ SceneDocument BuildDefaultDesk()
     }
 
     /* 3x Lian Li SL Wireless — vertical side-intake stack on the
-       right wall near the front; rz=+90 stands the ring up so its
+       right wall near the front; rz=+90 stands the fan up so its
        light face points -x into the case (toward the glass). The UNI
        FAN controller exposes one zone per fan ("Fan 1-3", 40 LEDs
-       each), so each scene fan maps 1:1 onto a physical zone. */
+       each), so each scene fan maps 1:1 onto a physical zone. The
+       40 LEDs are two edge strips, not a ring (SLW_LED_POINTS). */
     for(int i = 0; i < 3; i++)
     {
         const std::string id = "slw_fan_" + std::to_string(i);
@@ -597,7 +687,7 @@ SceneDocument BuildDefaultDesk()
                                  "fan_body", id,
                                  { 0.08f, -0.135f + 0.125f * (float)i, 0.15f }, { 0, 0, 90 });
         fan.parent_id = "case";
-        fan.emitters = layout::Ring(40, RING_R, 0.0f, false, id, 0, FAN_FACE_Y);
+        fan.emitters = SlwEmitters(id);
         doc.objects.push_back(fan);
         doc.object_colors[id] = MakeSceneColor(0, 180, 160);
     }

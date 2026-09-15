@@ -24,6 +24,11 @@ struct ResolveCtx
     /* instance path -> type id (filled during expansion; the mirror
        pass needs it for the same-type rule). */
     std::map<std::string, std::string> inst_types;
+    /* Expansion-size accounting — hostile workspaces (many devices
+       x fat types) must not allocate unboundedly. `capped` stops
+       the expansion once a limit trips. */
+    size_t                           emitters = 0;
+    bool                             capped   = false;
 };
 
 void AddErr(ResolveCtx& c, const std::string& path, const std::string& msg)
@@ -35,6 +40,30 @@ const DeviceSettings* SettingsFor(const ResolveCtx& c, const std::string& path)
 {
     const auto it = c.ws.device_settings.find(path);
     return it == c.ws.device_settings.end() ? nullptr : &it->second;
+}
+
+/* Expansion caps — the v2 scene validator's bounds, now enforced
+   as instances unfold. */
+void NoteObject(ResolveCtx& c, const std::string& inst_path)
+{
+    if(c.out.objects.size() > STUDIO_MAX_OBJECTS && !c.capped)
+    {
+        AddErr(c, inst_path, "expanded object count exceeds cap "
+               + std::to_string(STUDIO_MAX_OBJECTS));
+        c.capped = true;
+    }
+}
+
+void NoteEmitters(ResolveCtx& c, const std::string& inst_path,
+                  size_t count)
+{
+    c.emitters += count;
+    if(c.emitters > STUDIO_MAX_EMITTERS && !c.capped)
+    {
+        AddErr(c, inst_path, "expanded emitter count exceeds cap "
+               + std::to_string(STUDIO_MAX_EMITTERS));
+        c.capped = true;
+    }
 }
 
 /* Expand one type under an instance path. `group_id` is the object
@@ -52,6 +81,10 @@ void ExpandType(ResolveCtx& c, const std::string& inst_path,
 
     for(const auto& kv : p.entities)
     {
+        if(c.capped)
+        {
+            return;
+        }
         const PresetEntity& e   = kv.second;
         const std::string   oid = inst_path + "/" + e.id;
         const std::string   parent = e.parent.empty()
@@ -83,6 +116,7 @@ void ExpandType(ResolveCtx& c, const std::string& inst_path,
                 g.visible = settings->visible;
             }
             c.out.objects.push_back(g);
+            NoteObject(c, inst_path);
             c.inst_types[g.id] = e.type;
             ExpandType(c, g.id, *child, g.id, depth + 1);
             continue;
@@ -150,6 +184,34 @@ void ExpandType(ResolveCtx& c, const std::string& inst_path,
             {
                 std::vector<Emitter> em =
                     GenerateZoneEmitters(z, o.id, addr_base);
+                /* LED bounds — the v2 workspace contract: every
+                   address must be < the bound zone's led count
+                   (zone_leds 0 = unchecked). addr_base + led_count
+                   (or explicit points.addresses) is validated here,
+                   where the generated addresses meet the binding. */
+                if(!zbinding.empty())
+                {
+                    const auto bit = c.ws.bindings.find(zbinding);
+                    if(bit != c.ws.bindings.end()
+                       && bit->second.zone_leds > 0)
+                    {
+                        for(const Emitter& e : em)
+                        {
+                            if(e.address >= (int)bit->second.zone_leds)
+                            {
+                                AddErr(c, "device_settings." + inst_path
+                                       + ".zones." + z.id,
+                                       "address "
+                                       + std::to_string(e.address)
+                                       + " out of range (zone '"
+                                       + bit->second.zone_name + "' has "
+                                       + std::to_string(bit->second.zone_leds)
+                                       + " LEDs)");
+                            }
+                        }
+                    }
+                }
+                NoteEmitters(c, inst_path, em.size());
                 o.emitters.insert(o.emitters.end(), em.begin(), em.end());
             }
             if(zverified)
@@ -164,6 +226,7 @@ void ExpandType(ResolveCtx& c, const std::string& inst_path,
             ? ObjectKind::Decor
             : ObjectKind::Device;
         c.out.objects.push_back(o);
+        NoteObject(c, inst_path);
     }
 }
 
@@ -213,6 +276,10 @@ bool ResolveScene(const StudioDocument& ws, const PresetRegistry& reg,
     \*------------------------------------------------*/
     for(const auto& kv : ws.devices)
     {
+        if(c.capped)
+        {
+            break;
+        }
         const std::string&    iid = kv.first;
         const DeviceInstance& d   = kv.second;
         const DevicePreset*   p   = reg.Find(d.type);
@@ -243,6 +310,7 @@ bool ResolveScene(const StudioDocument& ws, const PresetRegistry& reg,
             g.visible = settings->visible;
         }
         c.out.objects.push_back(g);
+        NoteObject(c, iid);
         c.inst_types[iid] = d.type;
         ExpandType(c, iid, *p, iid, 0);
     }

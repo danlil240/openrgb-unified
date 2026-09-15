@@ -1,5 +1,19 @@
 <RCC>
     <qresource prefix="/studio">
         <file alias="studio.schema.json">../../plugins/DesktopLightingStudio/schemas/studio.schema.json</file>
+        <file alias="device.schema.json">../../plugins/DesktopLightingStudio/schemas/device.schema.json</file>
+        <file alias="presets/devices/desk.device.json">../../plugins/DesktopLightingStudio/presets/devices/desk.device.json</file>
+        <file alias="presets/devices/monitor.device.json">../../plugins/DesktopLightingStudio/presets/devices/monitor.device.json</file>
+        <file alias="presets/devices/pc-case.device.json">../../plugins/DesktopLightingStudio/presets/devices/pc-case.device.json</file>
+        <file alias="presets/devices/keyboard-104.device.json">../../plugins/DesktopLightingStudio/presets/devices/keyboard-104.device.json</file>
+        <file alias="presets/devices/mouse-3zone.device.json">../../plugins/DesktopLightingStudio/presets/devices/mouse-3zone.device.json</file>
+        <file alias="presets/devices/fan-120.device.json">../../plugins/DesktopLightingStudio/presets/devices/fan-120.device.json</file>
+        <file alias="presets/devices/fan-slw.device.json">../../plugins/DesktopLightingStudio/presets/devices/fan-slw.device.json</file>
+        <file alias="presets/devices/pump-360.device.json">../../plugins/DesktopLightingStudio/presets/devices/pump-360.device.json</file>
+        <file alias="presets/devices/gpu-fan.device.json">../../plugins/DesktopLightingStudio/presets/devices/gpu-fan.device.json</file>
+        <file alias="presets/devices/gpu-card.device.json">../../plugins/DesktopLightingStudio/presets/devices/gpu-card.device.json</file>
+        <file alias="presets/devices/gpu-logo.device.json">../../plugins/DesktopLightingStudio/presets/devices/gpu-logo.device.json</file>
+        <file alias="presets/devices/ram-stick.device.json">../../plugins/DesktopLightingStudio/presets/devices/ram-stick.device.json</file>
+        <file alias="presets/devices/group.device.json">../../plugins/DesktopLightingStudio/presets/devices/group.device.json</file>
     </qresource>
 </RCC>
