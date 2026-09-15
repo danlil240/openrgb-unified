@@ -39,19 +39,28 @@ if not exist "%PLUGIN_DST%" mkdir "%PLUGIN_DST%"
 :: deployed via cmd/xcopy loaded fine. Do not copy deploy files with
 :: PowerShell.
 xcopy /y /e /i out\* "%PLUGIN_DST%\" >nul
+IF %ERRORLEVEL% NEQ 0 (
+    echo DEPLOY FAILED: plugin DLL is probably locked by a running OpenRGB - close it and rerun
+    EXIT /B 4
+)
 
 :: Loose QML next to the plugin lets the tab iterate on the scene
 :: without rebuilding the DLL (and without producing a new unsigned
 :: binary that Smart App Control would need to re-evaluate).
 xcopy /y /e /i ui "%PLUGIN_DST%\ui\" >nul
+IF %ERRORLEVEL% NEQ 0 EXIT /B 4
 
 :: Plugin dependencies must live next to OpenRGB.exe - Windows does
 :: not search the plugin's own folder when resolving them.
 set "EXE_DIR=%~dp0..\..\OpenRGB\OpenRGB Windows 64-bit"
 xcopy /y /d out\Qt6*.dll "%EXE_DIR%\" >nul
+IF %ERRORLEVEL% NEQ 0 EXIT /B 4
 xcopy /y /d out\dxcompiler.dll "%EXE_DIR%\" >nul
+IF %ERRORLEVEL% NEQ 0 EXIT /B 4
 xcopy /y /d out\dxil.dll "%EXE_DIR%\" >nul
+IF %ERRORLEVEL% NEQ 0 EXIT /B 4
 xcopy /y /d out\opengl32sw.dll "%EXE_DIR%\" >nul
+IF %ERRORLEVEL% NEQ 0 EXIT /B 4
 
 echo Deployed plugin to %PLUGIN_DST%
 echo Deployed Qt runtime deps to %EXE_DIR%
