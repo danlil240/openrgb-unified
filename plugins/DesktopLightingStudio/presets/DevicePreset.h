@@ -164,6 +164,16 @@ std::vector<Emitter> GenerateZoneEmitters(const DeviceZone& z,
                                         const std::string& group,
                                         int addr_base);
 
+/* Bake a generated layout into explicit points (the preset
+   editor's "convert to points"). The zone keeps its id/entity;
+   layout becomes type "points" carrying the generated positions
+   plus the generated addresses so LED order — including a ring's
+   reverse mapping — survives verbatim. led_count is set to the
+   baked point count. Returns false when there is nothing to
+   bake: an already-points layout, or a dynamic matrix whose
+   emitter set belongs to the bound hardware, not the preset. */
+bool ZoneLayoutToPoints(DeviceZone& z);
+
 /* Other type ids this preset references through entity `type`
    fields (dependency edges for cycle checks). */
 std::vector<std::string> PresetDependencies(const DevicePreset& p);

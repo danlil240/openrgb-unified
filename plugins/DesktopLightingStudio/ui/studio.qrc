@@ -5,6 +5,7 @@
         <file alias="components/Theme.qml">components/Theme.qml</file>
         <file alias="components/DeviceTree.qml">components/DeviceTree.qml</file>
         <file alias="components/DeviceLibrary.qml">components/DeviceLibrary.qml</file>
+        <file alias="components/DevicePresetEditor.qml">components/DevicePresetEditor.qml</file>
         <file alias="components/Inspector.qml">components/Inspector.qml</file>
         <file alias="components/LookShelf.qml">components/LookShelf.qml</file>
         <file alias="editor/CameraController.qml">editor/CameraController.qml</file>

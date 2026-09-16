@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QThread>
 #include <QTimer>
 #include <QUndoCommand>
@@ -1653,6 +1654,625 @@ void SceneBridge::createTypeFromSelection(const QStringList& instanceIds,
     ReloadPresets();
     setStatus(QStringLiteral("saved type '%1' from %2 instance(s)")
                   .arg(newTypeId).arg((int)p.entities.size()));
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.3 — device preset editor commands.              ||
+||                                                          ||
+||   The candidate is a QVariantMap in the *.device.json    ||
+||   shape that lives entirely inside the QML editor.       ||
+||   validate/preview run against a PRIVATE registry copy   ||
+||   and a throwaway document — doc, workspace, bindings    ||
+||   and live output are never touched. Save goes through   ||
+||   ConfigStore::WritePresetFile (validate -> atomic write ||
+||   -> re-read -> re-validate) so only schema-clean files  ||
+||   ever land under presets/devices/.                      ||
+\*---------------------------------------------------------*/
+namespace
+{
+
+nlohmann::json VariantToJson(const QVariant& v)
+{
+    const QJsonDocument d = QJsonDocument::fromVariant(v);
+    if(d.isNull())
+    {
+        return nlohmann::json();   /* discarded below */
+    }
+    return nlohmann::json::parse(
+        d.toJson(QJsonDocument::Compact).constData(),
+        nullptr, /*allow_exceptions*/ false);
+}
+
+QVariant JsonToVariant(const nlohmann::json& j)
+{
+    const QJsonDocument d =
+        QJsonDocument::fromJson(QByteArray::fromStdString(j.dump()));
+    return d.toVariant();
+}
+
+QVariantList ErrList(const std::vector<std::string>& errs)
+{
+    QVariantList out;
+    for(const std::string& e : errs)
+    {
+        out.push_back(QString::fromStdString(e));
+    }
+    return out;
+}
+
+} /* namespace */
+
+QVariantMap SceneBridge::presetDocument(const QString& typeId) const
+{
+    QVariantMap out;
+    const std::string tid = typeId.toStdString();
+    const DevicePreset* p = registry.Find(tid);
+    out["exists"] = (p != nullptr);
+    if(p == nullptr)
+    {
+        return out;
+    }
+    bool from_file = false;
+    for(const PresetRegistry::PresetInfo& info : registry.List())
+    {
+        if(info.id == tid)
+        {
+            from_file = info.from_file;
+            break;
+        }
+    }
+    out["fromFile"] = from_file;
+    /* Resolved without a file => the packaged defaults layer (or
+       the minimal built-in set) supplied it — a save creates a
+       user override that shadows it. */
+    out["packaged"] = !from_file;
+    out["doc"]      = JsonToVariant(ToJson(*p));
+    int instances = 0;
+    for(const auto& kv : workspace.devices)
+    {
+        if(kv.second.type == tid)
+        {
+            instances++;
+        }
+    }
+    out["instances"] = instances;
+    return out;
+}
+
+QVariantMap SceneBridge::validatePreset(const QVariantMap& candidate) const
+{
+    QVariantMap out;
+    const nlohmann::json j = VariantToJson(candidate);
+    DevicePreset p;
+    std::vector<std::string> errs;
+    if(j.is_discarded())
+    {
+        errs.push_back("candidate is not a preset document");
+    }
+    if(!errs.empty() || !DevicePresetFromJson(j, p, &errs))
+    {
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    /* Dependency rules are file-layer rules — check the candidate
+       against a throwaway copy so the live library is untouched. */
+    PresetRegistry tmp = registry;
+    if(!tmp.Add(p, &errs))
+    {
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    out["ok"]     = true;
+    out["errors"] = ErrList(errs);
+    return out;
+}
+
+QVariantMap SceneBridge::previewPreset(const QVariantMap& candidate) const
+{
+    QVariantMap out;
+    const QVariantMap v = validatePreset(candidate);
+    if(!v["ok"].toBool())
+    {
+        out["ok"]     = false;
+        out["errors"] = v["errors"];
+        return out;
+    }
+    const nlohmann::json j = VariantToJson(candidate);
+    DevicePreset p;
+    std::vector<std::string> errs;
+    DevicePresetFromJson(j, p, &errs);   /* known-good post-validate */
+
+    /* Throwaway scene: private registry copy + one root instance
+       at the origin. No doc/workspace/binding/hardware contact. */
+    PresetRegistry tmp = registry;
+    if(!tmp.Add(p, &errs))
+    {
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    StudioDocument w;
+    w.meta.name = "preview";
+    DeviceInstance inst;
+    inst.type = p.id;
+    w.devices["__preview__"] = inst;
+    SceneDocument resolved;
+    if(!ResolveScene(w, tmp, resolved, &errs))
+    {
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+
+    /* Same row shape objectList() emits — minus binding state —
+       plus the emitter positions inline (static preview color is
+       the renderer's business). Parents precede children. */
+    QVariantList objs;
+    for(const SceneObject* po : TopologicalOrder(resolved))
+    {
+        const SceneObject& o = *po;
+        QVariantMap m;
+        m["id"]       = QString::fromStdString(o.id);
+        m["label"]    = QString::fromStdString(o.label);
+        m["kind"]     = KindName(o.kind);
+        m["geometry"] = QString::fromStdString(o.geometry);
+        m["parentId"] = QString::fromStdString(o.parent_id);
+        m["x"]  = o.transform.position.x;
+        m["y"]  = o.transform.position.y;
+        m["z"]  = o.transform.position.z;
+        const Quat q = RotationQuat(o.transform.rotation_deg);
+        m["qw"] = q.w; m["qx"] = q.x; m["qy"] = q.y; m["qz"] = q.z;
+        m["sx"] = o.transform.scale.x;
+        m["sy"] = o.transform.scale.y;
+        m["sz"] = o.transform.scale.z;
+        m["dx"] = o.size_m.x;
+        m["dy"] = o.size_m.y;
+        m["dz"] = o.size_m.z;
+        const Vec3 body = ResolvedBodySize(o);
+        m["bx"] = body.x;
+        m["by"] = body.y;
+        m["bz"] = body.z;
+        m["visible"] = o.visible;
+        m["emitterCount"] = (int)o.emitters.size();
+        QVariantList ems;
+        ems.reserve((int)o.emitters.size());
+        for(size_t i = 0; i < o.emitters.size(); i++)
+        {
+            QVariantMap em;
+            em["x"] = o.emitters[i].local_pos.x;
+            em["y"] = o.emitters[i].local_pos.y;
+            em["z"] = o.emitters[i].local_pos.z;
+            em["i"] = (int)i;
+            em["a"] = o.emitters[i].address;
+            ems.push_back(em);
+        }
+        m["emitters"] = ems;
+        objs.push_back(m);
+    }
+    out["ok"]      = true;
+    out["objects"] = objs;
+    out["errors"]  = QVariantList();
+    return out;
+}
+
+QVariantMap SceneBridge::savePresetType(const QVariantMap& candidate,
+                                        bool asNew)
+{
+    QVariantMap out;
+    const nlohmann::json j = VariantToJson(candidate);
+    DevicePreset p;
+    std::vector<std::string> errs;
+    if(j.is_discarded() || !DevicePresetFromJson(j, p, &errs))
+    {
+        if(errs.empty())
+        {
+            errs.push_back("candidate is not a preset document");
+        }
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    if(asNew && registry.Contains(p.id))
+    {
+        out["ok"] = false;
+        out["errors"] = ErrList({ "id: type '" + p.id
+                                + "' already exists" });
+        return out;
+    }
+    /* Same dependency check a file load would enforce — private
+       copy so a failure leaves the live registry alone. */
+    {
+        PresetRegistry tmp = registry;
+        if(!tmp.Add(p, &errs))
+        {
+            out["ok"]     = false;
+            out["errors"] = ErrList(errs);
+            return out;
+        }
+    }
+    QString werr;
+    if(store == nullptr || !store->WritePresetFile(p, &werr))
+    {
+        errs.push_back("write failed: "
+            + (werr.isEmpty() ? std::string("store unavailable")
+                              : werr.toStdString()));
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    ReloadPresets();
+
+    /* Bound-hardware warnings: for every instance of this type,
+       compare each bound zone's expected hardware count against
+       the NEW zone's generated emitter count. The save already
+       succeeded — these are informational "rebind in Inspector"
+       lines, never a resize. A removed zone leaves a dangling
+       binding row the resolver will refuse on — report it. */
+    QVariantList warns;
+    int instances = 0;
+    for(const auto& kv : workspace.devices)
+    {
+        if(kv.second.type != p.id)
+        {
+            continue;
+        }
+        instances++;
+        const auto sit = workspace.device_settings.find(kv.first);
+        if(sit == workspace.device_settings.end())
+        {
+            continue;
+        }
+        for(const auto& zk : sit->second.zones)
+        {
+            if(zk.second.binding.empty())
+            {
+                continue;
+            }
+            const DeviceZone* z = nullptr;
+            for(const DeviceZone& zz : p.zones)
+            {
+                if(zz.id == zk.first)
+                {
+                    z = &zz;
+                    break;
+                }
+            }
+            const auto bit = workspace.bindings.find(zk.second.binding);
+            const unsigned int hw = (bit == workspace.bindings.end())
+                                  ? 0 : bit->second.zone_leds;
+            if(z == nullptr)
+            {
+                warns.push_back(QStringLiteral(
+                    "%1: zone '%2' no longer exists on the type — "
+                    "its binding is dangling; rebind or remove it")
+                    .arg(QString::fromStdString(kv.first),
+                         QString::fromStdString(zk.first)));
+                continue;
+            }
+            if(hw == 0)
+            {
+                continue;   /* count unchecked — nothing to compare */
+            }
+            const size_t n = GenerateZoneEmitters(*z, "", 0).size();
+            if(n < hw)
+            {
+                warns.push_back(QStringLiteral(
+                    "%1: zone %2 now has %3 LEDs; bound hardware "
+                    "expects %4 — rebind in Inspector")
+                    .arg(QString::fromStdString(kv.first),
+                         QString::fromStdString(zk.first))
+                    .arg((int)n)
+                    .arg((int)hw));
+            }
+        }
+    }
+
+    /* Existing instances adopt the new shape — re-resolve and reset
+       the model (a type change is never transforms-only). A resolve
+       failure keeps the file saved but the scene on the last good
+       document; the error is returned so the editor shows it. */
+    SyncWorkspace();
+    SceneDocument resolved;
+    std::vector<std::string> rerrs;
+    if(ResolveScene(workspace, registry, resolved, &rerrs))
+    {
+        doc      = resolved;
+        doc.name = workspace.meta.name;
+        rebuildMatrixLayouts();
+        rebuildKeyLookup();
+        if(obj_model != nullptr)
+        {
+            obj_model->ResetFrom();
+        }
+        emit sceneChanged();
+        setStatus(QStringLiteral("saved type '%1'%2")
+            .arg(QString::fromStdString(p.id),
+                 instances > 0
+                     ? QStringLiteral(" — %1 instance(s) updated")
+                           .arg(instances)
+                     : QString()));
+    }
+    else
+    {
+        warns.push_front(QStringLiteral(
+            "saved, but the scene no longer resolves: %1")
+            .arg(QString::fromStdString(
+                rerrs.empty() ? "unknown" : rerrs.front())));
+        setStatus(QStringLiteral("saved type '%1' — scene resolve failed")
+                      .arg(QString::fromStdString(p.id)));
+    }
+
+    out["ok"]        = true;
+    out["saved"]     = QString::fromStdString(p.id);
+    out["instances"] = instances;
+    out["warnings"]  = warns;
+    out["errors"]    = QVariantList();
+    return out;
+}
+
+QVariantMap SceneBridge::convertZoneToPoints(const QVariantMap& candidate,
+                                             int zoneIndex)
+{
+    QVariantMap out;
+    const nlohmann::json j = VariantToJson(candidate);
+    DevicePreset p;
+    std::vector<std::string> errs;
+    if(j.is_discarded() || !DevicePresetFromJson(j, p, &errs))
+    {
+        if(errs.empty())
+        {
+            errs.push_back("candidate is not a preset document");
+        }
+        out["ok"]     = false;
+        out["errors"] = ErrList(errs);
+        return out;
+    }
+    if(zoneIndex < 0 || zoneIndex >= (int)p.zones.size())
+    {
+        out["ok"]     = false;
+        out["errors"] = ErrList({ "zones: index out of range" });
+        return out;
+    }
+    if(!ZoneLayoutToPoints(p.zones[(size_t)zoneIndex]))
+    {
+        out["ok"] = false;
+        out["errors"] = ErrList({ "zones[" + std::to_string(zoneIndex)
+            + "]: nothing to convert (already points or dynamic)" });
+        return out;
+    }
+    out["ok"]        = true;
+    out["candidate"] = JsonToVariant(ToJson(p));
+    out["errors"]    = QVariantList();
+    return out;
+}
+
+QVariantList SceneBridge::hardwareControllers() const
+{
+    QVariantList out;
+    const std::vector<ControllerSnapshot>& snap = adapter.Snapshot();
+    for(size_t i = 0; i < snap.size(); i++)
+    {
+        QVariantMap c;
+        c["index"]  = (int)i;
+        c["name"]   = QString::fromStdString(snap[i].name);
+        c["vendor"] = QString::fromStdString(snap[i].vendor);
+        QVariantList zones;
+        for(size_t z = 0; z < snap[i].zones.size(); z++)
+        {
+            QVariantMap zm;
+            zm["index"] = (int)z;
+            zm["name"]  = QString::fromStdString(snap[i].zones[z].name);
+            zm["leds"]  = (int)snap[i].zones[z].leds_count;
+            zones.push_back(zm);
+        }
+        c["zones"] = zones;
+        out.push_back(c);
+    }
+    return out;
+}
+
+QVariantMap SceneBridge::instanceZoneState(const QString& instanceId) const
+{
+    QVariantMap out;
+    const std::string iid =
+        EditorController::InstanceOf(instanceId.toStdString());
+    const auto dit = workspace.devices.find(iid);
+    if(dit == workspace.devices.end())
+    {
+        out["ok"] = false;
+        return out;
+    }
+    out["ok"]   = true;
+    out["type"] = QString::fromStdString(dit->second.type);
+    const DevicePreset* p = registry.Find(dit->second.type);
+    const auto sit = workspace.device_settings.find(iid);
+    QVariantList zones;
+    if(p != nullptr)
+    {
+        for(const DeviceZone& z : p->zones)
+        {
+            QVariantMap zm;
+            zm["id"]       = QString::fromStdString(z.id);
+            zm["ledCount"] = (int)z.led_count;
+            zm["layout"]   = QString::fromStdString(z.layout.type);
+            zm["dynamic"]  = z.layout.type == "matrix" && z.layout.dynamic;
+            QString binding_id;
+            int    addr = 0;
+            bool   ver  = false;
+            if(sit != workspace.device_settings.end())
+            {
+                const auto zit = sit->second.zones.find(z.id);
+                if(zit != sit->second.zones.end())
+                {
+                    binding_id = QString::fromStdString(zit->second.binding);
+                    addr = zit->second.addr_base;
+                    ver  = zit->second.verified;
+                }
+            }
+            zm["binding"]  = binding_id;
+            zm["addrBase"] = addr;
+            zm["verified"] = ver;
+            QString label;
+            const auto bit =
+                workspace.bindings.find(binding_id.toStdString());
+            if(bit != workspace.bindings.end())
+            {
+                label = QString::fromStdString(bit->second.controller_name)
+                      + " / "
+                      + QString::fromStdString(bit->second.zone_name);
+            }
+            zm["bindingLabel"] = label;
+            zones.push_back(zm);
+        }
+    }
+    out["zones"] = zones;
+    return out;
+}
+
+void SceneBridge::bindZoneToController(const QString& instanceId,
+                                       const QString& zoneId,
+                                       int controller, int zone,
+                                       int addrBase, bool verified)
+{
+    const std::string iid =
+        EditorController::InstanceOf(instanceId.toStdString());
+    const std::string zid = zoneId.toStdString();
+    const auto dit = workspace.devices.find(iid);
+    if(dit == workspace.devices.end())
+    {
+        setStatus(QStringLiteral("bind refused: '%1' is not an instance")
+                      .arg(instanceId));
+        return;
+    }
+    const DevicePreset* p = registry.Find(dit->second.type);
+    bool zone_known = false;
+    if(p != nullptr)
+    {
+        for(const DeviceZone& z : p->zones)
+        {
+            if(z.id == zid)
+            {
+                zone_known = true;
+                break;
+            }
+        }
+    }
+    if(!zone_known)
+    {
+        setStatus(QStringLiteral("bind refused: type '%1' has no zone '%2'")
+            .arg(QString::fromStdString(dit->second.type), zoneId));
+        return;
+    }
+    const std::vector<ControllerSnapshot>& snap = adapter.Snapshot();
+    if(controller < 0 || controller >= (int)snap.size()
+       || zone < 0 || zone >= (int)snap[(size_t)controller].zones.size())
+    {
+        setStatus(QStringLiteral("bind refused: hardware pick out of range"));
+        return;
+    }
+    const ControllerSnapshot& cs = snap[(size_t)controller];
+    const ZoneSnapshot&       zs = cs.zones[(size_t)zone];
+
+    /* Reuse an existing binding for the same physical pick —
+       controller identity + zone name — else mint a stable slug. */
+    std::string bid;
+    for(const auto& kv : workspace.bindings)
+    {
+        if(kv.second.controller_name == cs.name
+           && kv.second.zone_name == zs.name
+           && kv.second.serial == cs.serial
+           && kv.second.location == cs.location)
+        {
+            bid = kv.first;
+            break;
+        }
+    }
+    if(bid.empty())
+    {
+        std::string base;
+        const std::string seed = cs.name + "_" + zs.name;
+        for(char ch : seed)
+        {
+            const unsigned char c = (unsigned char)ch;
+            base += std::isalnum(c) ? (char)std::tolower(c) : '_';
+        }
+        if(base.empty())
+        {
+            base = "binding";
+        }
+        bid = base;
+        for(int n = 2; workspace.bindings.count(bid); n++)
+        {
+            bid = base + "_" + std::to_string(n);
+        }
+    }
+    DeviceBinding b;
+    b.id              = bid;
+    b.controller_name = cs.name;
+    b.vendor          = cs.vendor;
+    b.serial          = cs.serial;
+    b.location        = cs.location;
+    b.device_type     = cs.device_type;
+    b.zone_name       = zs.name;
+    b.zone_leds       = zs.leds_count;
+
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.BindZone(iid, zid, b, addrBase, verified);
+    if(!e.has_value())
+    {
+        setStatus(editor.LastError().empty()
+            ? QStringLiteral("bind refused")
+            : QString::fromStdString(editor.LastError()));
+        return;
+    }
+    commitEdit(std::move(*e));
+    setStatus(QStringLiteral("bound %1/%2 -> %3 %4")
+        .arg(instanceId, zoneId,
+             QString::fromStdString(cs.name),
+             QString::fromStdString(zs.name)));
+}
+
+void SceneBridge::unbindZone(const QString& instanceId,
+                             const QString& zoneId)
+{
+    const std::string iid =
+        EditorController::InstanceOf(instanceId.toStdString());
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.UnbindZone(iid, zoneId.toStdString());
+    if(!e.has_value())
+    {
+        if(!editor.LastError().empty())
+        {
+            setStatus(QString::fromStdString(editor.LastError()));
+        }
+        return;
+    }
+    commitEdit(std::move(*e));
+    setStatus(QStringLiteral("unbound %1/%2").arg(instanceId, zoneId));
+}
+
+void SceneBridge::setZoneParams(const QString& instanceId,
+                                const QString& zoneId,
+                                int addrBase, bool verified)
+{
+    const std::string iid =
+        EditorController::InstanceOf(instanceId.toStdString());
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.SetZoneParams(iid, zoneId.toStdString(), addrBase, verified);
+    if(!e.has_value())
+    {
+        if(!editor.LastError().empty())
+        {
+            setStatus(QString::fromStdString(editor.LastError()));
+        }
+        return;
+    }
+    commitEdit(std::move(*e));
 }
 
 QVariantMap SceneBridge::cameraState() const

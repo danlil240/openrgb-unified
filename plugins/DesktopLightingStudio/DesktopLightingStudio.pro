@@ -95,6 +95,7 @@ DISTFILES += \
     ui/components/Theme.qml \
     ui/components/DeviceTree.qml \
     ui/components/DeviceLibrary.qml \
+    ui/components/DevicePresetEditor.qml \
     ui/components/Inspector.qml \
     ui/components/LookShelf.qml \
     ui/editor/CameraController.qml \

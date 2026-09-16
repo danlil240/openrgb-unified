@@ -1355,6 +1355,349 @@ static void TestBakePaintedColors()
           "bake: unpainted instance bakes nothing");
 }
 
+/*---------------------------------------------------------*\
+|| Task 4.3 — ZoneLayoutToPoints: the editor's "convert    ||
+|| generated layout to points" bakes generated positions   ||
+|| + generated addresses into an explicit points list —    ||
+|| LED order (incl. ring reverse) survives verbatim and    ||
+|| led_count follows the baked count. Already-points and   ||
+|| dynamic-matrix layouts refuse: nothing to bake.         ||
+\*---------------------------------------------------------*/
+static void TestZoneLayoutToPoints()
+{
+    using namespace studio;
+
+    /* ring — 4 LEDs, r=50 mm, start 90°, face_y 10 mm, reversed */
+    DeviceZone z;
+    z.id = "ring"; z.entity = "body"; z.led_count = 4;
+    z.layout.type            = "ring";
+    z.layout.radius_m        = 0.05f;
+    z.layout.start_angle_deg = 90.0f;
+    z.layout.face_y_m        = 0.01f;
+    z.layout.reverse         = true;
+    CHECK(ZoneLayoutToPoints(z), "zp: ring converts");
+    CHECK(z.layout.type == "points" && z.layout.points.size() == 4
+          && z.layout.addresses.size() == 4 && z.led_count == 4,
+          "zp: points + addresses baked, count synced");
+    /* address 0 sits at the start angle; reversed order walks
+       counter-clockwise (ang = start - i*90). */
+    CHECK(NearVec(z.layout.points[0], { 0.0f, 0.01f, -0.05f }),
+          "zp: address 0 at start angle");
+    CHECK(NearVec(z.layout.points[1], { 0.05f, 0.01f, 0.0f }),
+          "zp: reverse step direction preserved");
+    CHECK(z.layout.addresses[0] == 0 && z.layout.addresses[3] == 3,
+          "zp: addresses pin the physical order");
+
+    /* strip — spacing 10 mm from origin (100,0,0) mm */
+    DeviceZone s;
+    s.id = "s"; s.entity = "body"; s.led_count = 3;
+    s.layout.type       = "strip";
+    s.layout.spacing_m  = 0.01f;
+    s.layout.origin     = { 0.1f, 0.0f, 0.0f };
+    CHECK(ZoneLayoutToPoints(s), "zp: strip converts");
+    CHECK(NearVec(s.layout.points[1], { 0.11f, 0.0f, 0.0f }),
+          "zp: strip pitch lands");
+    CHECK(s.led_count == 3, "zp: strip count synced");
+
+    /* static matrix — sparse map bakes only live cells, addresses
+       carry the cell values */
+    DeviceZone m;
+    m.id = "mx"; m.entity = "body"; m.led_count = 3;
+    m.layout.type      = "matrix";
+    m.layout.dynamic   = false;
+    m.layout.rows      = 2;
+    m.layout.cols      = 2;
+    m.layout.pitch_x_m = 0.02f;
+    m.layout.pitch_z_m = 0.02f;
+    m.layout.empty_cell = 0xFFFFFFFFu;
+    m.layout.map       = { 0u, 0xFFFFFFFFu, 1u, 2u };
+    CHECK(ZoneLayoutToPoints(m), "zp: static matrix converts");
+    CHECK(m.layout.points.size() == 3 && m.led_count == 3,
+          "zp: only live cells baked");
+    CHECK(m.layout.addresses[0] == 0 && m.layout.addresses[1] == 1
+          && m.layout.addresses[2] == 2,
+          "zp: matrix cell addresses preserved");
+    CHECK(NearVec(m.layout.points[2], { 0.02f, 0.0f, -0.02f }),
+          "zp: matrix row/col position preserved");
+
+    /* baked presets still pass file validation (led_count ==
+       points size) and generate identical emitters */
+    DevicePreset p;
+    p.id = "baked"; p.name = "Baked"; p.category = "custom";
+    PresetEntity body;
+    body.id = "body"; body.geometry = "fan_body";
+    body.size_m = { 0.1f, 0.02f, 0.1f };
+    body.zone = "ring";
+    p.entities["body"] = body;
+    p.zones.push_back(z);
+    DevicePreset back;
+    std::vector<std::string> errs;
+    CHECK(DevicePresetFromJson(ToJson(p), back, &errs),
+          "zp: baked file validates");
+    const std::vector<Emitter> a = GenerateZoneEmitters(
+        back.zones[0], "", 0);
+    CHECK(a.size() == 4 && a[1].address == 1
+          && NearVec(a[1].local_pos, { 0.05f, 0.01f, 0.0f }),
+          "zp: baked zone regenerates the same emitters");
+
+    /* refusals — already-points and dynamic matrix */
+    CHECK(!ZoneLayoutToPoints(z), "zp: re-convert refused");
+    DeviceZone d;
+    d.id = "dm"; d.entity = "body"; d.led_count = 0;
+    d.layout.type    = "matrix";
+    d.layout.dynamic = true;
+    CHECK(!ZoneLayoutToPoints(d), "zp: dynamic matrix refused");
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.3 — per-instance zone binding ops. BindZone      ||
+|| ensures the bindings entry and writes                  ||
+|| device_settings.<inst>.zones.<zone> in ONE record;      ||
+|| SetZoneParams/UnbindZone adjust or drop the row. All    ||
+|| undoable through the same Apply/Revert machinery.       ||
+\*---------------------------------------------------------*/
+static void TestZoneBinding()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+
+    DeviceBinding b;
+    b.id              = "mb_argb";
+    b.controller_name = "X570 TEST";
+    b.vendor          = "ASUS";
+    b.zone_name       = "ARGB_1";
+    b.zone_leds       = 4;
+
+    std::optional<EditorEdit> e =
+        ctl.BindZone("fan1", "ring", b, 0, true);
+    CHECK(e.has_value(), "zb: bind produced a record");
+    CHECK(w.bindings.count("mb_argb") == 1
+          && w.bindings["mb_argb"].zone_leds == 4,
+          "zb: binding identity ensured");
+    CHECK(w.device_settings["fan1"].zones["ring"].binding == "mb_argb"
+          && w.device_settings["fan1"].zones["ring"].verified,
+          "zb: zone row written");
+    CHECK(!e->Empty() && !e->TransformsOnly(),
+          "zb: binding edit is not transforms-only");
+    CHECK(e->bindings.after.count("mb_argb") == 1
+          && e->settings.after.count("fan1") == 1,
+          "zb: one record carries both sections");
+
+    /* identical rebind = no record; a same-id-different-identity
+       binding refuses without touching the workspace */
+    CHECK(!ctl.BindZone("fan1", "ring", b, 0, true).has_value(),
+          "zb: identical rebind is a no-op");
+    DeviceBinding other = b;
+    other.vendor = "Other";
+    CHECK(!ctl.BindZone("fan1", "ring", other, 0, true).has_value()
+          && w.bindings["mb_argb"].vendor == "ASUS",
+          "zb: identity collision refused");
+
+    /* params adjust the row in place; unbound rows refuse */
+    std::optional<EditorEdit> p2 =
+        ctl.SetZoneParams("fan1", "ring", 2, false);
+    CHECK(p2.has_value()
+          && w.device_settings["fan1"].zones["ring"].addr_base == 2
+          && !w.device_settings["fan1"].zones["ring"].verified
+          && w.device_settings["fan1"].zones["ring"].binding
+                 == "mb_argb",
+          "zb: params adjusted, binding kept");
+    CHECK(!ctl.SetZoneParams("fan1", "ring", 2, false).has_value(),
+          "zb: same params no-op");
+    CHECK(!ctl.SetZoneParams("desk", "ring", 0, true).has_value()
+          && !ctl.LastError().empty(),
+          "zb: unbound row refuses with a reason");
+
+    /* revert restores both sections (LIFO) */
+    RevertEditorEdit(w, *p2);
+    RevertEditorEdit(w, *e);
+    CHECK(w.bindings.count("mb_argb") == 0
+          && w.device_settings["fan1"].zones.count("ring") == 0,
+          "zb: revert removes binding + row");
+
+    /* unbind drops the row but leaves the bindings entry */
+    e = ctl.BindZone("fan1", "ring", b, 0, true);
+    CHECK(e.has_value(), "zb: rebind");
+    std::optional<EditorEdit> u = ctl.UnbindZone("fan1", "ring");
+    CHECK(u.has_value()
+          && w.device_settings["fan1"].zones.count("ring") == 0
+          && w.bindings.count("mb_argb") == 1,
+          "zb: unbind drops the row, binding stays");
+    RevertEditorEdit(w, *u);
+    CHECK(w.device_settings["fan1"].zones["ring"].binding
+              == "mb_argb",
+          "zb: unbind reverts");
+    RevertEditorEdit(w, *e);
+
+    /* refusals: unknown instance, locked, mid-gesture */
+    CHECK(!ctl.BindZone("nope", "ring", b, 0, true).has_value()
+          && ctl.LastError().find("unknown") != std::string::npos,
+          "zb: unknown instance refused");
+    w.device_settings["fan1"].locked = true;
+    w.device_settings["fan0"].locked = true;
+    CHECK(!ctl.BindZone("fan1", "ring", b, 0, true).has_value()
+          && !ctl.UnbindZone("fan0", "ring").has_value(),
+          "zb: locked instance refused");
+    w.device_settings["fan1"].locked = false;
+    w.device_settings["fan0"].locked = false;
+    ctl.SetSelection({ "fan1" });
+    CHECK(ctl.BeginTransform(), "zb: gesture begins");
+    CHECK(!ctl.BindZone("fan1", "ring", b, 0, true).has_value(),
+          "zb: mid-gesture refused");
+    ctl.Cancel();
+
+    /* the fixture's existing bound zone still resolves + writes
+       through the same path */
+    SceneDocument doc;
+    CHECK(Resolve(w, TestRegistry(), doc), "zb: fixture resolves");
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.3 — schema-backed save: a fully-edited preset    ||
+|| (every entity field incl. appearance, all four layout   ||
+|| kinds, binding_hints) round-trips ToJson -> FromJson    ||
+|| with no unknown keys anywhere — an editor typo would    ||
+|| otherwise ride silently into user files. Key sets here  ||
+|| mirror schemas/device.schema.json.                      ||
+\*---------------------------------------------------------*/
+static void TestPresetSchemaRoundTrip()
+{
+    using namespace studio;
+
+    DevicePreset p;
+    p.id       = "full-kit";
+    p.name     = "Full edited preset";
+    p.category = "custom";
+
+    PresetEntity body;
+    body.id       = "body";
+    body.geometry = "fan_body";
+    body.size_m   = { 0.12f, 0.025f, 0.12f };
+    body.position = { 0.01f, 0.02f, -0.03f };
+    body.rotation_deg = { 5.0f, 45.0f, 0.0f };
+    body.zone     = "ring";
+    body.appearance = nlohmann::json::object({
+        { "body_color", "#203040" },
+        { "roughness",  0.4 },
+        { "custom_tag", "kept-verbatim" } });
+    p.entities["body"] = body;
+
+    PresetEntity shroud;
+    shroud.id     = "shroud";
+    shroud.type   = "fan-120";       /* child-device reference */
+    shroud.parent = "body";
+    shroud.position = { 0.05f, 0.01f, 0.0f };
+    p.entities["shroud"] = shroud;
+
+    auto zone = [](const char* id, const char* layout) {
+        DeviceZone z; z.id = id; z.entity = "body"; z.led_count = 4;
+        z.layout.type = layout; return z; };
+    DeviceZone ring = zone("ring", "ring");
+    ring.layout.radius_m = 0.05f; ring.layout.start_angle_deg = 30.0f;
+    ring.layout.face_y_m = 0.01f; ring.layout.reverse = true;
+    DeviceZone strip = zone("strip", "strip");
+    strip.layout.spacing_m = 0.008f;
+    strip.layout.origin = { 0.01f, 0.0f, 0.0f };
+    DeviceZone mx = zone("mx", "matrix");
+    mx.layout.rows = 2; mx.layout.cols = 2;
+    mx.layout.pitch_x_m = 0.02f; mx.layout.pitch_z_m = 0.02f;
+    mx.layout.map = { 0u, 1u, 2u, 3u };
+    mx.led_count = 4;
+    DeviceZone pts = zone("pts", "points");
+    pts.layout.points = { { 0.01f, 0.0f, 0.0f }, { 0.0f, 0.01f, 0.0f },
+                          { -0.01f, 0.0f, 0.0f }, { 0.0f, -0.01f, 0.0f } };
+    pts.layout.addresses = { 3, 2, 1, 0 };
+    pts.led_count = 4;
+    /* every zone needs a distinct entity — clone bodies so the
+       zone->entity links all resolve */
+    p.entities["body"].zone = "ring";
+    for(const char* extra : { "e_strip", "e_mx", "e_pts" })
+    {
+        PresetEntity e2 = body;
+        e2.id   = extra;
+        e2.zone = "";
+        p.entities[extra] = e2;
+    }
+    strip.entity = "e_strip";
+    mx.entity    = "e_mx";
+    pts.entity   = "e_pts";
+    p.entities["e_strip"].zone = "strip";
+    p.entities["e_mx"].zone    = "mx";
+    p.entities["e_pts"].zone   = "pts";
+    p.zones = { ring, strip, mx, pts };
+    p.binding_hints.push_back({ "X870E AORUS ELITE", "Gigabyte",
+                                "ARGB_V2_1" });
+
+    const nlohmann::json j = ToJson(p);
+    DevicePreset back;
+    std::vector<std::string> errs;
+    CHECK(DevicePresetFromJson(j, back, &errs),
+          "rt: fully-edited preset round-trips the file schema");
+    CHECK(back.entities.at("shroud").type == "fan-120"
+          && back.entities.at("shroud").parent == "body",
+          "rt: child ref + parent survive");
+    CHECK(back.entities.at("body").appearance.value("custom_tag", "")
+              == "kept-verbatim",
+          "rt: unknown appearance key retained verbatim");
+    CHECK(back.binding_hints.size() == 1
+          && back.binding_hints[0].zone_name == "ARGB_V2_1",
+          "rt: binding hint round-trips");
+    const std::vector<int> want_addrs = { 3, 2, 1, 0 };
+    CHECK(back.zones[3].layout.addresses == want_addrs,
+          "rt: point addresses survive");
+
+    /* No unknown keys — mirror of device.schema.json's declared
+       properties (entities.items.properties is open by design; the
+       editor only ever writes these). */
+    const std::set<std::string> top =
+        { "$schema", "schema_version", "id", "name", "category",
+          "entities", "zones", "binding_hints" };
+    const std::set<std::string> ent =
+        { "type", "geometry", "size_m", "x", "y", "z",
+          "rx", "ry", "rz", "parent", "zone", "appearance" };
+    const std::set<std::string> zk =
+        { "id", "entity", "led_count", "layout" };
+    const std::set<std::string> lk =
+        { "type", "radius_m", "start_angle_deg", "face_y_m",
+          "reverse", "spacing_m", "origin", "dynamic", "rows", "cols",
+          "pitch_x_m", "pitch_z_m", "empty", "map", "points",
+          "addresses" };
+    const std::set<std::string> hk =
+        { "controller_name", "vendor", "zone_name" };
+    auto keys_ok = [](const nlohmann::json& o,
+                      const std::set<std::string>& known,
+                      const char* what) {
+        for(auto it = o.begin(); it != o.end(); ++it)
+        {
+            if(known.count(it.key()) == 0)
+            {
+                std::printf("  (unknown %s key: %s)\n", what,
+                            it.key().c_str());
+                return false;
+            }
+        }
+        return true;
+    };
+    CHECK(keys_ok(j, top, "top"), "rt: no unknown top-level keys");
+    for(const auto& kv : j.at("entities").items())
+    {
+        CHECK(keys_ok(kv.value(), ent, "entity"),
+              "rt: entity keys are schema-known");
+    }
+    for(const nlohmann::json& jz : j.at("zones"))
+    {
+        CHECK(keys_ok(jz, zk, "zone"), "rt: zone keys known");
+        CHECK(keys_ok(jz.at("layout"), lk, "layout"),
+              "rt: layout keys known");
+    }
+    for(const nlohmann::json& jh : j.at("binding_hints"))
+    {
+        CHECK(keys_ok(jh, hk, "hint"), "rt: hint keys known");
+    }
+}
+
 int main()
 {
     TestDragOneRecord();
@@ -1377,6 +1720,9 @@ int main()
     TestRetype();
     TestBuildPresetFromInstances();
     TestBakePaintedColors();
+    TestZoneLayoutToPoints();
+    TestZoneBinding();
+    TestPresetSchemaRoundTrip();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

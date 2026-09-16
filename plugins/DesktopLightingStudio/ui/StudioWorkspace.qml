@@ -518,6 +518,9 @@ Rectangle {
                 height: parent.height - leftTabs.height
                 bridgeOverride: ws.bridgeOverride
                 sceneView: scene
+                onEditRequested: function(typeId) {
+                    presetEd.openForType(typeId, "")
+                }
                 opacity: ws.leftTab === 1 ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity {
@@ -581,6 +584,12 @@ Rectangle {
             cam: scene.editorCam
             bridgeOverride: ws.bridgeOverride
             hostOverride: ws.hostOverride
+            onEditTypeRequested: function(typeId, iid) {
+                presetEd.openForType(typeId, iid)
+            }
+            onEditVariantRequested: function(typeId, iid) {
+                presetEd.openVariant(typeId, iid)
+            }
             Behavior on x {
                 enabled: ws.narrow
                 NumberAnimation { duration: th.dur; easing.type: Easing.OutCubic }
@@ -781,6 +790,17 @@ Rectangle {
                 }
             }
         }
+    }
+
+    /* Task 4.3 — device preset editor: a modeless pane floating
+       over the workspace. The candidate is editor-local until Save
+       writes the *.device.json through the bridge; nothing here
+       blocks or touches the live scene. */
+    C.DevicePresetEditor {
+        id: presetEd
+        x: Math.max(10, Math.round((ws.width - width) / 2))
+        y: ws.hdrH + 10
+        bridgeOverride: ws.bridgeOverride
     }
 
     Component.onCompleted: {

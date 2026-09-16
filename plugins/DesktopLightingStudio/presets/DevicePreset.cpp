@@ -947,6 +947,34 @@ std::vector<Emitter> GenerateZoneEmitters(const DeviceZone& z,
     return out;
 }
 
+bool ZoneLayoutToPoints(DeviceZone& z)
+{
+    if(z.layout.type == "points")
+    {
+        return false;   /* already explicit */
+    }
+    /* group "" + addr_base 0 bakes the type-local layout; the
+       generated addresses pin the LED order (ring reverse swaps
+       address<->position, not geometry). */
+    const std::vector<Emitter> em = GenerateZoneEmitters(z, "", 0);
+    if(em.empty())
+    {
+        return false;   /* dynamic matrix / empty zone: nothing to bake */
+    }
+    ZoneLayout baked;
+    baked.type = "points";
+    baked.points.reserve(em.size());
+    baked.addresses.reserve(em.size());
+    for(const Emitter& e : em)
+    {
+        baked.points.push_back(e.local_pos);
+        baked.addresses.push_back(e.address);
+    }
+    z.layout    = baked;
+    z.led_count = (unsigned int)baked.points.size();
+    return true;
+}
+
 std::vector<std::string> PresetDependencies(const DevicePreset& p)
 {
     std::vector<std::string> deps;

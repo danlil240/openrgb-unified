@@ -219,6 +219,28 @@ public:
     unsigned int BakePaintedColors(const std::string& iid,
                                    DevicePreset& variant) const;
 
+    /*------------------------------------------------*\
+    || Zone binding (task 4.3) — writes the           ||
+    || per-instance device_settings.zones.<zone_id>   ||
+    || row plus the bindings entry it references.     ||
+    || Preset files and hardware zone sizes are never ||
+    || touched. BindZone ensures `binding` exists in  ||
+    || ws.bindings — an existing entry whose identity ||
+    || differs is a collision and refuses. UnbindZone ||
+    || drops the row; SetZoneParams adjusts           ||
+    || addr_base/verified on an existing bound row.   ||
+    || One undo record each.                          ||
+    \*------------------------------------------------*/
+    std::optional<EditorEdit> BindZone(const std::string& iid,
+                                       const std::string& zone_id,
+                                       const DeviceBinding& binding,
+                                       int addr_base, bool verified);
+    std::optional<EditorEdit> UnbindZone(const std::string& iid,
+                                         const std::string& zone_id);
+    std::optional<EditorEdit> SetZoneParams(const std::string& iid,
+                                            const std::string& zone_id,
+                                            int addr_base, bool verified);
+
     /* Snapping — defaults come from ControlsPrefs (10 mm / 15 deg). */
     static Vec3  SnapTranslate(const Vec3& v, float step_m = 0.01f);
     static float SnapAngle(float deg, float step_deg = 15.0f);

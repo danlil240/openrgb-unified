@@ -125,14 +125,14 @@ Vec3 EulerDegFromMat4(const Mat4& r)
 
 bool EditorEdit::Empty() const
 {
-    return devices.Empty() && settings.Empty()
+    return devices.Empty() && settings.Empty() && bindings.Empty()
         && object_colors.Empty() && emitter_colors.Empty();
 }
 
 bool EditorEdit::TransformsOnly() const
 {
-    if(!settings.Empty() || !object_colors.Empty()
-       || !emitter_colors.Empty())
+    if(!settings.Empty() || !bindings.Empty()
+       || !object_colors.Empty() || !emitter_colors.Empty())
     {
         return false;
     }
@@ -174,6 +174,7 @@ void ApplyEditorEdit(StudioDocument& ws, const EditorEdit& e)
 {
     ApplySection(ws.devices,         e.devices);
     ApplySection(ws.device_settings, e.settings);
+    ApplySection(ws.bindings,        e.bindings);
     ApplySection(ws.object_colors,   e.object_colors);
     ApplySection(ws.emitter_colors,  e.emitter_colors);
 }
@@ -182,6 +183,7 @@ void RevertEditorEdit(StudioDocument& ws, const EditorEdit& e)
 {
     RevertSection(ws.devices,         e.devices);
     RevertSection(ws.device_settings, e.settings);
+    RevertSection(ws.bindings,        e.bindings);
     RevertSection(ws.object_colors,   e.object_colors);
     RevertSection(ws.emitter_colors,  e.emitter_colors);
 }

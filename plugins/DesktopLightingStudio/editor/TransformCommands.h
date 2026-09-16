@@ -8,6 +8,8 @@
 ||     devices          — instance placements (add/remove ||
 ||                        reparent included)              ||
 ||     device_settings  — visible/locked/mirror_of/zones  ||
+||     bindings         — controller identities a zone    ||
+||                        setting references              ||
 ||     object_colors / emitter_colors — re-keyed or       ||
 ||                        removed paint                   ||
 ||   Apply/Revert restore either side of the edit, so a   ||
@@ -146,6 +148,7 @@ struct EditorEdit
     std::string                                     label;   /* undo text */
     SectionDelta<DeviceInstance>                    devices;
     SectionDelta<DeviceSettings>                    settings;
+    SectionDelta<DeviceBinding>                     bindings;
     SectionDelta<SceneColor>                        object_colors;
     SectionDelta<std::map<int, SceneColor>>         emitter_colors;
 

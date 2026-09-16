@@ -261,6 +261,47 @@ public slots:
     Q_INVOKABLE void createTypeFromSelection(
         const QStringList& instanceIds, const QString& newTypeId,
         const QString& displayName);
+
+    /* Task 4.3 — device preset editor. The candidate lives in the
+       QML editor as a plain JS object (the *.device.json shape);
+       these calls validate / preview / persist it WITHOUT touching
+       workspace, doc, bindings or hardware. previewPreset resolves
+       a throwaway one-instance document against a private registry
+       copy so the live scene and the library are never disturbed.
+       savePresetType writes only presets/devices/<id>.device.json
+       through ConfigStore::WritePresetFile (which re-validates on
+       read-back), then reloads the library and re-resolves the
+       workspace so existing instances adopt the new shape —
+       led_count shrink vs bound hardware is returned as a warning,
+       never auto-resized. */
+    Q_INVOKABLE QVariantMap presetDocument(const QString& typeId) const;
+    Q_INVOKABLE QVariantMap validatePreset(const QVariantMap& candidate) const;
+    Q_INVOKABLE QVariantMap previewPreset(const QVariantMap& candidate) const;
+    Q_INVOKABLE QVariantMap savePresetType(const QVariantMap& candidate,
+                                           bool asNew);
+    /* "Convert generated layout to points": bakes the zone's
+       generated emitters (positions + addresses) into layout.points;
+       returns {ok, candidate} or {ok:false, errors}. */
+    Q_INVOKABLE QVariantMap convertZoneToPoints(const QVariantMap& candidate,
+                                                int zoneIndex);
+    /* Controller/zone pickers for the editor's Binding section —
+       the adapter snapshot the binding resolver itself uses. */
+    Q_INVOKABLE QVariantList hardwareControllers() const;
+    /* Per-instance zone binding rows for the editor (type zones +
+       current binding/param state). Empty map for unknown ids. */
+    Q_INVOKABLE QVariantMap instanceZoneState(const QString& instanceId) const;
+    /* Undoable per-instance binding writes — through the editor
+       controller into device_settings.zones / bindings. The type's
+       zones and hardware zone sizes are never touched. */
+    Q_INVOKABLE void bindZoneToController(const QString& instanceId,
+                                          const QString& zoneId,
+                                          int controller, int zone,
+                                          int addrBase, bool verified);
+    Q_INVOKABLE void unbindZone(const QString& instanceId,
+                                const QString& zoneId);
+    Q_INVOKABLE void setZoneParams(const QString& instanceId,
+                                   const QString& zoneId,
+                                   int addrBase, bool verified);
     /* alignSelected(axis, mode): axis 0=X/1=Y/2=Z; mode 0=min,
        1=center, 2=max. distributeSelected(axis): even spacing,
        endpoints hold. Both are one undo record. */

@@ -1426,6 +1426,187 @@ unsigned int EditorController::BakePaintedColors(
 }
 
 /*---------------------------------------------------------*\
+|| Zone binding (task 4.3) — per-instance settings rows   ||
+|| plus the bindings entry they reference. Never writes   ||
+|| a preset file; never resizes hardware.                 ||
+\*---------------------------------------------------------*/
+static bool SameBindingIdentity(const DeviceBinding& a,
+                                const DeviceBinding& b)
+{
+    return a.controller_name == b.controller_name
+        && a.vendor         == b.vendor
+        && a.serial         == b.serial
+        && a.location       == b.location
+        && a.device_type    == b.device_type
+        && a.zone_name      == b.zone_name
+        && a.zone_leds      == b.zone_leds;
+}
+
+std::optional<EditorEdit>
+EditorController::BindZone(const std::string& iid,
+                           const std::string& zone_id,
+                           const DeviceBinding& binding,
+                           int addr_base, bool verified)
+{
+    last_error.clear();
+    if(gesture.active)
+    {
+        last_error = "bind refused: finish the drag first";
+        return std::nullopt;
+    }
+    if(!Exists(iid))
+    {
+        last_error = "bind refused: unknown instance " + iid;
+        return std::nullopt;
+    }
+    if(IsLocked(iid))
+    {
+        last_error = "bind refused: " + iid + " is locked";
+        return std::nullopt;
+    }
+    if(zone_id.empty() || binding.id.empty()
+       || binding.controller_name.empty() || binding.zone_name.empty())
+    {
+        last_error = "bind refused: incomplete binding identity";
+        return std::nullopt;
+    }
+    if(addr_base < 0)
+    {
+        addr_base = 0;
+    }
+
+    const auto bit = ws.bindings.find(binding.id);
+    if(bit != ws.bindings.end() && !SameBindingIdentity(bit->second, binding))
+    {
+        last_error = "bind refused: binding id '" + binding.id
+                   + "' already names different hardware";
+        return std::nullopt;
+    }
+
+    /* True no-op: the binding already exists identically and the
+       zone row already says what was asked. */
+    const auto sit = ws.device_settings.find(iid);
+    if(bit != ws.bindings.end() && sit != ws.device_settings.end())
+    {
+        const auto zit = sit->second.zones.find(zone_id);
+        if(zit != sit->second.zones.end()
+           && zit->second.binding   == binding.id
+           && zit->second.addr_base == addr_base
+           && zit->second.verified  == verified)
+        {
+            return std::nullopt;
+        }
+    }
+
+    EditorEdit e;
+    e.label = "bind " + iid + "/" + zone_id;
+    if(bit == ws.bindings.end())
+    {
+        SnapshotKey(e.bindings, ws.bindings, binding.id);
+        ws.bindings[binding.id] = binding;
+        CaptureKey(e.bindings, ws.bindings, binding.id);
+    }
+    SnapshotKey(e.settings, ws.device_settings, iid);
+    ws.device_settings[iid].zones[zone_id] =
+        { binding.id, addr_base, verified };
+    CaptureKey(e.settings, ws.device_settings, iid);
+    return e;
+}
+
+std::optional<EditorEdit>
+EditorController::UnbindZone(const std::string& iid,
+                             const std::string& zone_id)
+{
+    last_error.clear();
+    if(gesture.active)
+    {
+        last_error = "unbind refused: finish the drag first";
+        return std::nullopt;
+    }
+    if(!Exists(iid))
+    {
+        last_error = "unbind refused: unknown instance " + iid;
+        return std::nullopt;
+    }
+    if(IsLocked(iid))
+    {
+        last_error = "unbind refused: " + iid + " is locked";
+        return std::nullopt;
+    }
+    const auto sit = ws.device_settings.find(iid);
+    if(sit == ws.device_settings.end())
+    {
+        return std::nullopt;
+    }
+    const auto zit = sit->second.zones.find(zone_id);
+    if(zit == sit->second.zones.end()
+       || (zit->second.binding.empty() && zit->second.addr_base == 0
+           && !zit->second.verified))
+    {
+        return std::nullopt;
+    }
+    EditorEdit e;
+    e.label = "unbind " + iid + "/" + zone_id;
+    SnapshotKey(e.settings, ws.device_settings, iid);
+    ws.device_settings[iid].zones.erase(zone_id);
+    CaptureKey(e.settings, ws.device_settings, iid);
+    return e;
+}
+
+std::optional<EditorEdit>
+EditorController::SetZoneParams(const std::string& iid,
+                                const std::string& zone_id,
+                                int addr_base, bool verified)
+{
+    last_error.clear();
+    if(gesture.active)
+    {
+        last_error = "zone params refused: finish the drag first";
+        return std::nullopt;
+    }
+    if(!Exists(iid))
+    {
+        last_error = "zone params refused: unknown instance " + iid;
+        return std::nullopt;
+    }
+    if(IsLocked(iid))
+    {
+        last_error = "zone params refused: " + iid + " is locked";
+        return std::nullopt;
+    }
+    if(addr_base < 0)
+    {
+        addr_base = 0;
+    }
+    const auto sit = ws.device_settings.find(iid);
+    if(sit == ws.device_settings.end())
+    {
+        last_error = "zone params refused: " + iid + " has no zones";
+        return std::nullopt;
+    }
+    const auto zit = sit->second.zones.find(zone_id);
+    if(zit == sit->second.zones.end() || zit->second.binding.empty())
+    {
+        last_error = "zone params refused: " + iid + "/" + zone_id
+                   + " is not bound";
+        return std::nullopt;
+    }
+    if(zit->second.addr_base == addr_base
+       && zit->second.verified == verified)
+    {
+        return std::nullopt;
+    }
+    EditorEdit e;
+    e.label = "zone params " + iid + "/" + zone_id;
+    SnapshotKey(e.settings, ws.device_settings, iid);
+    DeviceSettings& s = ws.device_settings[iid];
+    s.zones[zone_id].addr_base = addr_base;
+    s.zones[zone_id].verified  = verified;
+    CaptureKey(e.settings, ws.device_settings, iid);
+    return e;
+}
+
+/*---------------------------------------------------------*\
 || Snapping                                                 ||
 \*---------------------------------------------------------*/
 Vec3 EditorController::SnapTranslate(const Vec3& v, float step_m)

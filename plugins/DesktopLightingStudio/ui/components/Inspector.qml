@@ -47,6 +47,12 @@ Rectangle {
         return (h !== null && h.objectName !== undefined) ? h : null
     }
 
+    /* Task 4.3 — "Edit type…" / "Edit as variant…" on the selected
+       instance open the device-preset editor (the workspace hosts
+       the panel; the inspector only emits the request). */
+    signal editTypeRequested(string typeId, string instanceId)
+    signal editVariantRequested(string typeId, string instanceId)
+
     /* True while any numeric/text field inside the panel holds
        focus — StudioScene gates its shortcuts on this through the
        focusPeer seam so typing here never triggers W/E/F/undo. */
@@ -320,6 +326,59 @@ Rectangle {
                                      : ({})
                     KV { k: "id";   v: parent.st.id   || "—" }
                     KV { k: "type"; v: parent.st.type || "—" }
+                    Row {
+                        spacing: th.spHalf
+                        height: 24
+                        /* Edit the instance's type in the preset
+                           editor — the type file, not this
+                           instance's placement. */
+                        Button {
+                            text: "Edit type…"
+                            height: 22
+                            enabled: (parent.parent.st.type || "") !== ""
+                            onClicked: insp.editTypeRequested(
+                                parent.parent.st.type, insp.targetId())
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? th.text
+                                                      : th.textFaint
+                                font.pixelSize: th.fontBody
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: th.radiusSm
+                                color: parent.down ? th.accentBg
+                                     : (parent.hovered ? th.panelAlt
+                                                       : th.field)
+                                border.color: parent.visualFocus
+                                              ? th.accent : th.borderHi
+                            }
+                        }
+                        Button {
+                            text: "Edit as variant…"
+                            height: 22
+                            enabled: (parent.parent.st.type || "") !== ""
+                            onClicked: insp.editVariantRequested(
+                                parent.parent.st.type, insp.targetId())
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? th.text
+                                                      : th.textFaint
+                                font.pixelSize: th.fontBody
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: th.radiusSm
+                                color: parent.down ? th.accentBg
+                                     : (parent.hovered ? th.panelAlt
+                                                       : th.field)
+                                border.color: parent.visualFocus
+                                              ? th.accent : th.borderHi
+                            }
+                        }
+                    }
                 }
             }
         }

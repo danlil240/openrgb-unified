@@ -43,6 +43,9 @@ Rectangle {
        lands on the scene's own DropArea). */
     property var bridgeOverride: null
     property var sceneView: null
+    /* Task 4.3 — the row "Edit" action opens the preset editor for
+       the type (the workspace hosts the panel). */
+    signal editRequested(string typeId)
     function br() {
         if (bridgeOverride !== null)
             return bridgeOverride
@@ -486,7 +489,8 @@ Rectangle {
 
                     Column {
                         width: parent.width - 34 - starBtn.width
-                               - addBtn.width - th.spHalf * 4
+                               - addBtn.width - editBtn.width
+                               - th.spHalf * 5
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 1
                         Text {
@@ -533,6 +537,14 @@ Rectangle {
                             enabled: lib.hasBr()
                             onClicked: lib.addAtCenter(row.typeId)
                         }
+                    }
+                    IconBtn {
+                        id: editBtn
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "✎"
+                        tip: "Edit type — dimensions, zones, layout, "
+                           + "preview"
+                        onClicked: lib.editRequested(row.typeId)
                     }
                 }
             }
