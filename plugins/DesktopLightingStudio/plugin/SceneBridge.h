@@ -76,6 +76,10 @@ class SceneBridge : public QObject
     /* Camera pose/view — editor prefs persisted in meta.camera;
        never undo history, never the scene. */
     Q_PROPERTY(QVariantMap cameraState READ cameraState NOTIFY cameraChanged)
+    /* Render prefs (meta.render) — the viewport quality tier and
+       the display-only bloom toggle. */
+    Q_PROPERTY(QString renderQuality READ renderQuality WRITE setRenderQuality NOTIFY renderPrefsChanged)
+    Q_PROPERTY(bool renderBloom READ renderBloom WRITE setRenderBloom NOTIFY renderPrefsChanged)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -122,6 +126,14 @@ public:
     QObject*        objectModel() const;
     QVariantList    selectedInstances() const;
     QVariantMap     cameraState() const;
+
+    /* Render prefs (meta.render): low|balanced|high tier +
+       display-only bloom flag. Dirty/autosave path like
+       setCameraState — never undo, never the scene. */
+    QString         renderQuality() const { return QString::fromStdString(meta.render.quality); }
+    bool            renderBloom() const { return meta.render.bloom; }
+    void            setRenderQuality(const QString& q);
+    void            setRenderBloom(bool on);
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -253,6 +265,9 @@ signals:
     void recoveryAvailable();
     /* meta.camera changed (setCameraState or a workspace load). */
     void cameraChanged();
+    /* meta.render changed (setRenderQuality/setRenderBloom or a
+       workspace load). */
+    void renderPrefsChanged();
 
 private:
     friend class SceneColorCommand;

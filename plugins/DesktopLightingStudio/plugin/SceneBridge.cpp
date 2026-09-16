@@ -718,7 +718,8 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
     doc       = w.scene;
     doc.name  = w.meta.name;
     meta      = w.meta;
-    emit cameraChanged();   /* loaded prefs replace the live pose */
+    emit cameraChanged();      /* loaded prefs replace the live pose */
+    emit renderPrefsChanged(); /* loaded render tier/bloom too */
 
     editor.ClearSelection();
     if(!selected.isEmpty())
@@ -1367,6 +1368,34 @@ void SceneBridge::setCameraState(const QVariantMap& state)
     if(c.span     <= 0.0f) { c.span     = 0.9f;  }
     markDirty();
     emit cameraChanged();
+}
+
+void SceneBridge::setRenderQuality(const QString& q)
+{
+    /* Same dirty/autosave path as camera prefs — editor chrome,
+       never undo history, never the scene. */
+    if(q != "low" && q != "balanced" && q != "high")
+    {
+        return;
+    }
+    if(meta.render.quality == q.toStdString())
+    {
+        return;
+    }
+    meta.render.quality = q.toStdString();
+    markDirty();
+    emit renderPrefsChanged();
+}
+
+void SceneBridge::setRenderBloom(bool on)
+{
+    if(meta.render.bloom == on)
+    {
+        return;
+    }
+    meta.render.bloom = on;
+    markDirty();
+    emit renderPrefsChanged();
 }
 
 bool SceneBridge::dirty() const

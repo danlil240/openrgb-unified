@@ -321,6 +321,28 @@ Rectangle {
                 }
             }
 
+            Item { width: th.spHalf; height: 1 }
+
+            /* Render quality tier (spec §3) — persisted through
+               bridge.renderQuality (meta.render.quality). */
+            Text {
+                text: "Quality"; color: th.textDim; font.pixelSize: th.fontSmall
+                anchors.verticalCenter: parent.verticalCenter
+                /* First chrome to give way when the header crowds. */
+                visible: ws.width > 1100
+            }
+            Repeater {
+                model: ["low", "balanced", "high"]
+                HBtn {
+                    required property string modelData
+                    text: modelData.charAt(0).toUpperCase() + modelData.slice(1)
+                    w: modelData === "balanced" ? 66 : 44
+                    visible: ws.width > 1100
+                    active: scene.qualityTier === modelData
+                    onClicked: scene.setQualityTier(modelData)
+                }
+            }
+
             Item { width: th.sp; height: 1 }
 
             /* Selection readout (the old scene-bar label — prefers

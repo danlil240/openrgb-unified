@@ -247,6 +247,24 @@ int main(int argc, char** argv)
         fprintf(stderr, "after-shift-click dbg=%s\n",
                 root ? qPrintable(root->property("dbg").toString()) : "?");
 
+        // --- Tier perf: mean grabFramebuffer (render+readback) cost
+        // per quality tier. Exercises the full persisted path —
+        // setRenderQuality -> renderPrefsChanged -> qualityTier ->
+        // StudioEnvironment. Comparative, not absolute ms/frame.
+        for(const char* tier : { "low", "balanced", "high" })
+        {
+            bridge.setRenderQuality(QString::fromLatin1(tier));
+            pump(300);
+            QElapsedTimer ft; ft.start();
+            const int N = 30;
+            for(int i = 0; i < N; i++)
+                w.grabFramebuffer();
+            fprintf(stderr, "tier=%s avg-grab=%.2f ms\n", tier,
+                    (double)ft.elapsed() / N);
+        }
+        bridge.setRenderQuality(QStringLiteral("balanced"));
+        pump(200);
+
         QImage img = w.grabFramebuffer();
         // Count non-near-black pixels to distinguish "renders" from "black".
         long lit = 0;

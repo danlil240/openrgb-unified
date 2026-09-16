@@ -98,6 +98,16 @@ DISTFILES += \
     ui/editor/SelectionController.qml \
     ui/editor/TransformGizmo.qml \
     ui/editor/TransformInspector.qml \
+    ui/devices/Keyboard.qml \
+    ui/devices/Mouse.qml \
+    ui/devices/Fan.qml \
+    ui/devices/Ram.qml \
+    ui/devices/Case.qml \
+    ui/devices/Gpu.qml \
+    ui/devices/Monitor.qml \
+    ui/devices/Strip.qml \
+    ui/devices/SelectionFrame.qml \
+    ui/materials/StudioEnvironment.qml \
     schemas/studio.schema.json \
     schemas/device.schema.json \
     presets/devices/desk.device.json \

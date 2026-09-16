@@ -10,6 +10,16 @@
         <file alias="editor/SelectionController.qml">editor/SelectionController.qml</file>
         <file alias="editor/TransformGizmo.qml">editor/TransformGizmo.qml</file>
         <file alias="editor/TransformInspector.qml">editor/TransformInspector.qml</file>
+        <file alias="devices/Keyboard.qml">devices/Keyboard.qml</file>
+        <file alias="devices/Mouse.qml">devices/Mouse.qml</file>
+        <file alias="devices/Fan.qml">devices/Fan.qml</file>
+        <file alias="devices/Ram.qml">devices/Ram.qml</file>
+        <file alias="devices/Case.qml">devices/Case.qml</file>
+        <file alias="devices/Gpu.qml">devices/Gpu.qml</file>
+        <file alias="devices/Monitor.qml">devices/Monitor.qml</file>
+        <file alias="devices/Strip.qml">devices/Strip.qml</file>
+        <file alias="devices/SelectionFrame.qml">devices/SelectionFrame.qml</file>
+        <file alias="materials/StudioEnvironment.qml">materials/StudioEnvironment.qml</file>
         <file alias="studio.schema.json">../schemas/studio.schema.json</file>
         <file alias="device.schema.json">../schemas/device.schema.json</file>
         <file alias="presets/devices/desk.device.json">../presets/devices/desk.device.json</file>

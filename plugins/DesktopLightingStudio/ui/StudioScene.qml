@@ -24,6 +24,8 @@
 import QtQuick
 import QtQuick3D
 import "editor" as Ed
+import "devices" as Dev
+import "materials" as Mats
 
 Rectangle {
     id: root
@@ -40,6 +42,10 @@ Rectangle {
     property var focusPeer: null
     readonly property var editorCtl: selCtl
     readonly property var editorCam: camCtl
+    /* Test seam: the tiered environment instance (probe/qml tests
+       verify AA/AO/glow follow qualityTier without reaching into
+       the View3D). */
+    readonly property var sceneEnvironment: sceneEnv
     function editingText() {
         return inspector.textFocus
                || (focusPeer && focusPeer.textFocus)
@@ -49,9 +55,44 @@ Rectangle {
     property string dbg: ""
     property real camYaw: cameraOrigin.eulerRotation.y
 
+    /* Render quality tier (spec §3): low | balanced | high.
+       Persisted as meta.render.quality through the bridge's
+       renderQuality WRITE — the workspace header's quality
+       buttons route here. Without a bridge (tests) the tier
+       is a plain local property. */
+    property string qualityTier: "balanced"
+    function setQualityTier(q) {
+        if (q !== "low" && q !== "balanced" && q !== "high")
+            return
+        qualityTier = q
+        if (typeof bridge !== "undefined")
+            bridge.renderQuality = q
+    }
+
+    /* Device-family dispatch: geometry tag -> family component
+       source (ui/devices/). Empty = the generic primitive path
+       below (desk + anything unknown). mouse_zone / group have
+       no body — emitter dots only, as before. */
+    function familySource(geom) {
+        switch (geom) {
+        case "keyboard_body": return "devices/Keyboard.qml"
+        case "mouse_body":    return "devices/Mouse.qml"
+        case "fan_body":
+        case "pump_body":     return "devices/Fan.qml"
+        case "ram_body":      return "devices/Ram.qml"
+        case "case_shell":    return "devices/Case.qml"
+        case "gpu_body":      return "devices/Gpu.qml"
+        case "gpu_logo":      return "devices/Strip.qml"
+        case "monitor":       return "devices/Monitor.qml"
+        default:              return ""
+        }
+    }
+
     // Canonical body specs — dispatch on the geometry string.
     // #Cube/#Cylinder/#Sphere are 100-unit primitives, so scale =
     // meters / 100. transform.scale stays dimensionless on the node.
+    // Family-handled tags keep their entry here for the ghost flag;
+    // the fallback Model only renders when familySource() is empty.
     function bodySpec(geom) {
         switch (geom) {
         case "desk":          return { src: "#Cube",     c: "#4a3b32" }
@@ -180,10 +221,15 @@ Rectangle {
         onHeightChanged: if (typeof camCtl !== "undefined" && camCtl) camCtl.apply()
         onWidthChanged:  if (typeof camCtl !== "undefined" && camCtl) camCtl.apply()
 
-        environment: SceneEnvironment {
-            backgroundMode: SceneEnvironment.Color
-            clearColor: "#101014"
-            antialiasingMode: SceneEnvironment.NoAA
+        /* Tiered environment (spec §3 "Rendering"): AA, contact
+           shading and restrained bloom scale with qualityTier;
+           the emitter color buffer and NoLighting dots are
+           identical under every tier. */
+        environment: Mats.StudioEnvironment {
+            id: sceneEnv
+            quality: root.qualityTier
+            bloomPref: (typeof bridge !== "undefined")
+                       ? bridge.renderBloom : true
         }
 
         // Camera rig: `origin` carries the pose (position = target,
@@ -209,16 +255,40 @@ Rectangle {
             }
         }
 
+        /* Small fixed lighting rig (spec: "a small lighting rig
+           rather than one real light per LED") — key + cool fill +
+           rim + a soft desk pool. Shadows are a High-tier
+           decoration; tiers never touch the emitter path. */
         DirectionalLight {
-            eulerRotation.x: -35
-            eulerRotation.y: -25
-            brightness: 1.1
+            // key
+            eulerRotation.x: -50
+            eulerRotation.y: -35
+            brightness: 1.5
+            castsShadow: root.qualityTier === "high"
+            shadowFactor: 35
+            shadowBias: 0.02
+            softShadowQuality: Light.PCF16
+            pcfFactor: 2.0
         }
-
+        DirectionalLight {
+            // cool fill
+            eulerRotation.x: -25
+            eulerRotation.y: 115
+            brightness: 0.45
+            color: "#8e97b8"
+        }
+        DirectionalLight {
+            // rim from behind
+            eulerRotation.x: -10
+            eulerRotation.y: 205
+            brightness: 0.8
+            color: "#b9c2dd"
+        }
         PointLight {
-            position: Qt.vector3d(0.4, 0.6, 0.5)
-            brightness: 6
-            color: "#9090b0"
+            // soft desk pool
+            position: Qt.vector3d(0.25, 0.7, 0.2)
+            brightness: 4
+            color: "#a8b0cc"
         }
 
         // Scene objects — the stable QAbstractListModel is the
@@ -259,6 +329,11 @@ Rectangle {
                 property real   oBy:     rf("by", 0)
                 property real   oBz:     rf("bz", 0)
                 property var    spec:    root.bodySpec(oGeom)
+                /* Ghost-shell flag the family components read via
+                   ctx — kept here so the pick-exclusion rule stays
+                   next to the spec lookup. */
+                readonly property bool ghostBody:
+                    spec !== null && spec.ghost === true
 
                 // Structure (positions) and colors are split: the
                 // Repeater's model is emitterPos, which only changes
@@ -312,13 +387,26 @@ Rectangle {
                     function onSceneChanged() { objNode.reloadLayout() }
                 }
 
-                // Body mesh — ghost shells (the case) are translucent
-                // containers; leaving them pickable would swallow
-                // every pick aimed at hardware inside them.
+                /* Device-family body — Loader3D swaps in the
+                   per-family component for known geometry tags.
+                   The loaded root gets `ctx` = this delegate, so it
+                   reads the resolved size (oBx/oBy/oBz), pick id,
+                   ghost flag and the shared emitter arrays without
+                   any per-family plumbing. */
+                Loader3D {
+                    id: bodyLoader
+                    source: root.familySource(objNode.oGeom)
+                    onLoaded: item.ctx = objNode
+                }
+
+                // Generic fallback body — ghost shells (the case)
+                // are translucent containers; leaving them pickable
+                // would swallow every pick aimed at hardware inside.
                 Model {
                     objectName: "obj|" + objNode.oId
-                    pickable: !(objNode.spec && objNode.spec.ghost)
+                    pickable: !objNode.ghostBody
                     visible: objNode.spec !== null
+                             && root.familySource(objNode.oGeom) === ""
                     source: objNode.spec ? objNode.spec.src : "#Cube"
                     scale: objNode.spec
                            ? Qt.vector3d(objNode.oBx / 100,
@@ -344,7 +432,10 @@ Rectangle {
                         Model {
                             source: "#Sphere"
                             position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
-                            property real d: root.emitterSize(objNode.oGeom) / 100
+                            /* Paint tool = LED mapping mode: enlarged
+                               address markers (spec §3). */
+                            property real d: root.emitterSize(objNode.oGeom)
+                                             * (selCtl.tool === 2 ? 1.6 : 1.0) / 100
                             scale: Qt.vector3d(d, d, d)
                             materials: PrincipledMaterial {
                                 lighting: PrincipledMaterial.NoLighting
@@ -375,16 +466,18 @@ Rectangle {
                     }
                 }
 
-                // Selection marker
-                Model {
-                    visible: (typeof bridge !== "undefined") && bridge.selectedId === objNode.oId
-                    source: "#Sphere"
-                    position: Qt.vector3d(0, 0.09, 0)
-                    scale: Qt.vector3d(0.00014, 0.00014, 0.00014)
-                    materials: PrincipledMaterial {
-                        lighting: PrincipledMaterial.NoLighting
-                        baseColor: "#ffd040"
-                    }
+                /* Selection treatment (spec §3): bounds frame +
+                   corner handles instead of the old floating dot —
+                   visible for the selected object AND every member
+                   of the multi-selection. */
+                Dev.SelectionFrame {
+                    bx: objNode.oBx
+                    by: objNode.oBy
+                    bz: objNode.oBz
+                    visible: (typeof bridge !== "undefined")
+                             && (bridge.selectedId === objNode.oId
+                                 || bridge.selectedInstances.indexOf(
+                                        objNode.oInst) >= 0)
                 }
             }
         }
@@ -588,6 +681,13 @@ Rectangle {
     Connections {
         target: (typeof bridge !== "undefined") ? bridge : null
         function onCameraChanged() { camCtl.applyFromBridge() }
+        function onRenderPrefsChanged() {
+            /* Workspace load / external edit re-reads the persisted
+               tier; the setter path (setQualityTier) writes through
+               the bridge instead of assigning here. */
+            if (typeof bridge !== "undefined")
+                root.qualityTier = bridge.renderQuality
+        }
     }
 
     /* Focus loss mid-space-hold would leave a sticky pan modifier —
@@ -609,5 +709,10 @@ Rectangle {
         }
     }
 
-    Component.onCompleted: camCtl.applyFromBridge()
+    Component.onCompleted: {
+        if (typeof bridge !== "undefined"
+            && bridge.renderQuality !== undefined)
+            qualityTier = bridge.renderQuality
+        camCtl.applyFromBridge()
+    }
 }
