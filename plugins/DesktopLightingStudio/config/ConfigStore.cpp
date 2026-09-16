@@ -17,6 +17,8 @@
 #include <QStringList>
 #include <QTimer>
 
+#include <set>
+
 namespace studio
 {
 
@@ -478,67 +480,121 @@ bool ConfigStore::InstallTypes(StudioDocument& doc,
         }
         return false;
     }
+
+    /* Pass 1 — decide each type's on-disk id WITHOUT writing:
+       a same-content file is reused; a same-id/different-content
+       conflict takes a suffixed variant id (a local type is never
+       overwritten silently). Deciding up front lets pass 2 remap
+       EVERY reference before any file lands — not just
+       devices.*.type but also the child-entity `type` refs inside
+       the other extracted types, so a renamed type never leaves a
+       dangling nested ref behind. `reserved` keeps two same-base
+       types from picking the same free suffix. */
+    std::map<std::string, std::string> renames;   /* orig -> final */
+    std::set<std::string>              reserved;
     for(DevicePreset& p : types)
     {
-        QString target = PresetDir() + "/"
-                         + QString::fromStdString(p.id) + ".device.json";
+        reserved.insert(p.id);
+    }
+    for(DevicePreset& p : types)
+    {
+        const QString path = PresetDir() + "/"
+                             + QString::fromStdString(p.id)
+                             + ".device.json";
+        if(!QFileInfo::exists(path))
+        {
+            continue;
+        }
+        DevicePreset existing;
+        if(DevicePresetFromJsonFile(path.toStdString(), existing, nullptr)
+           && ToJson(existing) == ToJson(p))
+        {
+            continue;                /* identical — reuse */
+        }
+        const std::string base = p.id;
+        for(int n = 2;; n++)
+        {
+            const std::string alt = base + "-" + std::to_string(n);
+            if(reserved.count(alt))
+            {
+                continue;
+            }
+            const QString alt_path = PresetDir() + "/"
+                + QString::fromStdString(alt) + ".device.json";
+            if(!QFileInfo::exists(alt_path))
+            {
+                renames[base] = alt;
+                reserved.insert(alt);
+                p.id = alt;
+                break;
+            }
+            /* An existing -n file with identical content is a
+               reuse hit too. */
+            DevicePreset other;
+            if(DevicePresetFromJsonFile(alt_path.toStdString(), other, nullptr)
+               && other.id == alt)
+            {
+                DevicePreset candidate = p;
+                candidate.id = alt;
+                if(ToJson(candidate) == ToJson(other))
+                {
+                    renames[base] = alt;
+                    reserved.insert(alt);
+                    p.id = alt;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Pass 2 — apply the renames: workspace device refs and the
+       nested `type` refs inside every extracted type. */
+    for(DevicePreset& p : types)
+    {
+        for(auto& kv : p.entities)
+        {
+            const auto it = renames.find(kv.second.type);
+            if(it != renames.end())
+            {
+                kv.second.type = it->second;
+            }
+        }
+    }
+    for(auto& kv : doc.devices)
+    {
+        const auto it = renames.find(kv.second.type);
+        if(it != renames.end())
+        {
+            kv.second.type = it->second;
+        }
+    }
+
+    /* Pass 3 — write. The identical check runs again on the FINAL
+       content: a type whose only difference was a remapped ref can
+       still be a reuse hit. */
+    for(const DevicePreset& p : types)
+    {
+        const QString target = PresetDir() + "/"
+                               + QString::fromStdString(p.id)
+                               + ".device.json";
         if(QFileInfo::exists(target))
         {
-            /* Same content — reuse; different content — never
-               overwrite a local type silently, write a variant id
-               and remap the references. */
             DevicePreset existing;
             if(DevicePresetFromJsonFile(target.toStdString(), existing, nullptr)
                && ToJson(existing) == ToJson(p))
             {
-                continue;
+                continue;            /* identical — reuse */
             }
-            const std::string base = p.id;
-            for(int n = 2;; n++)
+            /* Shouldn't happen — pass 1 reserved the id — but a
+               race with an external write must never overwrite a
+               local type silently. */
+            if(error)
             {
-                const std::string alt = base + "-" + std::to_string(n);
-                const QString alt_path = PresetDir() + "/"
-                    + QString::fromStdString(alt) + ".device.json";
-                if(!QFileInfo::exists(alt_path))
-                {
-                    p.id = alt;
-                    for(auto& kv : doc.devices)
-                    {
-                        if(kv.second.type == base)
-                        {
-                            kv.second.type = alt;
-                        }
-                    }
-                    target = alt_path;
-                    break;
-                }
-                /* An existing -n file with identical content is a
-                   reuse hit too. */
-                DevicePreset other;
-                if(DevicePresetFromJsonFile(alt_path.toStdString(), other, nullptr)
-                   && other.id == alt)
-                {
-                    DevicePreset candidate = p;
-                    candidate.id = alt;
-                    if(ToJson(candidate) == ToJson(other))
-                    {
-                        p.id = alt;
-                        for(auto& kv : doc.devices)
-                        {
-                            if(kv.second.type == base)
-                            {
-                                kv.second.type = alt;
-                            }
-                        }
-                        target.clear();
-                        break;
-                    }
-                }
+                *error = QStringLiteral("%1: a different type file"
+                                        " appeared during install")
+                             .arg(target);
             }
-            if(target.isEmpty())
-            {
-                continue;
-            }
+            return false;
         }
         const QByteArray bytes =
             QByteArray::fromStdString(ToJson(p).dump(2)) + "\n";

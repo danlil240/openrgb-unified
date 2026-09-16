@@ -23,6 +23,7 @@
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
+#include "../presets/PresetBundle.h"
 #include "../editor/PresetListModel.h"
 #include "../editor/SceneObjectModel.h"
 #include "../effects/Presets.h"
@@ -2429,6 +2430,207 @@ bool SceneBridge::saveSceneAs(const QString& path)
     }
     setStatus(QStringLiteral("saved copy to %1").arg(path));
     return true;
+}
+
+/*---------------------------------------------------------*\
+||| Task 4.4 — portable export/import + validated reload   ||
+|||                                                           ||
+|||   The bundle core is Qt-free (presets/PresetBundle);    ||
+|||   these slots are the Qt glue: they translate the       ||
+|||   filesystem paths and the conflict choices, then run   ||
+|||   the imported candidate through the SAME               ||
+|||   resolve-then-apply path LoadWorkspace uses.           ||
+\*---------------------------------------------------------*/
+QVariantMap SceneBridge::inspectBundle(const QString& dirPath)
+{
+    QVariantMap out;
+    if(store == nullptr || dirPath.isEmpty())
+    {
+        out["ok"]    = false;
+        out["error"] = QStringLiteral("workspace unavailable");
+        return out;
+    }
+    ImportPlan plan;
+    std::vector<std::string> errors;
+    if(!InspectBundle(dirPath.toStdString(), registry, plan, &errors))
+    {
+        out["ok"]    = false;
+        out["error"] = QString::fromStdString(
+            errors.empty() ? "invalid bundle" : errors.front());
+        return out;
+    }
+    QVariantList types;
+    QStringList  conflicts;
+    for(const BundleType& bt : plan.types)
+    {
+        QVariantMap t;
+        t["id"]   = QString::fromStdString(bt.id);
+        t["name"] = QString::fromStdString(bt.preset.name);
+        t["status"] = (bt.status == BundleType::Status::New)       ? "new"
+                    : (bt.status == BundleType::Status::Identical) ? "identical"
+                                                                   : "conflict";
+        if(bt.has_local)
+        {
+            t["localName"] = QString::fromStdString(bt.local.name);
+        }
+        types.push_back(t);
+        if(bt.status == BundleType::Status::Conflict)
+        {
+            conflicts << QString::fromStdString(bt.id);
+        }
+    }
+    QStringList warns;
+    for(const std::string& w : plan.warnings)
+    {
+        warns << QString::fromStdString(w);
+    }
+    out["ok"]        = true;
+    out["types"]     = types;
+    out["conflicts"] = conflicts;
+    out["devices"]   = (int)plan.workspace.devices.size();
+    out["assets"]    = (int)plan.assets.size();
+    out["warnings"]  = warns;
+    return out;
+}
+
+bool SceneBridge::exportBundle(const QString& dirPath, bool overwrite)
+{
+    if(store == nullptr || dirPath.isEmpty())
+    {
+        setStatus(QStringLiteral("workspace unavailable — cannot export"));
+        return false;
+    }
+    std::vector<std::string> errors, warnings;
+    unsigned int ntypes = 0, nassets = 0;
+    if(!ExportBundle(dirPath.toStdString(), CurrentWorkspace(), registry,
+                     store->PresetDir().toStdString(), &errors, &warnings,
+                     overwrite, &ntypes, &nassets))
+    {
+        setStatus(QStringLiteral("export failed: %1")
+            .arg(QString::fromStdString(
+                errors.empty() ? "unknown" : errors.front())));
+        return false;
+    }
+    for(const std::string& w : warnings)
+    {
+        emit statusMessage(QStringLiteral("export: %1")
+                               .arg(QString::fromStdString(w)));
+    }
+    setStatus(QStringLiteral("exported %1 type(s) + %2 asset(s) to %3")
+                  .arg(ntypes).arg(nassets).arg(dirPath));
+    return true;
+}
+
+bool SceneBridge::importBundle(const QString& dirPath,
+                               const QVariantMap& choices)
+{
+    /* Import intent kills any live gesture — its snapshot belongs
+       to the document about to be replaced (or kept, on failure). */
+    editor.Cancel();
+    if(api == nullptr || store == nullptr || dirPath.isEmpty())
+    {
+        setStatus(QStringLiteral("workspace unavailable — cannot import"));
+        return false;
+    }
+    ImportPlan plan;
+    std::vector<std::string> errors;
+    if(!InspectBundle(dirPath.toStdString(), registry, plan, &errors))
+    {
+        setStatus(QStringLiteral("import rejected: %1")
+            .arg(QString::fromStdString(
+                errors.empty() ? "invalid bundle" : errors.front())));
+        return false;
+    }
+    std::map<std::string, std::string> cmap;
+    for(auto it = choices.constBegin(); it != choices.constEnd(); ++it)
+    {
+        cmap[it.key().toStdString()] = it.value().toString().toStdString();
+    }
+    StudioDocument candidate;
+    std::vector<std::string> warnings;
+    if(!ApplyImport(plan, cmap, store->PresetDir().toStdString(),
+                    candidate, &errors, &warnings))
+    {
+        setStatus(QStringLiteral("import failed: %1")
+            .arg(QString::fromStdString(
+                errors.empty() ? "unknown" : errors.front())));
+        return false;
+    }
+    /* Belt and suspenders: ApplyImport already sanitizes, but the
+       runtime switch is ours to guard — imported content never
+       arms live output. */
+    candidate.meta.live_on_startup = false;
+
+    /* Pick up the just-written type files, then resolve — same
+       candidate->resolve->apply ordering as LoadWorkspace. A
+       rejected candidate leaves the current scene/inputs/output
+       untouched. */
+    ReloadPresets();
+    SceneDocument resolved;
+    std::vector<std::string> rerrs;
+    if(!ResolveScene(candidate, registry, resolved, &rerrs))
+    {
+        setStatus(QStringLiteral("imported workspace failed to resolve"
+                                 " — scene kept: %1")
+            .arg(QString::fromStdString(
+                rerrs.empty() ? "unknown" : rerrs.front())));
+        return false;
+    }
+    candidate.scene = resolved;
+    ApplyWorkspace(candidate);
+    /* The imported doc differs from studio.json until saved. */
+    store->MarkDirty();
+
+    for(const std::string& w : plan.warnings)
+    {
+        emit statusMessage(QStringLiteral("import: %1")
+                               .arg(QString::fromStdString(w)));
+    }
+    for(const std::string& w : warnings)
+    {
+        emit statusMessage(QStringLiteral("import: %1")
+                               .arg(QString::fromStdString(w)));
+    }
+    int n_new = 0, n_conflict = 0;
+    for(const BundleType& bt : plan.types)
+    {
+        if(bt.status == BundleType::Status::New)       { n_new++; }
+        if(bt.status == BundleType::Status::Conflict)  { n_conflict++; }
+    }
+    setStatus(QStringLiteral("imported %1 device(s): %2 new type(s),"
+                             " %3 remapped — bindings unverified,"
+                             " resolve them locally")
+                  .arg((int)candidate.devices.size())
+                  .arg(n_new).arg(n_conflict));
+    return true;
+}
+
+void SceneBridge::reloadDeviceTypes()
+{
+    /* Re-read presets/devices/ over the packaged defaults, then
+       re-resolve the workspace: every instance of an edited type
+       updates together while the devices section (placements) is
+       never rewritten. A workspace that no longer resolves keeps
+       the current scene. */
+    editor.Cancel();
+    ReloadPresets();
+    SceneDocument resolved;
+    if(!ResolveWorkspace(resolved))
+    {
+        return;    /* ResolveWorkspace already set the status */
+    }
+    doc      = resolved;
+    doc.name = workspace.meta.name;
+    /* adapter re-resolve + matrix/key rebuilds + model reset. */
+    refreshDevices();
+    setStatus(QStringLiteral("device types reloaded (%1 types)")
+                  .arg((int)registry.Ids().size()));
+}
+
+bool SceneBridge::presetIdAvailable(const QString& id) const
+{
+    const std::string s = id.toStdString();
+    return IsPresetId(s) && !registry.Contains(s);
 }
 
 bool SceneBridge::loadScene()

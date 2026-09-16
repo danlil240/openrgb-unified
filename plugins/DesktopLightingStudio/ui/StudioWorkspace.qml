@@ -242,6 +242,12 @@ Rectangle {
                         onTriggered: ws.host().uiSaveCopyAs() }
                     SMenuItem { text: "Reload studio.json"
                         onTriggered: ws.host().uiReload() }
+                    SMenuItem { text: "Export Bundle…"
+                        onTriggered: ws.host().uiExportBundle() }
+                    SMenuItem { text: "Import Bundle…"
+                        onTriggered: ws.host().uiImportBundle() }
+                    SMenuItem { text: "Reload Device Types"
+                        onTriggered: ws.host().uiReloadTypes() }
                     MenuSeparator {
                         contentItem: Rectangle {
                             implicitWidth: 160; implicitHeight: 1

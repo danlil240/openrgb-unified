@@ -310,6 +310,29 @@ public slots:
     /* Per-instance inspector state: authored local transform +
        visible/locked flags. Empty map for unknown ids. */
     Q_INVOKABLE QVariantMap instanceState(const QString& id) const;
+
+    /* Task 4.4 — portable bundles + explicit type reload.
+       exportBundle writes <dir>/studio.json (sanitized: no
+       serials/locations, verified + live flags off) plus one file
+       per used type and the referenced assets. inspectBundle
+       validates a bundle without writing and reports per-type
+       status (new|identical|conflict); importBundle applies it —
+       `choices` maps each conflict id to its import-as id — then
+       loads the returned candidate through the same
+       resolve-then-apply path LoadWorkspace uses, so a rejected
+       import leaves scene/inputs/output untouched. Imported
+       bindings never carry verified/live state — the status line
+       says they need local resolution. presetIdAvailable feeds
+       the conflict dialog's new-id field. reloadDeviceTypes
+       re-reads the type library and re-resolves so every instance
+       of an edited type updates together — placements untouched. */
+    Q_INVOKABLE QVariantMap inspectBundle(const QString& dirPath);
+    Q_INVOKABLE bool        exportBundle(const QString& dirPath,
+                                         bool overwrite);
+    Q_INVOKABLE bool        importBundle(const QString& dirPath,
+                                         const QVariantMap& choices);
+    Q_INVOKABLE void        reloadDeviceTypes();
+    Q_INVOKABLE bool        presetIdAvailable(const QString& id) const;
     /* Persist a camera gesture's final pose into meta.camera
        (editor prefs — dirty/autosave path, never undo). Keys:
        view, projection, tx/ty/tz, yaw, pitch, distance, span.

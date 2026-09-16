@@ -49,6 +49,12 @@ public:
     Q_INVOKABLE void        uiRestoreBackup();
     Q_INVOKABLE void        uiReset();
     Q_INVOKABLE void        uiOpenWorkspaceFolder();
+    /* Task 4.4 — portable bundles + explicit type reload. The
+       dialogs (dir picks, the same-id conflict choices) live
+       here; the bridge owns the semantics. */
+    Q_INVOKABLE void        uiExportBundle();
+    Q_INVOKABLE void        uiImportBundle();
+    Q_INVOKABLE void        uiReloadTypes();
     Q_INVOKABLE QStringList uiScreenNames() const;
 
     /* Diagnostics drawer — controller/zone pickers + the probe

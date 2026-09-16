@@ -19,11 +19,15 @@
 
 #include <QColorDialog>
 #include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QQmlContext>
@@ -35,6 +39,8 @@
 #include <QThread>
 #include <QVBoxLayout>
 #include <QVariantMap>
+
+#include <set>
 
 #include <chrono>
 #include <thread>
@@ -267,6 +273,149 @@ void StudioTab::uiOpenWorkspaceFolder()
     QDir().mkpath(dir);
     QDesktopServices::openUrl(
         QUrl::fromLocalFile(QFileInfo(dir).absoluteFilePath()));
+}
+
+void StudioTab::uiExportBundle()
+{
+    /* Pick (or create) a folder — the export writes studio.json +
+       presets/devices/ + assets/ into it. The bundle's own rule
+       refuses an occupied bundle dir; the prompt is the
+       overwrite flag the user grants. */
+    const QString dir = QFileDialog::getExistingDirectory(this,
+        QStringLiteral("Export studio bundle — pick or create a folder"),
+        bridge->workspaceDir());
+    if(dir.isEmpty())
+    {
+        return;
+    }
+    bool overwrite = false;
+    if(QFileInfo::exists(dir + QStringLiteral("/studio.json")))
+    {
+        const auto choice = QMessageBox::warning(this,
+            QStringLiteral("Overwrite bundle?"),
+            QStringLiteral("%1 already contains a studio.json bundle.\n"
+                           "Replace it?").arg(dir),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if(choice != QMessageBox::Yes)
+        {
+            return;
+        }
+        overwrite = true;
+    }
+    bridge->exportBundle(dir, overwrite);
+}
+
+void StudioTab::uiImportBundle()
+{
+    /* An imported bundle replaces the workspace — same dirty-loss
+       confirmation as a reload. */
+    if(!ConfirmLoseDirty(QStringLiteral("Importing a bundle")))
+    {
+        return;
+    }
+    const QString dir = QFileDialog::getExistingDirectory(this,
+        QStringLiteral("Import studio bundle"),
+        bridge->workspaceDir());
+    if(dir.isEmpty())
+    {
+        return;
+    }
+    const QVariantMap info = bridge->inspectBundle(dir);
+    if(!info.value(QStringLiteral("ok")).toBool())
+    {
+        AppendResult(QStringLiteral("import: %1")
+            .arg(info.value(QStringLiteral("error")).toString()));
+        return;
+    }
+    for(const QVariant& w : info.value(QStringLiteral("warnings")).toList())
+    {
+        AppendResult(QStringLiteral("import: %1").arg(w.toString()));
+    }
+
+    /* The only conflict resolution: a same-id/different-content
+       type imports under a NEW id — the local file is never
+       overwritten. One dialog collects all new ids; cancel
+       aborts the import cleanly (nothing was written — inspect
+       is read-only and apply never runs). */
+    const QStringList conflicts =
+        info.value(QStringLiteral("conflicts")).toStringList();
+    QVariantMap choices;
+    if(!conflicts.isEmpty())
+    {
+        QDialog dlg(this);
+        dlg.setWindowTitle(QStringLiteral("Resolve type conflicts"));
+        QVBoxLayout* lay = new QVBoxLayout(&dlg);
+        QLabel* intro = new QLabel(QStringLiteral(
+            "These bundled types differ from your local definitions.\n"
+            "Choose a new type id for each — the local file is kept."),
+            &dlg);
+        intro->setWordWrap(true);
+        lay->addWidget(intro);
+        std::vector<QLineEdit*> edits;
+        for(const QString& id : conflicts)
+        {
+            QHBoxLayout* row = new QHBoxLayout;
+            row->addWidget(new QLabel(id, &dlg));
+            QLineEdit* edit = new QLineEdit(&dlg);
+            QString cand = id + QStringLiteral("-import");
+            for(int n = 2; !bridge->presetIdAvailable(cand); n++)
+            {
+                cand = id + QStringLiteral("-import") + QString::number(n);
+            }
+            edit->setText(cand);
+            row->addWidget(edit, 1);
+            lay->addLayout(row);
+            edits.push_back(edit);
+        }
+        QDialogButtonBox* buttons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+        QObject::connect(buttons, &QDialogButtonBox::accepted,
+                         &dlg, &QDialog::accept);
+        QObject::connect(buttons, &QDialogButtonBox::rejected,
+                         &dlg, &QDialog::reject);
+        lay->addWidget(buttons);
+        for(;;)
+        {
+            if(dlg.exec() != QDialog::Accepted)
+            {
+                AppendResult(QStringLiteral("import cancelled"));
+                return;
+            }
+            choices.clear();
+            QStringList bad;
+            std::set<QString> seen;
+            for(size_t i = 0; i < (size_t)conflicts.size(); i++)
+            {
+                const QString nid = edits[i]->text().trimmed();
+                /* Valid charset, free locally, unique within the
+                   dialog — ApplyImport re-checks all of it. */
+                if(!bridge->presetIdAvailable(nid)
+                   || !seen.insert(nid).second)
+                {
+                    bad << nid;
+                }
+                choices.insert(conflicts[i], nid);
+            }
+            if(bad.isEmpty())
+            {
+                break;
+            }
+            QMessageBox::warning(&dlg, QStringLiteral("Invalid id"),
+                QStringLiteral("Invalid or already-used id: %1\n\n"
+                               "Type ids use letters, digits, '_' and "
+                               "'-', and must not collide with an "
+                               "existing type.")
+                    .arg(bad.join(QStringLiteral(", "))));
+        }
+    }
+    bridge->importBundle(dir, choices);
+}
+
+void StudioTab::uiReloadTypes()
+{
+    /* Type files change shape, never placements — no dirty prompt;
+       a failed re-resolve keeps the current scene. */
+    bridge->reloadDeviceTypes();
 }
 
 QStringList StudioTab::uiScreenNames() const

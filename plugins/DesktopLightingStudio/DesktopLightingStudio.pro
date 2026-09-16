@@ -36,6 +36,7 @@ HEADERS += \
     output/ControllerAdapter.h \
     presets/DevicePreset.h \
     presets/PresetRegistry.h \
+    presets/PresetBundle.h \
     scene/SceneTypes.h \
     scene/SceneGraph.h \
     scene/JsonFields.h \
@@ -68,6 +69,7 @@ SOURCES += \
     output/ControllerAdapter.cpp \
     presets/DevicePreset.cpp \
     presets/PresetRegistry.cpp \
+    presets/PresetBundle.cpp \
     scene/SceneTypes.cpp \
     scene/SceneGraph.cpp \
     scene/EmitterLayout.cpp \

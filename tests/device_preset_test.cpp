@@ -15,9 +15,11 @@
 #include "scene/SceneTypes.h"
 #include "scene/SceneGraph.h"
 #include "scene/DefaultDesk.h"
+#include "scene/SceneJson.h"
 #include "scene/SceneResolver.h"
 #include "presets/DevicePreset.h"
 #include "presets/PresetRegistry.h"
+#include "presets/PresetBundle.h"
 #include "config/StudioConfig.h"
 #include "config/ConfigMigration.h"
 #include "effects/EffectTypes.h"
@@ -32,6 +34,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -160,6 +163,55 @@ static void WriteFile(const std::filesystem::path& p, const json& j)
 {
     std::ofstream f(p, std::ios::binary);
     f << j.dump(2) << "\n";
+}
+
+static void WriteRaw(const std::filesystem::path& p, const std::string& s)
+{
+    std::ofstream f(p, std::ios::binary);
+    f << s;
+}
+
+static json ReadJson(const std::filesystem::path& p)
+{
+    std::ifstream f(p, std::ios::binary);
+    return json::parse(f);
+}
+
+static size_t CountTypeFiles(const std::filesystem::path& dir)
+{
+    size_t n = 0;
+    std::error_code ec;
+    for(const auto& e : std::filesystem::directory_iterator(dir, ec))
+    {
+        if(e.is_regular_file()
+           && e.path().filename().string().find(".device.json")
+                  != std::string::npos)
+        {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* A type whose only entity mounts another type — a nested
+   assembly used to exercise transitive-dep collection and
+   nested `type` ref remapping. */
+static json RefPreset(const std::string& id, const std::string& dep)
+{
+    return {
+        {"schema_version", 1},
+        {"id", id},
+        {"name", id},
+        {"category", "test"},
+        {"entities", {
+            {"mount", {
+                {"type", dep},
+                {"x", 0}, {"y", 0}, {"z", 0},
+                {"rx", 0}, {"ry", 0}, {"rz", 0},
+            }},
+        }},
+        {"zones", json::array()},
+    };
 }
 
 /* The bundled type library (the authoritative defaults layer the
@@ -2167,8 +2219,542 @@ static void TestDefaultWorkspaceParity()
           "defaults: bindings match expanded desk");
 }
 
+/*---------------------------------------------------------*\
+||| Task 4.4 — bundle export: transitive type set,         ||
+||| sanitization, assets, dest refusal.                    ||
+\*---------------------------------------------------------*/
+static void TestBundleExport()
+{
+    namespace fs = std::filesystem;
+    const auto src  = TempDir("bundle-src");
+    const auto sdir = src / "presets" / "devices";
+    fs::create_directories(sdir);
+    WriteFile(sdir / "fan-120.device.json",   FanPreset("fan-120", 8));
+    WriteFile(sdir / "ring-assy.device.json", RefPreset("ring-assy", "fan-120"));
+    WriteFile(sdir / "tower.device.json",     RefPreset("tower", "ring-assy"));
+    WriteFile(sdir / "unused-x.device.json",  FanPreset("unused-x", 4));
+
+    PresetRegistry reg;
+    std::vector<std::string> errors, warnings;
+    CHECK(reg.LoadDirectory(sdir.string(), &errors), "bexport: library loads");
+
+    /* Workspace: two fan instances + a tower (transitive
+       tower -> ring-assy -> fan-120). */
+    StudioDocument w = TwoFanWorkspace();
+    DeviceInstance t;
+    t.type     = "tower";
+    t.position = { 0.0f, 0.0f, 0.4f };
+    w.devices["tower_inst"] = t;
+    /* identity + flags the export must strip */
+    w.bindings["bus_a"].serial   = "SN-1234";
+    w.bindings["bus_a"].location = "USB:1-2";
+    w.meta.live_on_startup = true;
+    w.effect.playing       = true;
+
+    const auto dest = TempDir("bundle-out");
+    unsigned int nt = 0, na = 0;
+    CHECK(ExportBundle(dest.string(), w, reg, sdir.string(),
+                       &errors, &warnings, false, &nt, &na),
+          "bexport: writes the bundle");
+    CHECK(nt == 3,
+          "bexport: transitive set is fan-120 + ring-assy + tower");
+    CHECK(fs::exists(dest / "studio.json")
+          && fs::exists(dest / "presets" / "devices" / "fan-120.device.json")
+          && fs::exists(dest / "presets" / "devices" / "ring-assy.device.json")
+          && fs::exists(dest / "presets" / "devices" / "tower.device.json"),
+          "bexport: studio.json + every used type file");
+    CHECK(!fs::exists(dest / "presets" / "devices" / "unused-x.device.json"),
+          "bexport: unused library types stay behind");
+
+    /* The exported doc is sanitized: serial/location stripped,
+       verified/live flags forced off, placements kept. */
+    const json dj = ReadJson(dest / "studio.json");
+    CHECK(dj["bindings"]["bus_a"].value("serial", std::string("x")).empty()
+          && dj["bindings"]["bus_a"].value("location", std::string("x")).empty(),
+          "bexport: serial + location stripped");
+    CHECK(!dj["output"].value("live_on_startup", true),
+          "bexport: live_on_startup forced off");
+    CHECK(!dj["effects"].value("playing", true),
+          "bexport: effects.playing forced off");
+    CHECK(!dj["device_settings"]["fan_a"]["zones"]["ring"]
+              .value("verified", false)
+          && dj["device_settings"]["fan_a"]["zones"]["ring"]
+                 .value("binding", std::string()) == "bus_a",
+          "bexport: zone verified off, binding skeleton kept");
+    CHECK(dj["devices"]["fan_a"].value("type", std::string()) == "fan-120",
+          "bexport: placements kept");
+
+    /* Occupied-bundle refusal + explicit overwrite. */
+    CHECK(!ExportBundle(dest.string(), w, reg, sdir.string(), &errors)
+          && HasError(errors, "already"),
+          "bexport: existing bundle refused without overwrite");
+    CHECK(ExportBundle(dest.string(), w, reg, sdir.string(),
+                       nullptr, nullptr, true),
+          "bexport: explicit overwrite exports");
+
+    /* A non-empty dir with NO bundle is refused too. */
+    const auto stray = TempDir("bundle-stray");
+    {
+        std::ofstream f(stray / "unrelated.txt");
+        f << "keep out";
+    }
+    CHECK(!ExportBundle(stray.string(), w, reg, sdir.string(), &errors)
+          && HasError(errors, "not"),
+          "bexport: non-empty destination refused");
+    CHECK(ExportBundle(stray.string(), w, reg, sdir.string(),
+                       nullptr, nullptr, true),
+          "bexport: overwrite exports alongside foreign files");
+}
+
+static void TestBundleAssets()
+{
+    namespace fs = std::filesystem;
+    const auto src  = TempDir("bundle-assets-src");
+    const auto sdir = src / "presets" / "devices";
+    const auto adir = src / "assets" / "models";
+    fs::create_directories(sdir);
+    fs::create_directories(adir);
+    WriteRaw(adir / "fan.obj", "o fan\n");
+
+    json present = FanPreset("asset-fan", 8);
+    present["entities"]["frame"]["appearance"]["model"] = "models/fan.obj";
+    WriteFile(sdir / "asset-fan.device.json", present);
+
+    /* A type whose asset ref dangles — registered via Add so the
+       file-layer asset check (a warning, not a gate) is bypassed,
+       matching a hand-built library entry. */
+    DevicePreset ghost;
+    json gj = FanPreset("ghost-fan", 8);
+    gj["entities"]["frame"]["appearance"]["model"] = "models/ghost.obj";
+    CHECK(DevicePresetFromJson(gj, ghost, nullptr),
+          "bassets: ghost type parses");
+
+    PresetRegistry reg;
+    std::vector<std::string> errors, warnings;
+    CHECK(reg.LoadDirectory(sdir.string(), &errors)
+          && reg.Add(ghost, &errors),
+          "bassets: library loads");
+
+    StudioDocument w;
+    w.meta.name = "assets";
+    DeviceInstance a;
+    a.type     = "asset-fan";
+    a.position = { 0.0f, 0.0f, 0.0f };
+    w.devices["af"] = a;
+    DeviceInstance g;
+    g.type     = "ghost-fan";
+    g.position = { 0.2f, 0.0f, 0.0f };
+    w.devices["gf"] = g;
+
+    const auto dest = TempDir("bundle-assets-out");
+    unsigned int nt = 0, na = 0;
+    warnings.clear();
+    CHECK(ExportBundle(dest.string(), w, reg, sdir.string(),
+                       &errors, &warnings, false, &nt, &na),
+          "bassets: export succeeds despite a missing asset");
+    if(!errors.empty())
+    {
+        std::printf("  (bassets errors: %s)\n", errors.front().c_str());
+    }
+    CHECK(na == 1 && fs::exists(dest / "assets" / "models" / "fan.obj"),
+          "bassets: resolvable asset copied with its rel path");
+    CHECK(!fs::exists(dest / "assets" / "models" / "ghost.obj"),
+          "bassets: missing asset not fabricated");
+    CHECK(HasError(warnings, "ghost.obj"),
+          "bassets: missing asset surfaces as a warning");
+}
+
+/*---------------------------------------------------------*\
+||| Task 4.4 — bundle import: classify, conflict choices, ||
+||| nested ref remap, malformed rejection.                ||
+\*---------------------------------------------------------*/
+static void TestBundleImport()
+{
+    namespace fs = std::filesystem;
+    /* Local library: fan-120 (8 LED) + pad. */
+    const auto local = TempDir("bundle-local");
+    const auto ldev  = local / "presets" / "devices";
+    fs::create_directories(ldev);
+    WriteFile(ldev / "fan-120.device.json", FanPreset("fan-120", 8));
+    WriteFile(ldev / "pad.device.json",     MatrixPreset("pad"));
+    PresetRegistry lreg;
+    std::vector<std::string> errors;
+    CHECK(lreg.LoadDirectory(ldev.string(), &errors),
+          "bimport: local library loads");
+
+    /* Bundle: fan-120 identical, tower new (refs fan-120), pad
+       same-id/different-content = conflict. The bundled doc also
+       lies: serials, verified and live flags all set. */
+    const auto bdir = TempDir("bundle-in");
+    const auto bdev = bdir / "presets" / "devices";
+    fs::create_directories(bdev);
+    WriteFile(bdev / "fan-120.device.json", FanPreset("fan-120", 8));
+    WriteFile(bdev / "tower.device.json",   RefPreset("tower", "fan-120"));
+    json pad_new = MatrixPreset("pad");
+    pad_new["name"] = "Different pad";
+    WriteFile(bdev / "pad.device.json", pad_new);
+
+    StudioDocument bw;
+    bw.meta.name = "imported";
+    DeviceInstance f;
+    f.type     = "fan-120";
+    f.position = { 0.1f, 0.0f, 0.0f };
+    bw.devices["f1"] = f;
+    DeviceInstance t;
+    t.type     = "tower";
+    t.position = { 0.3f, 0.0f, 0.0f };
+    bw.devices["t1"] = t;
+    DeviceInstance pd;
+    pd.type     = "pad";
+    pd.position = { -0.3f, 0.0f, 0.0f };
+    bw.devices["p1"] = pd;
+    DeviceBinding b;
+    b.id              = "bus";
+    b.controller_name = "Ctrl";
+    b.zone_name       = "Z";
+    b.zone_leds       = 8;
+    b.serial          = "FOREIGN-SN";
+    b.location        = "USB:9-9";
+    bw.bindings["bus"] = b;
+    bw.device_settings["f1"].zones["ring"] = { "bus", 0, true };
+    bw.meta.live_on_startup = true;
+    bw.effect.playing       = true;
+    WriteFile(bdir / "studio.json", ToJson(bw));
+
+    /*--- inspect: classification + sanitize, no writes ---*/
+    const size_t ldev_files_before = CountTypeFiles(ldev);
+    const std::string pad_bytes_before = [&]{
+        std::ifstream in(ldev / "pad.device.json", std::ios::binary);
+        std::ostringstream ss; ss << in.rdbuf(); return ss.str();
+    }();
+    ImportPlan plan;
+    CHECK(InspectBundle(bdir.string(), lreg, plan, &errors),
+          "bimport: inspects cleanly");
+    if(!errors.empty())
+    {
+        std::printf("  (inspect errors: %s)\n", errors.front().c_str());
+    }
+    std::map<std::string, BundleType::Status> st;
+    for(const BundleType& bt : plan.types) { st[bt.id] = bt.status; }
+    CHECK(st["fan-120"] == BundleType::Status::Identical
+          && st["tower"] == BundleType::Status::New
+          && st["pad"] == BundleType::Status::Conflict,
+          "bimport: new|identical|conflict classified");
+    CHECK(plan.workspace.meta.live_on_startup == false
+          && plan.workspace.effect.playing == false
+          && plan.workspace.bindings["bus"].serial.empty()
+          && plan.workspace.bindings["bus"].location.empty()
+          && !plan.workspace.device_settings["f1"].zones["ring"].verified,
+          "bimport: hostile flags + serials stripped at inspect");
+    CHECK(CountTypeFiles(ldev) == ldev_files_before,
+          "bimport: inspect writes nothing");
+
+    /*--- apply: missing choice, bogus choice, then the real one ---*/
+    StudioDocument out;
+    errors.clear();
+    CHECK(!ApplyImport(plan, {}, ldev.string(), out, &errors)
+          && HasError(errors, "pad"),
+          "bimport: conflict without a choice refuses");
+    errors.clear();
+    CHECK(!ApplyImport(plan, {{"ghost", "x"}}, ldev.string(), out, &errors)
+          && HasError(errors, "ghost"),
+          "bimport: choice for a non-conflict refuses");
+    errors.clear();
+    CHECK(!ApplyImport(plan, {{"pad", "fan-120"}}, ldev.string(), out, &errors)
+          && HasError(errors, "collide"),
+          "bimport: choice colliding with a local id refuses");
+    errors.clear();
+    CHECK(!ApplyImport(plan, {{"pad", "bad id!"}}, ldev.string(), out, &errors),
+          "bimport: invalid choice id refuses");
+    CHECK(CountTypeFiles(ldev) == ldev_files_before,
+          "bimport: failed applies write nothing");
+
+    std::vector<std::string> warns;
+    CHECK(ApplyImport(plan, {{"pad", "pad-2"}}, ldev.string(),
+                      out, &errors, &warns),
+          "bimport: applies with the conflict choice");
+    CHECK(fs::exists(ldev / "tower.device.json")
+          && fs::exists(ldev / "pad-2.device.json"),
+          "bimport: new + remapped type files land");
+    /* identical -> reuse: the local fan-120 must not be rewritten
+       to a duplicate id, and pad must be UNTOUCHED. */
+    CHECK(!fs::exists(ldev / "fan-120-2.device.json")
+          && !fs::exists(ldev / "fan-120-import.device.json"),
+          "bimport: identical type reused, no duplicate");
+    {
+        std::ifstream in(ldev / "pad.device.json", std::ios::binary);
+        std::ostringstream ss; ss << in.rdbuf();
+        CHECK(ss.str() == pad_bytes_before,
+              "bimport: conflicting local type never overwritten");
+    }
+    CHECK(out.devices["p1"].type == "pad-2"
+          && out.devices["f1"].type == "fan-120"
+          && out.devices["t1"].type == "tower",
+          "bimport: workspace type refs remapped");
+
+    /* The imported candidate resolves against the reloaded
+       library — the caller's normal resolve path. */
+    PresetRegistry post;
+    CHECK(post.LoadDirectory(ldev.string(), &errors),
+          "bimport: library reloads with imports");
+    SceneDocument doc;
+    errors.clear();
+    CHECK(ResolveScene(out, post, doc, &errors),
+          "bimport: imported workspace resolves");
+    CHECK(FindObject(doc, "f1/diffuser") != nullptr
+          && FindObject(doc, "t1/mount/diffuser") != nullptr
+          && FindObject(doc, "p1/body") != nullptr,
+          "bimport: all instances expand (incl. nested)");
+}
+
+static void TestBundleImportNestedRemap()
+{
+    namespace fs = std::filesystem;
+    const auto local = TempDir("bundle-nested-local");
+    const auto ldev  = local / "presets" / "devices";
+    fs::create_directories(ldev);
+    WriteFile(ldev / "pad.device.json", MatrixPreset("pad"));
+    PresetRegistry lreg;
+    std::vector<std::string> errors;
+    CHECK(lreg.LoadDirectory(ldev.string(), &errors),
+          "bnested: local library loads");
+
+    /* Bundle: "arm" mounts "pad"; the bundled pad conflicts with
+       the local pad, so the choice remaps it — and the ref inside
+       "arm" must follow. */
+    const auto bdir = TempDir("bundle-nested-in");
+    const auto bdev = bdir / "presets" / "devices";
+    fs::create_directories(bdev);
+    json pad_new = MatrixPreset("pad");
+    pad_new["name"] = "Other pad";
+    WriteFile(bdev / "pad.device.json", pad_new);
+    WriteFile(bdev / "arm.device.json", RefPreset("arm", "pad"));
+    StudioDocument bw;
+    DeviceInstance d;
+    d.type = "arm";
+    bw.devices["a1"] = d;
+    WriteFile(bdir / "studio.json", ToJson(bw));
+
+    ImportPlan plan;
+    CHECK(InspectBundle(bdir.string(), lreg, plan, &errors),
+          "bnested: inspects");
+    StudioDocument out;
+    errors.clear();
+    CHECK(ApplyImport(plan, {{"pad", "pad-x"}}, ldev.string(),
+                      out, &errors),
+          "bnested: applies");
+    CHECK(fs::exists(ldev / "pad-x.device.json")
+          && fs::exists(ldev / "arm.device.json"),
+          "bnested: both type files land");
+    const json armj = ReadJson(ldev / "arm.device.json");
+    CHECK(armj["entities"]["mount"].value("type", std::string()) == "pad-x",
+          "bnested: ref inside an imported type remaps");
+    CHECK(out.devices["a1"].type == "arm",
+          "bnested: workspace keeps its own id");
+
+    PresetRegistry post;
+    CHECK(post.LoadDirectory(ldev.string(), &errors)
+          && post.Find("arm") != nullptr
+          && post.Find("pad-x") != nullptr,
+          "bnested: remapped library validates");
+    SceneDocument doc;
+    errors.clear();
+    CHECK(ResolveScene(out, post, doc, &errors)
+          && FindObject(doc, "a1/mount/body") != nullptr,
+          "bnested: nested mount resolves through the new id");
+
+    /* A dangling ref inside a bundled type is malformed — the
+       import never gets to the choice stage. */
+    const auto bad = TempDir("bundle-nested-bad");
+    const auto bbad = bad / "presets" / "devices";
+    fs::create_directories(bbad);
+    WriteFile(bbad / "orphan.device.json", RefPreset("orphan", "ghost"));
+    WriteFile(bad / "studio.json", ToJson(bw));
+    errors.clear();
+    ImportPlan badplan;
+    CHECK(!InspectBundle(bad.string(), lreg, badplan, &errors)
+          && HasError(errors, "missing dependency"),
+          "bnested: dangling bundled ref rejected");
+}
+
+static void TestBundleImportRejected()
+{
+    namespace fs = std::filesystem;
+    PresetRegistry lreg;
+    ImportPlan plan;
+    std::vector<std::string> errors;
+
+    /* no studio.json */
+    {
+        const auto dir = TempDir("bundle-empty");
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors),
+              "breject: missing studio.json refused");
+    }
+    /* invalid JSON */
+    {
+        const auto dir = TempDir("bundle-badjson");
+        WriteRaw(dir / "studio.json", "{ nope");
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "invalid JSON"),
+              "breject: malformed studio.json refused");
+    }
+    /* newer schema — no silent downgrade */
+    {
+        const auto dir = TempDir("bundle-newer");
+        WriteFile(dir / "studio.json",
+                  json{{"schema_version", 99}, {"name", "future"}});
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "schema_version"),
+              "breject: newer schema refused");
+    }
+    /* a bundled type violating the content caps */
+    {
+        const auto dir = TempDir("bundle-caps");
+        const auto tdir = dir / "presets" / "devices";
+        fs::create_directories(tdir);
+        StudioDocument bw;
+        DeviceInstance d;
+        d.type = "fat";
+        bw.devices["x"] = d;
+        WriteFile(dir / "studio.json", ToJson(bw));
+        json fat = FanPreset("fat", 8);
+        for(unsigned int i = 0; i <= PRESET_MAX_ENTITIES; i++)
+        {
+            fat["entities"]["e" + std::to_string(i)] = {
+                {"geometry", "blob"},
+                {"size_m", {0.01, 0.01, 0.01}},
+            };
+        }
+        WriteFile(tdir / "fat.device.json", fat);
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "cap"),
+              "breject: PRESET_MAX_ENTITIES enforced on import");
+    }
+}
+
+static void TestBundleImportV2()
+{
+    namespace fs = std::filesystem;
+    const auto local = TempDir("bundle-v2-local");
+    const auto ldev  = local / "presets" / "devices";
+    fs::create_directories(ldev);
+    PresetRegistry lreg;   /* empty — every migrated type is new */
+
+    /* A v2 expanded workspace bundled as studio.json migrates
+       through the same SceneJson + ConfigMigration path a file
+       load uses. */
+    const SceneDocument scene = BuildDefaultDesk();
+    const auto bdir = TempDir("bundle-v2-in");
+    WriteFile(bdir / "studio.json",
+              json{{"schema_version", 2},
+                   {"name", "old desk"},
+                   {"scene", ToJson(scene)}});
+
+    ImportPlan plan;
+    std::vector<std::string> errors;
+    CHECK(InspectBundle(bdir.string(), lreg, plan, &errors),
+          "bv2: expanded bundle migrates at inspect");
+    if(!errors.empty())
+    {
+        std::printf("  (bv2 errors: %s)\n", errors.front().c_str());
+    }
+    CHECK(!plan.types.empty() && !plan.workspace.devices.empty(),
+          "bv2: types extracted, compact doc produced");
+    CHECK(plan.workspace.meta.live_on_startup == false,
+          "bv2: migration never arms live output");
+
+    StudioDocument out;
+    errors.clear();
+    CHECK(ApplyImport(plan, {}, ldev.string(), out, &errors),
+          "bv2: all-new types apply without choices");
+    PresetRegistry post;
+    CHECK(post.LoadDirectory(ldev.string(), &errors),
+          "bv2: migrated type files validate");
+    SceneDocument doc;
+    errors.clear();
+    CHECK(ResolveScene(out, post, doc, &errors),
+          "bv2: migrated workspace resolves");
+    if(!errors.empty())
+    {
+        std::printf("  (bv2 resolve: %s)\n", errors.front().c_str());
+    }
+    /* Same addressable LEDs — expansion splits objects into
+       <inst>/<entity> form, so compare emitters, not objects. */
+    size_t old_leds = 0, new_leds = 0;
+    for(const SceneObject& o : scene.objects) { old_leds += o.emitters.size(); }
+    for(const SceneObject& o : doc.objects)   { new_leds += o.emitters.size(); }
+    CHECK(old_leds == new_leds && new_leds > 0,
+          "bv2: emitter count preserved through the migration");
+}
+
+/*---------------------------------------------------------*\
+||| Task 4.4 — validated type reload coherence: edit a    ||
+||| type file on disk, reload the registry, re-resolve — ||
+||| every instance of the type updates together while the||
+||| workspace's devices section and the expanded          ||
+||| <inst>/<entity> ids stay byte-identical.              ||
+\*---------------------------------------------------------*/
+static void TestTypeReloadCoherence()
+{
+    namespace fs = std::filesystem;
+    const auto dir = TempDir("reload-coherence");
+    WriteFile(dir / "fan-120.device.json", FanPreset("fan-120", 8));
+
+    PresetRegistry reg;
+    std::vector<std::string> errors;
+    CHECK(reg.LoadDirectory(dir.string(), &errors),
+          "cohere: initial load");
+
+    StudioDocument w = TwoFanWorkspace();
+    w.bindings["bus_a"].zone_leds = 16;
+    w.bindings["bus_b"].zone_leds = 24;
+    SceneDocument doc;
+    CHECK(ResolveScene(w, reg, doc, &errors), "cohere: initial resolve");
+
+    /* Snapshot: the compact devices section and the expanded
+       object ids — neither may move when the type changes. */
+    const json devices_before = ToJson(w)["devices"];
+    std::set<std::string> ids_before;
+    for(const SceneObject& o : doc.objects)
+    {
+        ids_before.insert(o.id);
+    }
+
+    /* Edit the type file on disk and reload the whole file
+       layer — the path the File menu's "Reload device types"
+       takes (ReloadPresets: ClearFiles + LoadDirectory). */
+    WriteFile(dir / "fan-120.device.json", FanPreset("fan-120", 16));
+    reg.ClearFiles();
+    CHECK(reg.LoadDirectory(dir.string(), &errors), "cohere: reload");
+    SceneDocument doc2;
+    errors.clear();
+    CHECK(ResolveScene(w, reg, doc2, &errors), "cohere: re-resolve");
+
+    const SceneObject* da = FindObject(doc2, "fan_a/diffuser");
+    const SceneObject* db = FindObject(doc2, "fan_b/diffuser");
+    CHECK(da != nullptr && db != nullptr
+          && da->emitters.size() == 16 && db->emitters.size() == 16,
+          "cohere: all instances of the type update together");
+    std::set<std::string> ids_after;
+    for(const SceneObject& o : doc2.objects)
+    {
+        ids_after.insert(o.id);
+    }
+    CHECK(ids_before == ids_after,
+          "cohere: <inst>/<entity> ids unchanged");
+    CHECK(ToJson(w)["devices"] == devices_before,
+          "cohere: devices section byte-identical — placements"
+          " not rewritten");
+}
+
 int main()
 {
+    /* Unbuffered so a crash still shows how far the suite got. */
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     TestPresetBasics();
     TestPresetValidation();
     TestMatrixValidation();
@@ -2190,6 +2776,13 @@ int main()
     TestPackagedDefaults();
     TestDefaultWorkspaceParity();
     TestEffectTargetsResolve();
+    TestBundleExport();
+    TestBundleAssets();
+    TestBundleImport();
+    TestBundleImportNestedRemap();
+    TestBundleImportRejected();
+    TestBundleImportV2();
+    TestTypeReloadCoherence();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

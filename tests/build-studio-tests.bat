@@ -34,6 +34,7 @@ set SCENE_SRC=^
 set V3_SRC=^
    "%STUDIO%\presets\DevicePreset.cpp" ^
    "%STUDIO%\presets\PresetRegistry.cpp" ^
+   "%STUDIO%\presets\PresetBundle.cpp" ^
    "%STUDIO%\scene\SceneResolver.cpp" ^
    "%STUDIO%\config\StudioConfig.cpp" ^
    "%STUDIO%\config\ConfigMigration.cpp"
