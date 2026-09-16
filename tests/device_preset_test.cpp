@@ -2304,6 +2304,18 @@ static void TestBundleExport()
     CHECK(ExportBundle(stray.string(), w, reg, sdir.string(),
                        nullptr, nullptr, true),
           "bexport: overwrite exports alongside foreign files");
+
+    /* Overwrite re-export prunes type files a previous export left
+       behind — a stale bundled type must not end up installed in
+       the importer's library. */
+    StudioDocument w2 = TwoFanWorkspace();   /* fan-120 only */
+    CHECK(ExportBundle(dest.string(), w2, reg, sdir.string(),
+                       nullptr, nullptr, true),
+          "bexport: narrower overwrite re-export succeeds");
+    CHECK(fs::exists(dest / "presets" / "devices" / "fan-120.device.json")
+          && !fs::exists(dest / "presets" / "devices" / "ring-assy.device.json")
+          && !fs::exists(dest / "presets" / "devices" / "tower.device.json"),
+          "bexport: stale bundled type files pruned on overwrite");
 }
 
 static void TestBundleAssets()
@@ -2633,6 +2645,44 @@ static void TestBundleImportRejected()
         CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
               && HasError(errors, "cap"),
               "breject: PRESET_MAX_ENTITIES enforced on import");
+    }
+    /* a workspace that cannot resolve against bundled+local types
+       is rejected at INSPECT — "malformed never reaches apply" */
+    {
+        const auto dir = TempDir("bundle-noresolve");
+        const auto tdir = dir / "presets" / "devices";
+        fs::create_directories(tdir);
+        WriteFile(tdir / "fan-120.device.json", FanPreset("fan-120", 8));
+        StudioDocument bw;
+        DeviceInstance d;
+        d.type = "fan-120";
+        bw.devices["x"] = d;
+        bw.device_settings["x"].zones["ghost"] =
+            { "", 0, false };   /* type has no zone 'ghost' */
+        WriteFile(dir / "studio.json", ToJson(bw));
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "resolve"),
+              "breject: unresolvable workspace refused at inspect");
+    }
+    /* a type-reference cycle inside the bundle resolves nothing —
+       the closure check passes (both files exist) but the scratch
+       registry can't build it */
+    {
+        const auto dir = TempDir("bundle-cycle");
+        const auto tdir = dir / "presets" / "devices";
+        fs::create_directories(tdir);
+        WriteFile(tdir / "ca.device.json", RefPreset("ca", "cb"));
+        WriteFile(tdir / "cb.device.json", RefPreset("cb", "ca"));
+        StudioDocument bw;
+        DeviceInstance d;
+        d.type = "ca";
+        bw.devices["x"] = d;
+        WriteFile(dir / "studio.json", ToJson(bw));
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "cycle"),
+              "breject: bundled type-reference cycle refused");
     }
 }
 

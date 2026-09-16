@@ -128,6 +128,11 @@ struct ImportPlan
      (bundle ∪ local registry).
    - bundled assets: local relative paths only
      (IsPresetAssetPath), per-file and total size caps.
+   - bounded resolution: the candidate is run through
+     ResolveScene against a scratch registry (local types with
+     the bundle overlaid in dependency order) — resolve failures,
+     reference cycles and object/emitter cap breaches reject the
+     bundle before apply ever runs.
    - classifies each type new|identical|conflict and records
      warnings (e.g. referenced assets missing from the bundle).
    On failure `plan` is untouched and errors are field-specific. */

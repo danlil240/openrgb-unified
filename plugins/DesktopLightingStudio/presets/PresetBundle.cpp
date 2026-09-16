@@ -7,6 +7,7 @@
 #include "PresetBundle.h"
 #include "../config/ConfigMigration.h"
 #include "../scene/SceneJson.h"
+#include "../scene/SceneResolver.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -414,6 +415,44 @@ bool ExportBundle(const std::string& dest_dir,
         *assets_copied = copied;
     }
 
+    /* Overwrite export: prune type files a previous export left
+       behind — a stale bundled type would otherwise install into
+       the importer's library. Only *.device.json inside
+       <dest>/presets/devices/ — never outside the bundle. */
+    if(overwrite && fs::is_directory(types_dir, ec))
+    {
+        const std::set<std::string> keep(ids.begin(), ids.end());
+        for(const auto& entry : fs::directory_iterator(types_dir, ec))
+        {
+            if(!entry.is_regular_file())
+            {
+                continue;
+            }
+            const std::string name = entry.path().filename().string();
+            const std::string suffix = ".device.json";
+            if(name.size() <= suffix.size()
+               || name.compare(name.size() - suffix.size(),
+                               suffix.size(), suffix) != 0)
+            {
+                continue;
+            }
+            const std::string base =
+                name.substr(0, name.size() - suffix.size());
+            if(keep.count(base))
+            {
+                continue;
+            }
+            std::error_code rec;
+            fs::remove(entry.path(), rec);
+            if(rec)
+            {
+                Warn(warnings, "stale bundled type '" + name
+                               + "' could not be removed ("
+                               + rec.message() + ")");
+            }
+        }
+    }
+
     /* studio.json LAST — a partial bundle without it is rejected
        by InspectBundle instead of looking complete. */
     std::string werr;
@@ -714,6 +753,92 @@ bool InspectBundle(const std::string& src_dir,
     if(errors != nullptr && !errors->empty())
     {
         return false;
+    }
+
+    /*------------------------------*\
+    | Inspect-time resolution: the  |
+    | candidate must actually       |
+    | resolve against a scratch     |
+    | registry — local types with   |
+    | the bundle overlaid — BEFORE  |
+    | apply ever runs. This catches |
+    | failure modes the closure     |
+    | check can't (resolve-depth    |
+    | problems, object/emitter cap  |
+    | breaches, reference cycles)   |
+    | and is the same resolver the  |
+    | post-import apply path uses,  |
+    | so "malformed never reaches   |
+    | apply" holds at inspect time. |
+    \*------------------------------*/
+    {
+        PresetRegistry scratch = local_registry;
+        /* Topo-add bundled types: Add re-validates the whole
+           registry, so only attempt a type once its bundled deps
+           have landed. Types left pending after a no-progress pass
+           close a reference cycle — a malformed-bundle error.
+           (A bundled def overlaid on a same-id local type is the
+           post-import content for resolution purposes: conflicts
+           import under a new id with all refs remapped to it.) */
+        std::set<std::string> pending;
+        for(const auto& kv : bundled)
+        {
+            pending.insert(kv.first);
+        }
+        for(bool progress = true; progress && !pending.empty();)
+        {
+            progress = false;
+            for(auto it = pending.begin(); it != pending.end();)
+            {
+                bool ready = true;
+                for(const std::string& dep :
+                    PresetDependencies(bundled[*it]))
+                {
+                    if(pending.count(dep))
+                    {
+                        ready = false;
+                        break;
+                    }
+                }
+                if(!ready)
+                {
+                    ++it;
+                    continue;
+                }
+                std::vector<std::string> aerrs;
+                if(!scratch.Add(bundled[*it], &aerrs))
+                {
+                    Err(errors, "presets/devices/" + *it
+                                + ".device.json: "
+                                + JoinErrors(aerrs));
+                }
+                it = pending.erase(it);
+                progress = true;
+            }
+        }
+        for(const std::string& id : pending)
+        {
+            Err(errors, "presets/devices/" + id + ".device.json:"
+                        " unresolvable type-reference cycle");
+        }
+        if(errors != nullptr && !errors->empty())
+        {
+            return false;
+        }
+        SceneDocument resolved;
+        std::vector<std::string> rerrs, rwarns;
+        if(!ResolveScene(p.workspace, scratch, resolved,
+                         &rerrs, &rwarns))
+        {
+            Err(errors, src_dir + ": workspace does not resolve"
+                        " against bundled+local types: "
+                        + JoinErrors(rerrs));
+            return false;
+        }
+        for(const std::string& w : rwarns)
+        {
+            Warn(&p.warnings, w);
+        }
     }
 
     /*------------------------------*\

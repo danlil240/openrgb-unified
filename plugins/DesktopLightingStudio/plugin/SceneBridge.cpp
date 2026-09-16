@@ -2524,9 +2524,6 @@ bool SceneBridge::exportBundle(const QString& dirPath, bool overwrite)
 bool SceneBridge::importBundle(const QString& dirPath,
                                const QVariantMap& choices)
 {
-    /* Import intent kills any live gesture — its snapshot belongs
-       to the document about to be replaced (or kept, on failure). */
-    editor.Cancel();
     if(api == nullptr || store == nullptr || dirPath.isEmpty())
     {
         setStatus(QStringLiteral("workspace unavailable — cannot import"));
@@ -2576,6 +2573,9 @@ bool SceneBridge::importBundle(const QString& dirPath,
                 rerrs.empty() ? "unknown" : rerrs.front())));
         return false;
     }
+    /* Only a fully-resolved candidate replaces the doc — kill the
+       live gesture HERE so a rejected import keeps it alive. */
+    editor.Cancel();
     candidate.scene = resolved;
     ApplyWorkspace(candidate);
     /* The imported doc differs from studio.json until saved. */
@@ -2613,6 +2613,11 @@ void SceneBridge::reloadDeviceTypes()
        never rewritten. A workspace that no longer resolves keeps
        the current scene. */
     editor.Cancel();
+    /* Same convention as every other resolve path: runtime state
+       (effect playing/params, inputs, painted colors) lives in
+       doc/meta, not workspace — sync first or the re-resolve
+       silently reverts it and desyncs doc from the live engine. */
+    SyncWorkspace();
     ReloadPresets();
     SceneDocument resolved;
     if(!ResolveWorkspace(resolved))
