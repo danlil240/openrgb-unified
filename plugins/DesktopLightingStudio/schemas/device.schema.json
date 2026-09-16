@@ -102,6 +102,19 @@
           }
         }
       }
+    },
+    "binding_hints": {
+      "type": "array",
+      "description": "Informational compatible-hardware hints carried by the type (never per-instance serials; never grants verified). Known keys only — unknown keys are rejected as likely typos.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "controller_name": { "type": "string" },
+          "vendor": { "type": "string" },
+          "zone_name": { "type": "string" }
+        }
+      }
     }
   },
   "definitions": {

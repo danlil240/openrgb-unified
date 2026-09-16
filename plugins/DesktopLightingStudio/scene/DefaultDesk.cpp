@@ -11,17 +11,18 @@ namespace studio
 {
 
 /*---------------------------------------------------------*\
-||| v3 default content — packaged device types + the       ||
-||| compact workspace referencing them. The .device.json   ||
-||| files under presets/devices/ are generated FROM this   ||
-||| data; the test suite asserts they match.               ||
+|| v3 default content. The bundled                         |
+|| presets/devices/*.device.json files are the             |
+|| AUTHORITATIVE type library — SceneBridge loads them     |
+|| from the qrc. This file only keeps the minimal C++      |
+|| fallback set (desk + group) used when no packaged file  |
+|| is readable, plus the compact workspace referencing     |
+|| the packaged ids.                                       |
 \*---------------------------------------------------------*/
 namespace
 {
 
-const float DEF_RING_R    = 0.052f;
 const float DEF_FAN_FACE  = 0.016f;
-const float DEF_PUMP_FACE = 0.024f;
 
 /*---------------------------------------------------------*\
 || UNI FAN SL Wireless (SL V3) — 40 LEDs per fan, but NOT ||
@@ -52,15 +53,18 @@ const Vec3 SLW_LED_POINTS[40] = {
     {  0.0416f, DEF_FAN_FACE,  0.0408f },
     {  0.0478f, DEF_FAN_FACE,  0.0284f },
     {  0.0540f, DEF_FAN_FACE,  0.0160f },
-    /* strip A — side-face bar */
-    {  0.0490f, 0.0f,          0.0625f },
-    {  0.0350f, 0.0f,          0.0625f },
-    {  0.0210f, 0.0f,          0.0625f },
-    {  0.0070f, 0.0f,          0.0625f },
-    { -0.0070f, 0.0f,          0.0625f },
-    { -0.0210f, 0.0f,          0.0625f },
-    { -0.0350f, 0.0f,          0.0625f },
-    { -0.0490f, 0.0f,          0.0625f },
+    /* strip A — side-edge bar. The physical strip is on the side
+       face, but mid-plane dots (|y| <= 0.014) are sealed inside the
+       opaque body mesh and can't render — so it sits on the light
+       face at the frame edge instead. */
+    {  0.0490f, DEF_FAN_FACE,  0.0580f },
+    {  0.0350f, DEF_FAN_FACE,  0.0580f },
+    {  0.0210f, DEF_FAN_FACE,  0.0580f },
+    {  0.0070f, DEF_FAN_FACE,  0.0580f },
+    { -0.0070f, DEF_FAN_FACE,  0.0580f },
+    { -0.0210f, DEF_FAN_FACE,  0.0580f },
+    { -0.0350f, DEF_FAN_FACE,  0.0580f },
+    { -0.0490f, DEF_FAN_FACE,  0.0580f },
     /* strip B — front-face run (strip A rotated 180 deg) */
     {  0.0540f, DEF_FAN_FACE, -0.0160f },
     {  0.0478f, DEF_FAN_FACE, -0.0284f },
@@ -74,15 +78,15 @@ const Vec3 SLW_LED_POINTS[40] = {
     { -0.0416f, DEF_FAN_FACE, -0.0408f },
     { -0.0478f, DEF_FAN_FACE, -0.0284f },
     { -0.0540f, DEF_FAN_FACE, -0.0160f },
-    /* strip B — side-face bar */
-    { -0.0490f, 0.0f,         -0.0625f },
-    { -0.0350f, 0.0f,         -0.0625f },
-    { -0.0210f, 0.0f,         -0.0625f },
-    { -0.0070f, 0.0f,         -0.0625f },
-    {  0.0070f, 0.0f,         -0.0625f },
-    {  0.0210f, 0.0f,         -0.0625f },
-    {  0.0350f, 0.0f,         -0.0625f },
-    {  0.0490f, 0.0f,         -0.0625f },
+    /* strip B — side-edge bar */
+    { -0.0490f, DEF_FAN_FACE, -0.0580f },
+    { -0.0350f, DEF_FAN_FACE, -0.0580f },
+    { -0.0210f, DEF_FAN_FACE, -0.0580f },
+    { -0.0070f, DEF_FAN_FACE, -0.0580f },
+    {  0.0070f, DEF_FAN_FACE, -0.0580f },
+    {  0.0210f, DEF_FAN_FACE, -0.0580f },
+    {  0.0350f, DEF_FAN_FACE, -0.0580f },
+    {  0.0490f, DEF_FAN_FACE, -0.0580f },
 };
 
 std::vector<Emitter> SlwEmitters(const std::string& group)
@@ -112,45 +116,6 @@ PresetEntity Part(const std::string& id, const std::string& geometry,
     e.rotation_deg = rot;
     e.zone         = zone;
     return e;
-}
-
-DeviceZone RingZone(const std::string& id, const std::string& entity,
-                    unsigned int leds, float radius, float face_y)
-{
-    DeviceZone z;
-    z.id                  = id;
-    z.entity              = entity;
-    z.led_count           = leds;
-    z.layout.type         = "ring";
-    z.layout.radius_m     = radius;
-    z.layout.start_angle_deg = 0.0f;
-    z.layout.face_y_m     = face_y;
-    return z;
-}
-
-DeviceZone StripZone(const std::string& id, const std::string& entity,
-                     unsigned int leds, float spacing, const Vec3& origin)
-{
-    DeviceZone z;
-    z.id              = id;
-    z.entity          = entity;
-    z.led_count       = leds;
-    z.layout.type     = "strip";
-    z.layout.spacing_m = spacing;
-    z.layout.origin   = origin;
-    return z;
-}
-
-DeviceZone PointsZone(const std::string& id, const std::string& entity,
-                      const Vec3& point)
-{
-    DeviceZone z;
-    z.id           = id;
-    z.entity       = entity;
-    z.led_count    = 1;
-    z.layout.type  = "points";
-    z.layout.points.push_back(point);
-    return z;
 }
 
 DevicePreset Preset(const std::string& id, const std::string& name,
@@ -188,119 +153,18 @@ ZoneSetting ZoneBound(const std::string& binding, int addr_base,
 
 std::vector<DevicePreset> DefaultDevicePresets()
 {
+    /* Minimal recoverable fallback — used ONLY when no packaged
+       presets/devices/*.device.json is readable (missing qrc or
+       every file failing validation). The full type library lives
+       in the JSON files; duplicating it in C++ just made the two
+       drift. Keep exactly what BuildFallbackWorkspace() needs
+       (desk) plus "group", the structural type v2-migrated
+       workspaces may reference. */
     std::vector<DevicePreset> out;
-
     {
         DevicePreset p = Preset("desk", "Desk surface", "furniture");
         p.entities["body"] = Part("body", "desk",
             { 1.4f, 0.04f, 0.75f }, { 0, 0, 0 }, { 0, 0, 0 });
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("monitor", "Monitor", "furniture");
-        p.entities["body"] = Part("body", "monitor",
-            { 0.62f, 0.36f, 0.02f }, { 0, 0, 0 }, { 0, 0, 0 });
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("pc-case", "PC case shell", "case");
-        p.entities["shell"] = Part("shell", "case_shell",
-            { 0.21f, 0.47f, 0.46f }, { 0, 0, 0 }, { 0, 0, 0 });
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("keyboard-104",
-                                "Full-size keyboard (zone matrix)", "keyboard");
-        p.entities["body"] = Part("body", "keyboard_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "matrix");
-        DeviceZone z;
-        z.id              = "matrix";
-        z.entity          = "body";
-        z.led_count       = 0;              /* dynamic */
-        z.layout.type     = "matrix";
-        z.layout.dynamic  = true;
-        p.zones.push_back(z);
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("mouse-3zone",
-                                "Gaming mouse (wheel/logo/strip)", "mouse");
-        p.entities["body"]  = Part("body", "mouse_body",
-            { 0.066f, 0.04f, 0.117f }, { 0, 0, 0 }, { 0, 0, 0 });
-        p.entities["wheel"] = Part("wheel", "mouse_zone",
-            { 0, 0, 0 }, { 0, 0.025f, -0.035f }, { 0, 0, 0 }, "wheel");
-        p.entities["logo"]  = Part("logo", "mouse_zone",
-            { 0, 0, 0 }, { 0, 0.025f, 0.02f }, { 0, 0, 0 }, "logo");
-        p.entities["strip"] = Part("strip", "mouse_zone",
-            { 0, 0, 0 }, { 0, -0.008f, 0.005f }, { 0, 0, 0 }, "strip");
-        p.zones.push_back(PointsZone("wheel", "wheel", { 0, 0, 0 }));
-        p.zones.push_back(PointsZone("logo", "logo", { 0, 0, 0 }));
-        p.zones.push_back(RingZone("strip", "strip", 11, 0.028f, 0.0f));
-        p.zones.back().layout.start_angle_deg = 90.0f;
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("fan-120", "120 mm RGB fan — 8 LEDs", "fan");
-        p.entities["body"] = Part("body", "fan_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
-        p.zones.push_back(RingZone("ring", "body", 8, DEF_RING_R, DEF_FAN_FACE));
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("fan-slw",
-                                "Lian Li SL Wireless fan — 40 LEDs", "fan");
-        p.entities["body"] = Part("body", "fan_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
-        /* Two edge strips, not a ring — explicit SLW_LED_POINTS.
-           Zone keeps the id "ring" so existing workspaces that
-           bound it stay valid. */
-        DeviceZone z;
-        z.id           = "ring";
-        z.entity       = "body";
-        z.led_count    = 40;
-        z.layout.type  = "points";
-        for(const Vec3& v : SLW_LED_POINTS)
-        {
-            z.layout.points.push_back(v);
-        }
-        p.zones.push_back(z);
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("pump-360", "Cooler pump cap — 8 LEDs", "cooler");
-        p.entities["body"] = Part("body", "pump_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
-        p.zones.push_back(RingZone("ring", "body", 8, 0.020f, DEF_PUMP_FACE));
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("gpu-fan", "GPU fan — 8 LEDs, downward",
-                                "gpu");
-        p.entities["body"] = Part("body", "fan_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "ring");
-        p.zones.push_back(RingZone("ring", "body", 8, 0.04f, -DEF_FAN_FACE));
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("ram-stick", "RAM stick — 10-LED strip", "ram");
-        p.entities["body"] = Part("body", "ram_body",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "strip");
-        p.zones.push_back(StripZone("strip", "body", 10, 0.012f,
-                                    { -0.054f, 0.03f, 0 }));
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("gpu-card", "Graphics card (decor)", "gpu");
-        p.entities["body"] = Part("body", "gpu_body",
-            { 0.30f, 0.05f, 0.13f }, { 0, 0, 0 }, { 0, 0, 0 });
-        out.push_back(p);
-    }
-    {
-        DevicePreset p = Preset("gpu-logo", "GPU side logo — 4 LEDs", "gpu");
-        p.entities["body"] = Part("body", "gpu_logo",
-            { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 }, "strip");
-        p.zones.push_back(StripZone("strip", "body", 4, 0.02f,
-                                    { -0.03f, 0, 0 }));
         out.push_back(p);
     }
     {
@@ -310,6 +174,17 @@ std::vector<DevicePreset> DefaultDevicePresets()
         out.push_back(p);
     }
     return out;
+}
+
+StudioDocument BuildFallbackWorkspace()
+{
+    /* The desk a user gets when every packaged type file is
+       unreadable — resolvable on the minimal fallback set alone. */
+    StudioDocument w;
+    w.meta.name  = "Recovery desk";
+    w.brightness = 1.0f;
+    w.devices["desk"] = Inst("desk", { 0.0f, -0.02f, 0.10f }, { 0, 0, 0 });
+    return w;
 }
 
 StudioDocument BuildDefaultWorkspace()

@@ -8,6 +8,7 @@
 #include "../scene/EmitterLayout.h"
 #include "../scene/JsonFields.h"
 
+#include <algorithm>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -31,6 +32,41 @@ bool IsPresetId(const std::string& s)
         }
     }
     return true;
+}
+
+bool IsPresetAssetPath(const std::string& s)
+{
+    if(s.empty() || s.front() == '/')
+    {
+        return false;
+    }
+    bool segment_start = true;
+    for(char c : s)
+    {
+        /* Forward slashes only — '\' would be a Windows-only path
+           and ':' a drive letter or URI scheme. Control chars are
+           never legitimate in a file name. */
+        if((unsigned char)c < 0x20 || c == 0x7f
+           || c == '\\' || c == ':')
+        {
+            return false;
+        }
+        if(c == '/')
+        {
+            segment_start = true;
+            continue;
+        }
+        if(c == '.' && segment_start)
+        {
+            /* Reject "."/".." (and dotfile) segments — a preset
+               must never reach outside the workspace assets dir.
+               Embedded dots like "fan-a.glb" stay legal. */
+            return false;
+        }
+        segment_start = false;
+    }
+    /* Trailing slash (empty last segment) is not a file. */
+    return s.back() != '/';
 }
 
 /*---------------------------------------------------------*\
@@ -153,6 +189,29 @@ nlohmann::json ToJson(const DevicePreset& p)
         });
     }
     j["zones"] = zones;
+
+    if(!p.binding_hints.empty())
+    {
+        nlohmann::json hints = nlohmann::json::array();
+        for(const BindingHint& h : p.binding_hints)
+        {
+            nlohmann::json jh;
+            if(!h.controller_name.empty())
+            {
+                jh["controller_name"] = h.controller_name;
+            }
+            if(!h.vendor.empty())
+            {
+                jh["vendor"] = h.vendor;
+            }
+            if(!h.zone_name.empty())
+            {
+                jh["zone_name"] = h.zone_name;
+            }
+            hints.push_back(jh);
+        }
+        j["binding_hints"] = hints;
+    }
     return j;
 }
 
@@ -311,8 +370,10 @@ static ZoneLayout LayoutFromJson(const nlohmann::json& j,
                                    " (or \"dynamic\": true)");
             }
             /* The generator indexes map[row*cols+col] — a short map
-               must be a file error, not an out-of-bounds read. */
-            else if(l.map.size() < (size_t)l.rows * l.cols)
+               must be a file error, not an out-of-bounds read; a
+               long map is a stale hand edit whose tail would be
+               silently dropped. */
+            else if(l.map.size() != (size_t)l.rows * l.cols)
             {
                 AddErr(errs, path + ".map",
                        "has " + std::to_string(l.map.size())
@@ -387,6 +448,80 @@ static ZoneLayout LayoutFromJson(const nlohmann::json& j,
                "expected ring|strip|matrix|points, got '" + l.type + "'");
     }
     return l;
+}
+
+/* Sane hint text: printable, no control characters. Hints are
+   human-facing hardware names — they get compared case-
+   insensitively at match time, so the file just has to carry
+   clean text. */
+static bool IsHintText(const std::string& s)
+{
+    for(char c : s)
+    {
+        if((unsigned char)c < 0x20 || c == 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void BindingHintsFromJson(const nlohmann::json& j,
+                                 const std::string& path,
+                                 std::vector<BindingHint>& out,
+                                 std::vector<std::string>& errs)
+{
+    if(!j.is_array())
+    {
+        AddErr(errs, path, "expected array");
+        return;
+    }
+    static const char* const known[] = {
+        "controller_name", "vendor", "zone_name",
+    };
+    int i = 0;
+    for(const nlohmann::json& jh : j)
+    {
+        const std::string hp = path + "[" + std::to_string(i++) + "]";
+        if(!jh.is_object())
+        {
+            AddErr(errs, hp, "expected object");
+            continue;
+        }
+        bool bad = false;
+        for(auto it = jh.begin(); it != jh.end(); ++it)
+        {
+            bool is_known = false;
+            for(const char* k : known)
+            {
+                if(it.key() == k) { is_known = true; break; }
+            }
+            if(!is_known)
+            {
+                AddErr(errs, hp + "." + it.key(),
+                       "unknown binding_hints key (typo?)");
+                bad = true;
+            }
+        }
+        if(bad)
+        {
+            continue;
+        }
+        BindingHint h;
+        h.controller_name = FieldStr(jh, "controller_name",
+                                     std::string(), hp, errs);
+        h.vendor          = FieldStr(jh, "vendor",
+                                     std::string(), hp, errs);
+        h.zone_name       = FieldStr(jh, "zone_name",
+                                     std::string(), hp, errs);
+        if(!IsHintText(h.controller_name) || !IsHintText(h.vendor)
+           || !IsHintText(h.zone_name))
+        {
+            AddErr(errs, hp, "expected printable text");
+            continue;
+        }
+        out.push_back(h);
+    }
 }
 
 } /* anonymous namespace */
@@ -514,6 +649,27 @@ bool DevicePresetFromJson(const nlohmann::json& j, DevicePreset& p,
                         else
                         {
                             e.appearance = je["appearance"];
+                            /* model/image are asset references —
+                               relative portable paths only. A
+                               preset that ships "../etc/passwd" or
+                               "C:\..." as a model path is rejected
+                               here, at parse, not at render. */
+                            for(const char* key : { "model", "image" })
+                            {
+                                const nlohmann::json& a =
+                                    e.appearance.value(key,
+                                                       nlohmann::json());
+                                if(a.is_string()
+                                   && !IsPresetAssetPath(
+                                       a.get<std::string>()))
+                                {
+                                    AddErr(errs, path + ".appearance."
+                                           + key,
+                                           "expected a relative"
+                                           " asset path (no drive"
+                                           " letters, no '..')");
+                                }
+                            }
                         }
                     }
                 }
@@ -575,6 +731,43 @@ bool DevicePresetFromJson(const nlohmann::json& j, DevicePreset& p,
                            + " LEDs but layout.points has "
                            + std::to_string(z.layout.points.size()));
                 }
+                /* led_count 0 is reserved for layouts whose emitter
+                   count is hardware-decided (dynamic matrix) or
+                   point-derived (points). A ring/strip with zero
+                   LEDs is a dead zone — almost certainly a file
+                   that lost its count in a hand edit. */
+                if((z.layout.type == "ring" || z.layout.type == "strip")
+                   && z.led_count == 0)
+                {
+                    AddErr(errs, path + ".led_count",
+                           "ring/strip zones need led_count > 0"
+                           " (0 is reserved for dynamic"
+                           " matrix/points layouts)");
+                }
+                /* A static matrix's emitter count is its non-empty
+                   cell count — led_count must agree, like points. */
+                if(z.layout.type == "matrix" && !z.layout.dynamic
+                   && z.layout.rows > 0 && z.layout.cols > 0
+                   && z.layout.map.size()
+                      == (size_t)z.layout.rows * z.layout.cols)
+                {
+                    unsigned int live = 0;
+                    for(unsigned int c : z.layout.map)
+                    {
+                        if(c != z.layout.empty_cell)
+                        {
+                            ++live;
+                        }
+                    }
+                    if(z.led_count != live)
+                    {
+                        AddErr(errs, path + ".led_count",
+                               "declares " + std::to_string(z.led_count)
+                               + " LEDs but the static matrix map"
+                                 " has " + std::to_string(live)
+                               + " live cells");
+                    }
+                }
                 if(!IsPresetId(z.id))
                 {
                     AddErr(errs, path + ".id", "bad zone id '" + z.id + "'");
@@ -591,6 +784,15 @@ bool DevicePresetFromJson(const nlohmann::json& j, DevicePreset& p,
                        + std::to_string(PRESET_MAX_ZONES));
             }
         }
+    }
+
+    /*------------------------------------------------*\
+    || binding_hints — informational hardware hints    ||
+    \*------------------------------------------------*/
+    if(j.contains("binding_hints"))
+    {
+        BindingHintsFromJson(j["binding_hints"], "binding_hints",
+                             out.binding_hints, errs);
     }
 
     /*------------------------------------------------*\
@@ -756,6 +958,32 @@ std::vector<std::string> PresetDependencies(const DevicePreset& p)
         }
     }
     return deps;
+}
+
+std::vector<std::string> PresetAssetRefs(const DevicePreset& p)
+{
+    std::vector<std::string> refs;
+    for(const auto& kv : p.entities)
+    {
+        const nlohmann::json& a = kv.second.appearance;
+        if(!a.is_object())
+        {
+            continue;
+        }
+        for(const char* key : { "model", "image" })
+        {
+            const nlohmann::json& v = a.value(key, nlohmann::json());
+            if(v.is_string())
+            {
+                const std::string s = v.get<std::string>();
+                if(std::find(refs.begin(), refs.end(), s) == refs.end())
+                {
+                    refs.push_back(s);
+                }
+            }
+        }
+    }
+    return refs;
 }
 
 } /* namespace studio */

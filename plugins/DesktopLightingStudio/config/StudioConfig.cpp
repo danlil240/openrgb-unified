@@ -250,6 +250,15 @@ nlohmann::json ToJson(const StudioDocument& doc)
         {"theme",          doc.meta.ui.theme},
         {"reduced_motion", doc.meta.ui.reduced_motion},
     };
+    if(!doc.meta.ui.favorites.empty())
+    {
+        nlohmann::json favs = nlohmann::json::array();
+        for(const std::string& f : doc.meta.ui.favorites)
+        {
+            favs.push_back(f);
+        }
+        j["ui"]["favorites"] = favs;
+    }
     j["camera"] = {
         {"view",       doc.meta.camera.view},
         {"projection", doc.meta.camera.projection},
@@ -376,6 +385,44 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                                      "ui", errs);
         out.meta.ui.reduced_motion = FieldBool(*s, "reduced_motion",
                                      out.meta.ui.reduced_motion, "ui", errs);
+        /* ui.favorites — recoverable list: malformed entries drop
+           with a warning, order is kept, duplicates collapse. */
+        if(s->contains("favorites"))
+        {
+            const nlohmann::json& f = (*s)["favorites"];
+            if(!f.is_array())
+            {
+                warns.push_back("ui.favorites: expected array"
+                                " — dropped");
+            }
+            else
+            {
+                std::set<std::string> seen;
+                int i = 0;
+                for(const nlohmann::json& v : f)
+                {
+                    const std::string fp = "ui.favorites["
+                                           + std::to_string(i++) + "]";
+                    if(!v.is_string())
+                    {
+                        warns.push_back(fp + ": dropped non-string"
+                                        " entry");
+                        continue;
+                    }
+                    const std::string id = v.get<std::string>();
+                    if(!IsPresetId(id))
+                    {
+                        warns.push_back(fp + ": dropped invalid"
+                                        " identifier '" + id + "'");
+                        continue;
+                    }
+                    if(seen.insert(id).second)
+                    {
+                        out.meta.ui.favorites.push_back(id);
+                    }
+                }
+            }
+        }
     }
     if(const nlohmann::json* s = Section(j, "camera", errs))
     {

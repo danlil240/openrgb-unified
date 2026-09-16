@@ -308,6 +308,13 @@ private:
     StudioDocument CurrentWorkspace() const;
     void           ApplyWorkspace(const StudioDocument& w);
     bool           LoadWorkspace();
+    /* LoadPresetDefaults refreshes the packaged defaults layer
+       from the bundled qrc presets/devices/*.device.json files
+       (the authoritative type library); the minimal C++ set is
+       the fallback when nothing readable ships. ReloadPresets
+       re-reads defaults + the workspace's presets/devices/ files
+       so a Reload picks up edited type files. */
+    void           LoadPresetDefaults();
     void           ReloadPresets();
     void           markDirty();
 
@@ -337,6 +344,11 @@ private:
     SceneDocument               doc;              /* resolved runtime scene  */
     StudioDocument              workspace;        /* compact authoring state */
     PresetRegistry              registry;         /* device-type library     */
+    /* True when LoadPresetDefaults had to fall back to the minimal
+       C++ type set (no readable packaged *.device.json) — the
+       default-workspace builder then swaps to the resolvable
+       recovery desk. */
+    bool                        using_fallback_types = false;
     EditorController            editor;           /* edits `workspace`       */
     SceneObjectModel*           obj_model = nullptr; /* stable list model    */
     QUndoStack*                 undo_stack;

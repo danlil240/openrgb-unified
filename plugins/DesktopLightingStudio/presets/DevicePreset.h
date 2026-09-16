@@ -37,6 +37,13 @@ constexpr unsigned int PRESET_MAX_POINTS   = 4096;
    file names must stay portable. */
 bool IsPresetId(const std::string& s);
 
+/* Asset references inside entity `appearance` (model / image
+   fields): relative portable paths under the workspace assets/
+   dir — forward slashes only, no drive letters, no leading '/',
+   no '..' segments. Absolute paths and escapes are rejected so a
+   preset file can never reach outside the workspace. */
+bool IsPresetAssetPath(const std::string& s);
+
 /*---------------------------------------------------------*\
 ||| ZoneLayout — how a zone's emitters are generated.      ||
 |||   ring    — radius_m, start_angle_deg, reverse,        ||
@@ -105,6 +112,22 @@ struct PresetEntity
     nlohmann::json appearance;              /* retained verbatim       */
 };
 
+/*---------------------------------------------------------*\
+||| BindingHint — a compatible-hardware hint carried by    ||
+||| the TYPE. Informational only: it suggests which        ||
+||| physical controller/zone this device kind can attach   ||
+||| to, it never binds anything and never grants           ||
+||| `verified` (device_settings owns that). All fields     ||
+||| optional; known keys only — an unknown key is almost   ||
+||| certainly a typo and is rejected at parse.             ||
+\*---------------------------------------------------------*/
+struct BindingHint
+{
+    std::string controller_name;    /* e.g. "X870E AORUS ELITE"  */
+    std::string vendor;             /* e.g. "Gigabyte"           */
+    std::string zone_name;          /* e.g. "ARGB_V2_1"          */
+};
+
 struct DevicePreset
 {
     int                             schema_version = DEVICE_PRESET_SCHEMA_VERSION;
@@ -113,6 +136,7 @@ struct DevicePreset
     std::string                     category;
     std::map<std::string, PresetEntity> entities;
     std::vector<DeviceZone>         zones;
+    std::vector<BindingHint>        binding_hints;
 };
 
 /* Deterministic serialization (two-space pretty print via dump(2)
@@ -143,5 +167,11 @@ std::vector<Emitter> GenerateZoneEmitters(const DeviceZone& z,
 /* Other type ids this preset references through entity `type`
    fields (dependency edges for cycle checks). */
 std::vector<std::string> PresetDependencies(const DevicePreset& p);
+
+/* Asset paths this preset's entity `appearance` objects reference
+   (model / image fields), de-duplicated in first-seen order —
+   the list export/bundling (task 4.4) and registry asset checks
+   consume. */
+std::vector<std::string> PresetAssetRefs(const DevicePreset& p);
 
 } /* namespace studio */

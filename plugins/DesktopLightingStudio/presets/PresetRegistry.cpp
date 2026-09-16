@@ -60,6 +60,120 @@ std::vector<std::string> PresetRegistry::Ids() const
     return ids;
 }
 
+/*---------------------------------------------------------*\
+||| List() helpers                                          ||
+\*---------------------------------------------------------*/
+namespace
+{
+
+/* Summed static LED count; 0 when any zone's emitter count is
+   decided by the bound hardware at runtime (dynamic matrix). */
+static unsigned int LedTotal(const DevicePreset& p, bool* dynamic)
+{
+    unsigned int total = 0;
+    for(const DeviceZone& z : p.zones)
+    {
+        if(z.layout.type == "matrix" && z.layout.dynamic)
+        {
+            *dynamic = true;
+            continue;
+        }
+        if(z.layout.type == "points")
+        {
+            /* Points zones derive their count from the point list —
+               led_count 0 is legal there. */
+            total += (unsigned int)z.layout.points.size();
+        }
+        else
+        {
+            total += z.led_count;
+        }
+    }
+    return *dynamic ? 0 : total;
+}
+
+/* Union of local entity footprints in type-local space: each
+   part contributes its position +- rotated size_m/2 box. Child
+   type refs contribute nothing (their bounds are the child's own
+   listing's problem — resolving them here would need recursion). */
+static Vec3 BoundsOf(const DevicePreset& p)
+{
+    Vec3 lo { 0.0f, 0.0f, 0.0f }, hi { 0.0f, 0.0f, 0.0f };
+    bool any = false;
+    for(const auto& kv : p.entities)
+    {
+        const PresetEntity& e = kv.second;
+        if(!e.type.empty())
+        {
+            continue;   /* child type ref */
+        }
+        const Vec3 half { e.size_m.x * 0.5f, e.size_m.y * 0.5f,
+                          e.size_m.z * 0.5f };
+        for(int i = 0; i < 8; i++)
+        {
+            const Vec3 corner {
+                (i & 1) ? half.x : -half.x,
+                (i & 2) ? half.y : -half.y,
+                (i & 4) ? half.z : -half.z,
+            };
+            Transform t;
+            t.position     = e.position;
+            t.rotation_deg = e.rotation_deg;
+            const Vec3 w = TransformPoint(t, corner);
+            if(!any)
+            {
+                lo = hi = w;
+                any = true;
+            }
+            else
+            {
+                lo.x = std::min(lo.x, w.x); lo.y = std::min(lo.y, w.y);
+                lo.z = std::min(lo.z, w.z);
+                hi.x = std::max(hi.x, w.x); hi.y = std::max(hi.y, w.y);
+                hi.z = std::max(hi.z, w.z);
+            }
+        }
+    }
+    return { hi.x - lo.x, hi.y - lo.y, hi.z - lo.z };
+}
+
+} /* anonymous namespace */
+
+std::vector<PresetRegistry::PresetInfo> PresetRegistry::List() const
+{
+    /* The merged view the library UI shows: file layer shadows
+       the packaged default with the same id. Both source maps are
+       id-ordered, so merging into one ordered map keeps the
+       listing sorted. */
+    std::map<std::string, std::pair<const DevicePreset*, bool>> merged;
+    for(const auto& kv : defaults)
+    {
+        merged[kv.first] = { &kv.second, false };
+    }
+    for(const auto& kv : types)
+    {
+        merged[kv.first] = { &kv.second, true };
+    }
+
+    std::vector<PresetInfo> out;
+    out.reserve(merged.size());
+    for(const auto& kv : merged)
+    {
+        const DevicePreset& p = *kv.second.first;
+        PresetInfo info;
+        info.id         = p.id;
+        info.name       = p.name;
+        info.category   = p.category;
+        info.from_file  = kv.second.second;
+        info.zone_count = (unsigned int)p.zones.size();
+        bool dynamic    = false;
+        info.led_total  = LedTotal(p, &dynamic);
+        info.bounds_m   = BoundsOf(p);
+        out.push_back(info);
+    }
+    return out;
+}
+
 static std::string BasenameType(const std::string& path)
 {
     const std::string name =
@@ -71,6 +185,35 @@ static std::string BasenameType(const std::string& path)
         return name.substr(0, name.size() - suffix.size());
     }
     return std::string();
+}
+
+/* Type files live at <workspace>/presets/devices/<id>.device.json;
+   referenced assets live at <workspace>/assets/. Missing assets
+   are REPORTED but the type still registers — a dangling icon or
+   model path must not kill every instance of the type. Returns
+   false when any referenced file is absent. */
+static bool CheckAssetRefs(const DevicePreset& p,
+                           const std::filesystem::path& devices_dir,
+                           const std::string& source,
+                           std::vector<std::string>* errors)
+{
+    bool ok = true;
+    const std::filesystem::path assets =
+        (devices_dir / ".." / ".." / "assets").lexically_normal();
+    std::error_code ec;
+    for(const std::string& ref : PresetAssetRefs(p))
+    {
+        if(!std::filesystem::exists(assets / ref, ec))
+        {
+            ok = false;
+            if(errors)
+            {
+                errors->push_back(source + ": missing asset '"
+                                  + ref + "'");
+            }
+        }
+    }
+    return ok;
 }
 
 bool PresetRegistry::LoadDirectory(const std::string& dir,
@@ -126,6 +269,11 @@ bool PresetRegistry::LoadDirectory(const std::string& dir,
         }
         types[p.id] = p;
         file_errors.erase(path);
+        if(!CheckAssetRefs(p, entry.path().parent_path(), path, errors))
+        {
+            ok = false;
+            file_errors[path] = "missing asset reference";
+        }
     }
     /* Dependency validation can only run once the whole directory
        is in — a type may reference a sibling loaded later. */
@@ -177,6 +325,15 @@ bool PresetRegistry::LoadFile(const std::string& path,
             }
         }
         return false;
+    }
+    /* Missing assets don't roll back the type — they surface as
+       load errors while the file stays registered. LoadFile still
+       returns true: the registry did change, and its contract is
+       "false = left unchanged". */
+    if(!CheckAssetRefs(p, std::filesystem::path(path).parent_path(),
+                       path, errors))
+    {
+        file_errors[path] = "missing asset reference";
     }
     return true;
 }

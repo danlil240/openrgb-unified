@@ -8,7 +8,9 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QThread>
 #include <QTimer>
@@ -178,14 +180,16 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
         setStatus(QStringLiteral("autosave failed: %1").arg(msg));
     });
 
-    /* Type library: packaged defaults underneath whatever the
-       workspace presets dir holds (loaded on each Reload). */
-    registry.SetDefaults(DefaultDevicePresets());
+    /* Type library: the packaged *.device.json files are the
+       authoritative defaults underneath whatever the workspace
+       presets dir holds (file types are loaded on each Reload). */
+    LoadPresetDefaults();
 
     /* Start on the default compact workspace resolved through the
        registry — resolution cannot fail on the bundled types, but
        guard anyway. */
-    workspace = BuildDefaultWorkspace();
+    workspace = using_fallback_types ? BuildFallbackWorkspace()
+                                     : BuildDefaultWorkspace();
     SceneDocument resolved;
     if(ResolveScene(workspace, registry, resolved, nullptr))
     {
@@ -753,13 +757,74 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
     }
 }
 
+void SceneBridge::LoadPresetDefaults()
+{
+    /* The bundled presets/devices/*.device.json files are the
+       authoritative type library — enumerate the qrc, parse +
+       validate each, and layer them under the file layer. A bad
+       packaged file is reported and skipped without aborting the
+       rest. Only when NOTHING readable ships (missing qrc, every
+       file failing) does the minimal C++ set stand in so the
+       recovery desk can still resolve. */
+    std::vector<DevicePreset> packaged;
+    QStringList               bad;
+    QDirIterator it(QStringLiteral(":/studio/presets/devices"),
+                    { QStringLiteral("*.device.json") }, QDir::Files);
+    while(it.hasNext())
+    {
+        const QString res = it.next();
+        QFile f(res);
+        if(!f.open(QIODevice::ReadOnly))
+        {
+            bad << res;
+            continue;
+        }
+        const QByteArray bytes = f.readAll();
+        const nlohmann::json j = nlohmann::json::parse(
+            bytes.constBegin(), bytes.constEnd(), nullptr, false);
+        DevicePreset p;
+        std::vector<std::string> errs;
+        const QString base =
+            QFileInfo(res).fileName().section('.', 0, 0);
+        if(j.is_discarded()
+           || !DevicePresetFromJson(j, p, &errs)
+           || p.id != base.toStdString())
+        {
+            bad << res;
+            qWarning() << "packaged preset" << res << "rejected:"
+                       << (errs.empty()
+                               ? QStringLiteral("invalid")
+                               : QString::fromStdString(errs.front()));
+            continue;
+        }
+        packaged.push_back(p);
+    }
+    if(packaged.empty())
+    {
+        registry.SetDefaults(DefaultDevicePresets());
+        using_fallback_types = true;
+        setStatus(QStringLiteral(
+            "packaged device presets unreadable — minimal recovery set"));
+        return;
+    }
+    registry.SetDefaults(std::move(packaged));
+    using_fallback_types = false;
+    if(!bad.isEmpty())
+    {
+        setStatus(QStringLiteral("presets: %1 packaged file(s) invalid"
+                                 " (%2)")
+                      .arg(bad.size())
+                      .arg(bad.first()));
+    }
+}
+
 void SceneBridge::ReloadPresets()
 {
     /* Packaged defaults underneath the file layer — a missing or
        removed type file falls back to the shipped definition, so
        the default desk is always recoverable. Bad files report
        errors but never block the rest of the library. */
-    registry.SetDefaults(DefaultDevicePresets());
+    LoadPresetDefaults();
     registry.ClearFiles();
     if(store != nullptr)
     {
@@ -1600,7 +1665,8 @@ void SceneBridge::resetScene()
         selected.clear();
     }
     emit selectionChanged();
-    workspace = BuildDefaultWorkspace();
+    workspace = using_fallback_types ? BuildFallbackWorkspace()
+                                     : BuildDefaultWorkspace();
     SceneDocument resolved;
     doc = ResolveScene(workspace, registry, resolved, nullptr)
         ? resolved : BuildDefaultDesk();

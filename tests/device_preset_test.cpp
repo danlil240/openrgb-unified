@@ -162,6 +162,47 @@ static void WriteFile(const std::filesystem::path& p, const json& j)
     f << j.dump(2) << "\n";
 }
 
+/* The bundled type library (the authoritative defaults layer the
+   plugin loads from the qrc; the test reads the same files from
+   the source tree). The suite runs from tests/. */
+static std::filesystem::path PackagedPresetDir()
+{
+    const std::filesystem::path candidates[2] = {
+        std::filesystem::path("..") / "plugins"
+            / "DesktopLightingStudio" / "presets" / "devices",
+        std::filesystem::path("..") / ".." / "plugins"
+            / "DesktopLightingStudio" / "presets" / "devices",
+    };
+    for(const auto& c : candidates)
+    {
+        std::error_code ec;
+        if(std::filesystem::is_directory(c, ec))
+        {
+            return c;
+        }
+    }
+    return candidates[0];
+}
+
+static StudioDocument TwoFanWorkspace();   /* defined below */
+
+static std::vector<DevicePreset> PackagedPresets()
+{
+    std::vector<DevicePreset> out;
+    std::error_code ec;
+    for(const auto& e :
+        std::filesystem::directory_iterator(PackagedPresetDir(), ec))
+    {
+        DevicePreset p;
+        if(e.is_regular_file()
+           && DevicePresetFromJsonFile(e.path().string(), p, nullptr))
+        {
+            out.push_back(p);
+        }
+    }
+    return out;
+}
+
 /* World-space emitter positions: object world matrix x emitter
    local position — the transform the effects engine renders. */
 static std::vector<Vec3> WorldEmitters(const SceneDocument& doc,
@@ -481,6 +522,282 @@ static void TestMatrixValidation()
 }
 
 /*---------------------------------------------------------*\
+||| Emitter generation — geometry and LED ordering for   ||
+||| every layout kind. Address order always walks the    ||
+||| physical LED chain; layout params only move where    ||
+||| each address sits in space.                          ||
+\*---------------------------------------------------------*/
+static void TestEmitterGeneration()
+{
+    std::vector<std::string> errors;
+    DevicePreset p;
+
+    /*--- ring: count, radius circle, face plane, angle knobs ---*/
+    {
+        json j = FanPreset("ring-dev", 4);
+        j["zones"][0]["layout"]["radius_m"] = 0.1;
+        j["zones"][0]["layout"]["face_y_m"] = 0.02;
+        CHECK(DevicePresetFromJson(j, p, &errors), "gen: ring parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "g", 0);
+        /* angle 0 = +X; CCW seen from +Y maps +angle to -z. */
+        CHECK(em.size() == 4
+              && Near(em[0].local_pos.x, 0.1f)
+              && Near(em[0].local_pos.z, 0.0f)
+              && Near(em[1].local_pos.x, 0.0f)
+              && Near(em[1].local_pos.z, -0.1f)
+              && Near(em[2].local_pos.x, -0.1f)
+              && Near(em[3].local_pos.z, 0.1f)
+              && Near(em[0].local_pos.y, 0.02f)
+              && em[0].address == 0 && em[3].address == 3,
+              "gen: ring positions on the face plane");
+    }
+    {
+        /* start_angle_deg rotates where LED 0 sits */
+        json j = FanPreset("ring-dev", 4);
+        j["zones"][0]["layout"]["radius_m"]        = 0.1;
+        j["zones"][0]["layout"]["start_angle_deg"] = 90.0;
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "gen: start-angle ring parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "g", 0);
+        CHECK(em.size() == 4
+              && Near(em[0].local_pos.x, 0.0f)
+              && Near(em[0].local_pos.z, -0.1f)
+              && Near(em[1].local_pos.x, -0.1f),
+              "gen: start_angle_deg moves LED 0");
+    }
+    {
+        /* reverse walks the addresses the other way around the
+           circle — same positions, opposite index order. */
+        json j = FanPreset("ring-dev", 4);
+        j["zones"][0]["layout"]["radius_m"] = 0.1;
+        j["zones"][0]["layout"]["reverse"]  = true;
+        CHECK(DevicePresetFromJson(j, p, &errors), "gen: reverse parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "g", 0);
+        CHECK(em.size() == 4
+              && Near(em[0].local_pos.x, 0.1f)
+              && Near(em[1].local_pos.z, 0.1f)
+              && Near(em[3].local_pos.z, -0.1f)
+              && em[1].address == 1 && em[3].address == 3,
+              "gen: reverse flips the LED walk");
+    }
+
+    /*--- strip: +X march from origin, addr_base offsets ---*/
+    {
+        json j = FanPreset("strip-dev");
+        j["zones"][0]["led_count"] = 5;
+        j["zones"][0]["layout"] = {
+            {"type",      "strip"},
+            {"spacing_m", 0.01},
+            {"origin",    {0.05, 0.01, -0.02}},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors), "gen: strip parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "s", 10);
+        bool ok = em.size() == 5;
+        for(size_t i = 0; i < em.size() && ok; i++)
+        {
+            ok = Near(em[i].local_pos.x, 0.05f + 0.01f * (float)i)
+                 && Near(em[i].local_pos.y, 0.01f)
+                 && Near(em[i].local_pos.z, -0.02f)
+                 && em[i].address == 10 + (int)i;
+        }
+        CHECK(ok, "gen: strip spacing, origin + addr_base");
+    }
+
+    /*--- matrix: map[row*cols+col] gives the address sitting at
+          cell (row,col); emitters come out in row-major order,
+          empty cells skipped. ---*/
+    {
+        CHECK(DevicePresetFromJson(MatrixPreset("mx"), p, &errors),
+              "gen: matrix parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "pad", 0);
+        /* map {0,1,empty,2,3,4} on a 2x3 grid, pitch 0.019. */
+        bool ok = em.size() == 5;
+        if(ok)
+        {
+            ok = em[0].address == 0
+                 && Near(em[0].local_pos.x, 0.0f)
+                 && Near(em[0].local_pos.z, 0.0f)
+              && em[2].address == 2      /* row 1, col 0 */
+                 && Near(em[2].local_pos.x, 0.0f)
+                 && Near(em[2].local_pos.z, -0.019f)
+              && em[4].address == 4      /* row 1, col 2 */
+                 && Near(em[4].local_pos.x, 0.038f)
+                 && Near(em[4].local_pos.z, -0.019f);
+        }
+        CHECK(ok, "gen: matrix map order -> cell positions");
+    }
+    {
+        /* dynamic matrix: no emitters — rebuilt from the bound
+           zone's hardware map at runtime. */
+        json j = FanPreset("dyn");
+        j["zones"][0]["led_count"] = 0;
+        j["zones"][0]["layout"] = {
+            {"type", "matrix"}, {"dynamic", true},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors), "gen: dynamic parses");
+        CHECK(GenerateZoneEmitters(p.zones[0], "d", 0).empty(),
+              "gen: dynamic matrix emits nothing");
+    }
+
+    /*--- points: explicit order preserved; addresses optional ---*/
+    {
+        json j = FanPreset("pts-dev");
+        j["zones"][0]["led_count"] = 3;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            /* deliberately unsorted — order IS the LED order */
+            {"points", {{0.03, 0, 0}, {0.01, 0, 0}, {0.02, 0, 0}}},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors), "gen: points parses");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "pt", 7);
+        CHECK(em.size() == 3
+              && Near(em[0].local_pos.x, 0.03f)
+              && Near(em[1].local_pos.x, 0.01f)
+              && Near(em[2].local_pos.x, 0.02f)
+              && em[0].address == 7 && em[2].address == 9,
+              "gen: points keep file order, addr_base offsets");
+    }
+    {
+        json j = FanPreset("pts-dev");
+        j["zones"][0]["led_count"] = 3;
+        j["zones"][0]["layout"] = {
+            {"type", "points"},
+            {"points", {{0, 0, 0}, {0.01, 0, 0}, {0.02, 0, 0}}},
+            {"addresses", {5, -1, 9}},
+        };
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "gen: explicit addresses parse");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "pt", 7);
+        CHECK(em.size() == 3 && em[0].address == 5
+              && em[1].address == -1 && em[2].address == 9,
+              "gen: explicit addresses win over addr_base");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Invalid zone sizes — led_count vs layout, degenerate ||
+||| parameters. A bad size must be a file error at parse,||
+||| never a silent zero-emitter zone or a generator that ||
+||| divides by a zero count.                             ||
+\*---------------------------------------------------------*/
+static void TestZoneSizeValidation()
+{
+    std::vector<std::string> errors;
+    DevicePreset p;
+
+    /* ring/strip are static generators — led_count 0 is reserved
+       for dynamic matrix zones. */
+    {
+        json j = FanPreset("no-leds");
+        j["zones"][0]["led_count"] = 0;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "size: zero-LED ring rejected");
+    }
+    {
+        json j = FanPreset("no-leds");
+        j["zones"][0]["led_count"] = 0;
+        j["zones"][0]["layout"] = {
+            {"type", "strip"}, {"spacing_m", 0.01},
+        };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "size: zero-LED strip rejected");
+    }
+    /* negative led_count */
+    {
+        json j = FanPreset("neg-leds");
+        j["zones"][0]["led_count"] = -4;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "size: negative led_count rejected");
+    }
+    /* zero/negative radius + spacing */
+    {
+        json j = FanPreset("flat-ring");
+        j["zones"][0]["layout"]["radius_m"] = 0.0;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "radius_m"),
+              "size: zero radius rejected");
+        j["zones"][0]["layout"]["radius_m"] = -0.5;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "radius_m"),
+              "size: negative radius rejected");
+    }
+    {
+        json j = FanPreset("flat-strip");
+        j["zones"][0]["led_count"] = 4;
+        j["zones"][0]["layout"] = {
+            {"type", "strip"}, {"spacing_m", 0.0},
+        };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "spacing_m"),
+              "size: zero spacing rejected");
+        j["zones"][0]["layout"]["spacing_m"] = -0.01;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "spacing_m"),
+              "size: negative spacing rejected");
+    }
+    /* empty points list */
+    {
+        json j = FanPreset("no-points");
+        j["zones"][0]["led_count"] = 0;
+        j["zones"][0]["layout"] = {
+            {"type", "points"}, {"points", json::array()},
+        };
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "points"),
+              "size: empty points rejected");
+    }
+    /* static matrix: led_count must equal the non-empty cell
+       count — the generated emitter count, like the points rule. */
+    {
+        json j = MatrixPreset("mx-bad");
+        j["zones"][0]["led_count"] = 4;   /* map has 5 live cells */
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "size: static matrix led_count mismatch rejected");
+    }
+    {
+        json j = MatrixPreset("mx-bad");
+        j["zones"][0]["led_count"] = 0;
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "led_count"),
+              "size: static matrix led_count 0 rejected");
+    }
+    /* matrix rows*cols beyond the map is already covered
+       (short map); rows/cols of 0 with a map is the same hole. */
+    {
+        json j = MatrixPreset("mx-flat");
+        j["zones"][0]["layout"]["rows"] = 0;
+        CHECK(!DevicePresetFromJson(j, p, &errors),
+              "size: static matrix without rows rejected");
+    }
+    /* a 1x2 matrix with a custom empty sentinel */
+    {
+        json j = MatrixPreset("mx-sent");
+        j["zones"][0]["led_count"] = 1;
+        j["zones"][0]["layout"]["rows"]  = 1;
+        j["zones"][0]["layout"]["cols"]  = 2;
+        j["zones"][0]["layout"]["empty"] = 77;
+        j["zones"][0]["layout"]["map"]   = {0, 77};
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "size: custom empty sentinel accepted");
+        const std::vector<Emitter> em =
+            GenerateZoneEmitters(p.zones[0], "m", 0);
+        CHECK(em.size() == 1 && em[0].address == 0,
+              "size: sentinel cell skipped at generation");
+    }
+}
+
+/*---------------------------------------------------------*\
 ||| Effect targets: every WithTargets string in the        ||
 ||| built-in presets must resolve to at least one emitter- ||
 ||| bearing object in the default workspace. A dead target ||
@@ -489,7 +806,7 @@ static void TestMatrixValidation()
 static void TestEffectTargetsResolve()
 {
     PresetRegistry reg;
-    reg.SetDefaults(DefaultDevicePresets());
+    reg.SetDefaults(PackagedPresets());
     const StudioDocument w = BuildDefaultWorkspace();
     SceneDocument doc;
     std::vector<std::string> errors;
@@ -610,7 +927,7 @@ static void TestRegistry()
     {
         /* defaults fill in underneath the file layer */
         PresetRegistry reg;
-        reg.SetDefaults(DefaultDevicePresets());
+        reg.SetDefaults(PackagedPresets());
         CHECK(reg.Contains("fan-120") && reg.Contains("group"),
               "registry: packaged defaults resolvable");
         CHECK(reg.LoadDirectory(TempDir("empty").string(), &errors),
@@ -634,6 +951,463 @@ static void TestRegistry()
               && reg.Contains("fan-120"),
               "registry: failed LoadFile leaves registry intact");
     }
+}
+
+/*---------------------------------------------------------*\
+||| Registry edge cases: duplicate ids, dependency        ||
+||| chains/cycles, asset references.                      ||
+\*---------------------------------------------------------*/
+static json ChainPreset(const std::string& id, const std::string& dep)
+{
+    json j = FanPreset(id);
+    if(!dep.empty())
+    {
+        j["entities"]["child"] = {
+            {"type", dep},
+            {"x", 0}, {"y", 0}, {"z", 0},
+            {"rx", 0}, {"ry", 0}, {"rz", 0},
+        };
+    }
+    return j;
+}
+
+static void TestRegistryEdgeCases()
+{
+    std::vector<std::string> errors;
+
+    /* Duplicate ids: two files claiming one id. The file whose
+       NAME matches the id wins deterministically; the impostor is
+       rejected — never "whichever the scan found first". */
+    {
+        const auto dir = TempDir("dup-ids");
+        json real = FanPreset("fan-x");
+        real["name"] = "Real fan";
+        json impostor = FanPreset("fan-x");
+        impostor["name"] = "Impostor fan";
+        WriteFile(dir / "fan-x.device.json",    real);
+        WriteFile(dir / "impostor.device.json", impostor);
+        PresetRegistry reg;
+        CHECK(!reg.LoadDirectory(dir.string(), &errors)
+              && HasError(errors, "does not match"),
+              "dup-ids: second claim rejected");
+        const DevicePreset* got = reg.Find("fan-x");
+        CHECK(got != nullptr && got->name == "Real fan",
+              "dup-ids: filename-named file wins deterministically");
+        CHECK(reg.FileCount() == 1,
+              "dup-ids: impostor never entered the file layer");
+    }
+    /* When NEITHER file is named after the claimed id, both are
+       rejected — there is no winner to pick. */
+    {
+        const auto dir = TempDir("dup-orphans");
+        WriteFile(dir / "a.device.json", FanPreset("dup"));
+        WriteFile(dir / "b.device.json", FanPreset("dup"));
+        PresetRegistry reg;
+        errors.clear();
+        CHECK(!reg.LoadDirectory(dir.string(), &errors)
+              && !reg.Contains("dup") && reg.FileCount() == 0,
+              "dup-ids: orphan claims both rejected");
+    }
+
+    /* Transitive dependency chain a -> b -> c loads whole; a
+       missing tail removes only the dependents above it. */
+    {
+        const auto dir = TempDir("dep-chain");
+        WriteFile(dir / "chain-a.device.json", ChainPreset("chain-a", "chain-b"));
+        WriteFile(dir / "chain-b.device.json", ChainPreset("chain-b", "chain-c"));
+        WriteFile(dir / "chain-c.device.json", ChainPreset("chain-c", ""));
+        PresetRegistry reg;
+        errors.clear();
+        CHECK(reg.LoadDirectory(dir.string(), &errors)
+              && reg.Contains("chain-a") && reg.Contains("chain-b")
+              && reg.Contains("chain-c"),
+              "deps: transitive chain loads");
+    }
+    {
+        const auto dir = TempDir("dep-chain-broken");
+        WriteFile(dir / "chain-a.device.json", ChainPreset("chain-a", "chain-b"));
+        WriteFile(dir / "chain-b.device.json", ChainPreset("chain-b", "ghost"));
+        WriteFile(dir / "chain-c.device.json", ChainPreset("chain-c", ""));
+        PresetRegistry reg;
+        errors.clear();
+        CHECK(!reg.LoadDirectory(dir.string(), &errors)
+              && HasError(errors, "missing dependency"),
+              "deps: missing tail reported");
+        CHECK(!reg.Contains("chain-a") && !reg.Contains("chain-b")
+              && reg.Contains("chain-c"),
+              "deps: dependents cascade-removed, unrelated kept");
+    }
+    /* Self-reference is a reference cycle of length 1. */
+    {
+        const auto dir = TempDir("self-ref");
+        WriteFile(dir / "selfy.device.json", ChainPreset("selfy", "selfy"));
+        PresetRegistry reg;
+        errors.clear();
+        CHECK(!reg.LoadDirectory(dir.string(), &errors)
+              && HasError(errors, "cycle")
+              && !reg.Contains("selfy"),
+              "deps: self-reference rejected as cycle");
+    }
+
+    /* Asset references in appearance resolve against the
+       workspace assets/ dir (sibling of presets/). A missing file
+       must be REPORTED, not crash — the type still registers (a
+       dangling icon must not kill every instance of it). */
+    {
+        const auto root = TempDir("assets");
+        const auto dir  = root / "presets" / "devices";
+        std::filesystem::create_directories(dir);
+        std::filesystem::create_directories(root / "assets");
+        {
+            std::ofstream f(root / "assets" / "plate.png");
+            f << "png";
+        }
+        json good = FanPreset("with-asset");
+        good["entities"]["frame"]["appearance"] = {{"model", "plate.png"}};
+        WriteFile(dir / "with-asset.device.json", good);
+        json bad = FanPreset("missing-asset");
+        bad["entities"]["frame"]["appearance"] =
+            {{"model", "no-such-file.glb"}};
+        WriteFile(dir / "missing-asset.device.json", bad);
+        PresetRegistry reg;
+        errors.clear();
+        CHECK(!reg.LoadDirectory(dir.string(), &errors)
+              && HasError(errors, "no-such-file.glb"),
+              "assets: missing file reported");
+        CHECK(reg.Contains("with-asset") && reg.Contains("missing-asset"),
+              "assets: types still resolvable");
+    }
+    /* Asset path SYNTAX is parse-layer validation: relative
+       portable paths only — no drive letters, no absolute paths,
+       no .. escapes. */
+    {
+        DevicePreset p;
+        json j = FanPreset("path-check");
+        j["entities"]["frame"]["appearance"] =
+            {{"model", "../escape.glb"}};
+        errors.clear();
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "model"),
+              "assets: .. escape rejected at parse");
+        j["entities"]["frame"]["appearance"] =
+            {{"model", "C:/abs.glb"}};
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "model"),
+              "assets: absolute path rejected at parse");
+        j["entities"]["frame"]["appearance"] =
+            {{"model", "fans/fan-a.glb"}};
+        CHECK(DevicePresetFromJson(j, p, &errors),
+              "assets: clean relative path parses");
+        /* the collected refs feed export/bundling (task 4.4) */
+        const std::vector<std::string> refs = PresetAssetRefs(p);
+        CHECK(refs.size() == 1 && refs[0] == "fans/fan-a.glb",
+              "assets: ref enumeration");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| PresetRegistry::List — the merged file-over-default    ||
+||| library view the device-library UI (task 4.2) reads.   ||
+\*---------------------------------------------------------*/
+static void TestRegistryList()
+{
+    std::vector<std::string> errors;
+    PresetRegistry reg;
+
+    DevicePreset fan, grp;
+    CHECK(DevicePresetFromJson(FanPreset("fan-120"), fan, nullptr),
+          "list: fixture parses");
+    grp.id = "group"; grp.name = "Placement group"; grp.category = "group";
+    reg.SetDefaults({ fan, grp });
+
+    /* A file-layer preset with the same id overrides its default;
+       a file-only preset joins the list. */
+    const auto dir = TempDir("list");
+    json jf = FanPreset("fan-120", 16);
+    jf["name"] = "Edited fan";
+    WriteFile(dir / "fan-120.device.json", jf);
+    WriteFile(dir / "pad.device.json",      MatrixPreset("pad"));
+    /* a dynamic-matrix type reports led_total 0 */
+    json dyn = FanPreset("kbd");
+    dyn["entities"]["diffuser"]["zone"] = "mx";
+    dyn["entities"].erase("frame");
+    dyn["entities"]["diffuser"]["size_m"] = {0.4, 0.02, 0.15};
+    dyn["zones"][0] = {
+        {"id", "mx"}, {"entity", "diffuser"}, {"led_count", 0},
+        {"layout", {{"type", "matrix"}, {"dynamic", true}}},
+    };
+    WriteFile(dir / "kbd.device.json", dyn);
+    CHECK(reg.LoadDirectory(dir.string(), &errors), "list: dir loads");
+
+    const std::vector<PresetRegistry::PresetInfo> infos = reg.List();
+    CHECK(infos.size() == 4, "list: merged file-over-default view");
+    if(infos.size() == 4)
+    {
+        /* sorted by id: fan-120, group, kbd, pad */
+        CHECK(infos[0].id == "fan-120" && infos[1].id == "group"
+              && infos[2].id == "kbd" && infos[3].id == "pad",
+              "list: sorted by id");
+        CHECK(infos[0].from_file && infos[0].name == "Edited fan",
+              "list: file layer shadows the default");
+        CHECK(!infos[1].from_file && infos[1].name == "Placement group",
+              "list: default-only type marked packaged");
+        CHECK(infos[0].zone_count == 1 && infos[0].led_total == 16,
+              "list: zone + led totals from the file version");
+        /* bounds_m = union of entity size_m footprints: the edited
+           fan's frame (0.12,0.025,0.12) at origin plus diffuser
+           (0.11,0.004,0.11) at y=0.013 -> y union
+           [-0.0125, 0.015] = 0.0275 tall. */
+        CHECK(Near(infos[0].bounds_m.x, 0.12f)
+              && Near(infos[0].bounds_m.y, 0.0275f)
+              && Near(infos[0].bounds_m.z, 0.12f),
+              "list: bounds union of entity footprints");
+        CHECK(infos[2].led_total == 0,
+              "list: dynamic matrix reports led_total 0");
+        CHECK(infos[3].led_total == 5
+              && Near(infos[3].bounds_m.x, 0.06f),
+              "list: static matrix counts live cells");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| binding_hints — optional compatible-hardware hints on  ||
+||| the TYPE (never per-instance serials, never verified). ||
+\*---------------------------------------------------------*/
+static void TestBindingHints()
+{
+    std::vector<std::string> errors;
+    DevicePreset p;
+
+    {
+        json j = FanPreset("hinted");
+        j["binding_hints"] = json::array({
+            {{"controller_name", "X870E AORUS ELITE"},
+             {"vendor",          "Gigabyte"},
+             {"zone_name",       "ARGB_V2_1"}},
+            {{"vendor", "Lian Li"}},
+        });
+        CHECK(DevicePresetFromJson(j, p, &errors)
+              && p.binding_hints.size() == 2
+              && p.binding_hints[0].controller_name == "X870E AORUS ELITE"
+              && p.binding_hints[0].zone_name == "ARGB_V2_1"
+              && p.binding_hints[1].vendor == "Lian Li"
+              && p.binding_hints[1].zone_name.empty(),
+              "hints: parsed");
+        const json back = ToJson(p);
+        CHECK(back.contains("binding_hints")
+              && back["binding_hints"].size() == 2
+              && back["binding_hints"][1].size() == 1,
+              "hints: serialized, empty fields omitted");
+        DevicePreset p2;
+        CHECK(DevicePresetFromJson(back, p2, &errors)
+              && p2.binding_hints.size() == 2
+              && p2.binding_hints[0].vendor == "Gigabyte",
+              "hints: round-trip");
+    }
+    /* unknown hint keys are reported as likely typos — hints are
+       known-fields-only, never retained verbatim. */
+    {
+        json j = FanPreset("hinted");
+        j["binding_hints"] = json::array({
+            {{"controller_name", "G512"}, {"controlller", "typo"}},
+        });
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "binding_hints")
+              && HasError(errors, "typo"),
+              "hints: unknown key reported as typo");
+    }
+    {
+        json j = FanPreset("hinted");
+        j["binding_hints"] = json::array({ "G512" });
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "binding_hints"),
+              "hints: non-object entry rejected");
+        j["binding_hints"] = json::array({ {{"vendor", 42}} });
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "binding_hints"),
+              "hints: non-string value rejected");
+        j["binding_hints"] = "G512";
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "binding_hints"),
+              "hints: non-array rejected");
+    }
+    /* control characters are not sane name charset */
+    {
+        json j = FanPreset("hinted");
+        j["binding_hints"] = json::array({
+            {{"controller_name", "bad\nname"}},
+        });
+        CHECK(!DevicePresetFromJson(j, p, &errors)
+              && HasError(errors, "binding_hints"),
+              "hints: control characters rejected");
+    }
+    /* omitted by default; never written when empty */
+    {
+        CHECK(DevicePresetFromJson(FanPreset("plain"), p, nullptr)
+              && p.binding_hints.empty()
+              && !ToJson(p).contains("binding_hints"),
+              "hints: omitted when empty");
+    }
+    /* hints are informational — they never grant verified. A bound
+       zone's verified flag still comes only from device_settings. */
+    {
+        DevicePreset hinted;
+        json j = FanPreset("fan-120");
+        j["binding_hints"] = json::array({
+            {{"controller_name", "Ctrl A"}, {"zone_name", "Z1"}},
+        });
+        CHECK(DevicePresetFromJson(j, hinted, nullptr),
+              "hints: fixture parses");
+        PresetRegistry reg;
+        reg.SetDefaults({ hinted });
+        StudioDocument w = TwoFanWorkspace();
+        /* unverified zone setting + a matching hint: still not
+           verified after resolve. */
+        w.device_settings["fan_a"].zones["ring"].verified = false;
+        SceneDocument doc;
+        CHECK(ResolveScene(w, reg, doc, &errors),
+              "hints: workspace resolves");
+        const SceneObject* da = FindObject(doc, "fan_a/diffuser");
+        CHECK(da != nullptr && !da->verified,
+              "hints: never grant verified");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Shared-definition reload via the programmatic path:    ||
+||| mutate a DevicePreset, re-Add it, re-resolve — every  ||
+||| dependent instance updates together while siblings   ||
+||| and the generated <instance>/<entity> ids are stable.||
+\*---------------------------------------------------------*/
+static void TestSharedDefinitionReload()
+{
+    std::vector<std::string> errors;
+    PresetRegistry reg;
+
+    DevicePreset fan, pad;
+    CHECK(DevicePresetFromJson(FanPreset("fan-120", 8), fan, nullptr)
+          && DevicePresetFromJson(MatrixPreset("pad"), pad, nullptr),
+          "sreload: fixtures parse");
+    CHECK(reg.Add(fan, &errors) && reg.Add(pad, &errors),
+          "sreload: types register");
+
+    StudioDocument w = TwoFanWorkspace();
+    /* room for the edited 16- and 24-LED type revisions */
+    w.bindings["bus_a"].zone_leds = 32;
+    w.bindings["bus_b"].zone_leds = 32;
+    DeviceInstance d;
+    d.type     = "pad";
+    d.position = { 0.0f, 0.0f, 0.5f };
+    w.devices["pad"] = d;
+
+    SceneDocument doc;
+    CHECK(ResolveScene(w, reg, doc, &errors), "sreload: baseline resolve");
+    std::set<std::string> ids_before;
+    for(const SceneObject& o : doc.objects)
+    {
+        ids_before.insert(o.id);
+    }
+
+    /* Mutate the shared type — 16 LEDs now — and re-Add. */
+    fan.zones[0].led_count = 16;
+    CHECK(reg.Add(fan, &errors), "sreload: edited type re-added");
+    SceneDocument doc2;
+    errors.clear();
+    CHECK(ResolveScene(w, reg, doc2, &errors), "sreload: re-resolve");
+    std::set<std::string> ids_after;
+    for(const SceneObject& o : doc2.objects)
+    {
+        ids_after.insert(o.id);
+    }
+    CHECK(ids_before == ids_after,
+          "sreload: entity ids stable across reload");
+    const SceneObject* da = FindObject(doc2, "fan_a/diffuser");
+    const SceneObject* db = FindObject(doc2, "fan_b/diffuser");
+    const SceneObject* dp = FindObject(doc2, "pad/body");
+    CHECK(da != nullptr && db != nullptr
+          && da->emitters.size() == 16 && db->emitters.size() == 16,
+          "sreload: every instance picks up the edit");
+    CHECK(dp != nullptr && dp->emitters.size() == 5,
+          "sreload: sibling type untouched");
+
+    /* The file path behaves the same: LoadFile replaces the file-
+       layer definition and re-resolution picks it up. */
+    const auto dir = TempDir("sreload-file");
+    WriteFile(dir / "fan-120.device.json", FanPreset("fan-120", 24));
+    CHECK(reg.LoadFile((dir / "fan-120.device.json").string(), &errors),
+          "sreload: LoadFile replaces the type");
+    SceneDocument doc3;
+    errors.clear();
+    CHECK(ResolveScene(w, reg, doc3, &errors), "sreload: file re-resolve");
+    da = FindObject(doc3, "fan_a/diffuser");
+    db = FindObject(doc3, "fan_b/diffuser");
+    CHECK(da != nullptr && db != nullptr
+          && da->emitters.size() == 24 && db->emitters.size() == 24,
+          "sreload: LoadFile edit rebuilds all instances");
+}
+
+/*---------------------------------------------------------*\
+||| The packaged library: every bundled                  ||
+||| presets/devices/*.device.json must parse + validate, ||
+||| the default workspace must resolve against them, and ||
+||| the minimal C++ fallback still produces a resolvable ||
+||| desk when no packaged file is readable.              ||
+\*---------------------------------------------------------*/
+static void TestPackagedDefaults()
+{
+    std::vector<std::string> errors;
+
+    const std::filesystem::path dir = PackagedPresetDir();
+    std::error_code ec;
+    CHECK(std::filesystem::is_directory(dir, ec),
+          "packaged: presets/devices exists");
+
+    /* Loading the packaged dir exercises every file: parse +
+       validate + id==filename + dependency graph. */
+    PresetRegistry reg;
+    CHECK(reg.LoadDirectory(dir.string(), &errors),
+          "packaged: every bundled type validates");
+    if(!errors.empty())
+    {
+        std::printf("  (packaged errors: %s)\n", errors.front().c_str());
+    }
+    CHECK(reg.FileCount() >= 10,
+          "packaged: library populated");
+    CHECK(reg.Contains("desk") && reg.Contains("group")
+          && reg.Contains("fan-120") && reg.Contains("fan-slw"),
+          "packaged: core types present");
+
+    /* the default compact workspace resolves against them */
+    StudioDocument w = BuildDefaultWorkspace();
+    SceneDocument doc;
+    errors.clear();
+    CHECK(ResolveScene(w, reg, doc, &errors),
+          "packaged: default workspace resolves");
+    if(!errors.empty())
+    {
+        std::printf("  (packaged resolve: %s)\n", errors.front().c_str());
+    }
+
+    /* Fallback: defaults layer = the minimal C++ set, no files —
+       the recoverable desk must still resolve. */
+    PresetRegistry minimal;
+    minimal.SetDefaults(DefaultDevicePresets());
+    CHECK(minimal.Contains("desk") && minimal.Contains("group"),
+          "fallback: desk + group in the minimal set");
+    StudioDocument fw = BuildFallbackWorkspace();
+    SceneDocument fdoc;
+    errors.clear();
+    CHECK(ResolveScene(fw, minimal, fdoc, &errors),
+          "fallback: minimal workspace resolves");
+    CHECK(FindObject(fdoc, "desk/body") != nullptr,
+          "fallback: desk body expands");
+    /* ... and the full default workspace is NOT resolvable on the
+       minimal set — the split is honest, not vestigial. */
+    SceneDocument keep;
+    keep.objects.push_back(SceneObject{});
+    CHECK(!ResolveScene(w, minimal, keep, &errors)
+          && keep.objects.size() == 1,
+          "fallback: full workspace needs the packaged types");
 }
 
 /*---------------------------------------------------------*\
@@ -942,8 +1716,8 @@ static void TestResolveFailures()
 }
 
 /*---------------------------------------------------------*\
-|||| Expansion caps — the v2 scene validator's bounds,    ||
-|||| enforced while instances unfold.                     ||
+||| Expansion caps — the v2 scene validator's bounds,    ||
+||| enforced while instances unfold.                     ||
 \*---------------------------------------------------------*/
 static void TestResolveCaps()
 {
@@ -1224,10 +1998,10 @@ static void TestMigration()
 }
 
 /*---------------------------------------------------------*\
-|||| Migration — sparse emitter maps: objects with the     ||
-|||| same non-contiguous address PATTERN at different      ||
-|||| bases must not collapse into one type — absolute      ||
-|||| addresses are physical identity.                       ||
+||| Migration — sparse emitter maps: objects with the     ||
+||| same non-contiguous address PATTERN at different      ||
+||| bases must not collapse into one type — absolute      ||
+||| addresses are physical identity.                       ||
 \*---------------------------------------------------------*/
 static void TestMigrationSparseAddresses()
 {
@@ -1348,14 +2122,14 @@ static void TestMigrationSparseAddresses()
 }
 
 /*---------------------------------------------------------*\
-||| The packaged default: compact workspace + default      ||
-||| presets resolve to the same desk BuildDefaultDesk()    ||
-||| produces (transform/effect parity).                    ||
+||| The packaged default: compact workspace + bundled     ||
+||| type files resolve to the same desk BuildDefaultDesk()||
+||| produces (transform/effect parity).                   ||
 \*---------------------------------------------------------*/
 static void TestDefaultWorkspaceParity()
 {
     PresetRegistry reg;
-    reg.SetDefaults(DefaultDevicePresets());
+    reg.SetDefaults(PackagedPresets());
 
     StudioDocument w = BuildDefaultWorkspace();
     std::vector<std::string> errors;
@@ -1398,15 +2172,22 @@ int main()
     TestPresetBasics();
     TestPresetValidation();
     TestMatrixValidation();
+    TestEmitterGeneration();
+    TestZoneSizeValidation();
     TestRegistry();
+    TestRegistryEdgeCases();
+    TestRegistryList();
+    TestBindingHints();
     TestResolveTwoFans();
     TestResolveMirror();
     TestResolveFailures();
     TestCompactRoundTrip();
     TestTypeReload();
+    TestSharedDefinitionReload();
     TestMigration();
     TestMigrationSparseAddresses();
     TestResolveCaps();
+    TestPackagedDefaults();
     TestDefaultWorkspaceParity();
     TestEffectTargetsResolve();
 

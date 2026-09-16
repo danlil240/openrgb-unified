@@ -653,6 +653,80 @@ bool ConfigStore::SaveAs(const StudioDocument& doc, const QString& path,
     return WriteAtomic(path, Serialize(doc), error);
 }
 
+bool ConfigStore::WritePresetFile(const DevicePreset& p, QString* error)
+{
+    /* id == filename is a registry rule — refuse to write a file
+       the next scan would reject, and keep the charset portable. */
+    if(!IsPresetId(p.id))
+    {
+        if(error)
+        {
+            *error = QStringLiteral("bad preset id '%1' — expected"
+                                    " [A-Za-z0-9_-]")
+                         .arg(QString::fromStdString(p.id));
+        }
+        return false;
+    }
+
+    /* Round-trip the candidate through the real parser before disk
+       is touched — a preset that can't survive its own serializer
+       never becomes a file. */
+    const QByteArray bytes =
+        QByteArray::fromStdString(ToJson(p).dump(2)) + "\n";
+    {
+        const nlohmann::json j = nlohmann::json::parse(
+            bytes.constBegin(), bytes.constEnd(), nullptr, false);
+        DevicePreset check;
+        std::vector<std::string> errs;
+        if(j.is_discarded() || !DevicePresetFromJson(j, check, &errs))
+        {
+            if(error)
+            {
+                *error = QStringLiteral("candidate invalid: %1")
+                    .arg(QString::fromStdString(
+                        errs.empty() ? "serialization" : errs.front()));
+            }
+            return false;
+        }
+    }
+
+    QDir d(dir);
+    if(!QFileInfo::exists(PresetDir()) && !d.mkpath("presets/devices"))
+    {
+        if(error)
+        {
+            *error = QStringLiteral("cannot create %1").arg(PresetDir());
+        }
+        return false;
+    }
+    const QString target = PresetDir() + "/"
+        + QString::fromStdString(p.id) + ".device.json";
+    if(!WriteAtomic(target, bytes, error))
+    {
+        return false;
+    }
+
+    /* Validate the file that actually landed — a committed type
+       file must parse on the next registry scan. */
+    DevicePreset landed;
+    std::vector<std::string> verrs;
+    if(!DevicePresetFromJsonFile(target.toStdString(), landed, &verrs)
+       || landed.id != p.id)
+    {
+        QFile::remove(target);
+        if(error)
+        {
+            *error = QStringLiteral("%1: written type failed"
+                                    " re-validation (%2)")
+                .arg(target)
+                .arg(QString::fromStdString(
+                    verrs.empty() ? "id mismatch" : verrs.front()));
+        }
+        return false;
+    }
+    return true;
+}
+
 void ConfigStore::MarkDirty()
 {
     if(!dirty_state)

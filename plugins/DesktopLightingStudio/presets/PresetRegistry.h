@@ -62,6 +62,28 @@ public:
     std::vector<std::string> Ids() const;      /* all resolvable ids */
     size_t FileCount() const { return types.size(); }
 
+    /* Library listing for the device-library UI (task 4.2): the
+       merged file-over-default view, sorted by id.
+       - from_file: the file layer supplied this definition
+         (a user edit shadowing a packaged default reports true).
+       - zone_count / led_total: zone count and summed static LED
+         count; led_total is 0 when any zone is dynamic (a matrix
+         resolved from the bound hardware zone at runtime).
+       - bounds_m: union of the type's local entity footprints
+         (position +- rotated size_m/2); child type refs don't
+         contribute — their bounds belong to their own listing. */
+    struct PresetInfo
+    {
+        std::string  id;
+        std::string  name;
+        std::string  category;
+        bool         from_file  = false;
+        unsigned int zone_count = 0;
+        unsigned int led_total  = 0;
+        Vec3         bounds_m;
+    };
+    std::vector<PresetInfo> List() const;
+
     /* path -> last load error (diagnostics). */
     const std::map<std::string, std::string>& FileErrors() const
     {

@@ -451,6 +451,102 @@ static void TestMigrationRetry()
     }
 }
 
+/*---------------------------------------------------------*\
+||| WritePresetFile — the preset editor's validated atomic ||
+||| type-file save (task 4.1): candidate re-validation,    ||
+||| id == filename, post-commit re-read. studio.json and   ||
+||| instance placements are never touched.                 ||
+\*---------------------------------------------------------*/
+static void TestWritePresetFile()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+    ConfigStore store(tmp.path());
+    store.EnsureWorkspaceDir();
+
+    /* A minimal valid type. */
+    DevicePreset fan;
+    QString err;
+    {
+        const nlohmann::json j = {
+            {"schema_version", 1},
+            {"id", "test-fan"},
+            {"name", "Test fan"},
+            {"category", "fan"},
+            {"entities", {
+                {"body", {
+                    {"geometry", "fan_body"},
+                    {"size_m", {0.12, 0.025, 0.12}},
+                    {"zone", "ring"},
+                }},
+            }},
+            {"zones", nlohmann::json::array({
+                {{"id", "ring"}, {"entity", "body"}, {"led_count", 8},
+                 {"layout", {{"type", "ring"}, {"radius_m", 0.052}}}},
+            })},
+        };
+        CHECK(DevicePresetFromJson(j, fan, nullptr),
+              "preset-write: fixture validates");
+    }
+    CHECK(store.WritePresetFile(fan, &err), "preset-write: save");
+    const QString path = store.PresetDir() + "/test-fan.device.json";
+    CHECK(QFileInfo::exists(path), "preset-write: file landed");
+
+    /* the landed file re-validates and the registry picks it up */
+    {
+        DevicePreset back;
+        CHECK(DevicePresetFromJsonFile(path.toStdString(), back, nullptr)
+              && back.id == "test-fan" && back.zones.size() == 1,
+              "preset-write: landed file re-validates");
+        PresetRegistry reg;
+        std::vector<std::string> lerrs;
+        CHECK(reg.LoadDirectory(store.PresetDir().toStdString(), &lerrs)
+              && reg.Contains("test-fan"),
+              "preset-write: registry loads written file");
+    }
+
+    /* studio.json must not appear — a type write never touches
+       the workspace document or placements. */
+    CHECK(!store.DocumentExists(),
+          "preset-write: studio.json untouched");
+
+    /* An overwrite commits atomically — same id, new content. */
+    fan.name = "Test fan v2";
+    fan.zones[0].led_count = 16;
+    CHECK(store.WritePresetFile(fan, &err), "preset-write: overwrite");
+    {
+        DevicePreset back;
+        CHECK(DevicePresetFromJsonFile(path.toStdString(), back, nullptr)
+              && back.name == "Test fan v2" && back.zones[0].led_count == 16,
+              "preset-write: overwrite replaced content");
+    }
+
+    /* A bad id never reaches disk. */
+    DevicePreset bad = fan;
+    bad.id = "bad id!";
+    CHECK(!store.WritePresetFile(bad, &err) && !err.isEmpty(),
+          "preset-write: bad id refused");
+    CHECK(!QFileInfo::exists(store.PresetDir() + "/bad id!.device.json"),
+          "preset-write: no file for bad id");
+
+    /* A candidate that cannot survive validation — serialize a
+       preset whose zone names a missing entity — is refused and
+       the previous file stays. */
+    {
+        const QByteArray before = ReadAll(path);
+        DevicePreset broken = fan;
+        broken.id = "test-fan";
+        broken.zones[0].entity = "ghost";
+        /* WritePresetFile re-validates the SERIALIZED form — a
+           programmatically-invalid preset fails there, before
+           disk. */
+        CHECK(!store.WritePresetFile(broken, &err),
+              "preset-write: invalid candidate refused");
+        CHECK(ReadAll(path) == before,
+              "preset-write: refused write leaves file intact");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -462,6 +558,7 @@ int main(int argc, char** argv)
     TestV2FileMigration();
     TestMigrationMarkers();
     TestMigrationRetry();
+    TestWritePresetFile();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

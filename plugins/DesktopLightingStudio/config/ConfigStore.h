@@ -98,6 +98,17 @@ public:
     bool SaveAs(const StudioDocument& doc, const QString& path,
                 QString* error = nullptr);
 
+    /* Validated atomic write of ONE device-type file at
+       presets/devices/<id>.device.json — the preset editor's save
+       path (task 4.3). The candidate is serialized, re-validated
+       through DevicePresetFromJson, and required to satisfy
+       id == filename (IsPresetId charset) before disk is touched;
+       after commit the landed file is re-read and re-validated.
+       studio.json is never touched — a type write changes no
+       instance placement — and a failed save leaves the previous
+       file (and the active scene/inputs/output) untouched. */
+    bool WritePresetFile(const DevicePreset& p, QString* error = nullptr);
+
     /* Dirty tracking + debounced autosave. The provider is invoked
        on this object's thread when the autosave timer fires. */
     bool dirty() const { return dirty_state; }

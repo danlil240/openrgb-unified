@@ -66,6 +66,11 @@ struct UiPrefs
 {
     std::string theme = "graphite";
     bool        reduced_motion = false;
+    /* ui.favorites — pinned device-type ids, display order kept.
+       UI state only: not undoable, never part of the scene.
+       Non-string entries and invalid identifiers are dropped on
+       load with a warning; duplicates collapse to first seen. */
+    std::vector<std::string> favorites;
 };
 
 struct CameraPrefs

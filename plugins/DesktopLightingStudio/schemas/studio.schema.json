@@ -18,7 +18,15 @@
       "type": "object",
       "properties": {
         "theme": { "type": "string", "default": "graphite" },
-        "reduced_motion": { "type": "boolean", "default": false }
+        "reduced_motion": { "type": "boolean", "default": false },
+        "favorites": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "description": "Pinned device-type ids (library UI state — not undoable, never part of the scene)."
+        }
       }
     },
     "camera": {

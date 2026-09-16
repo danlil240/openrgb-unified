@@ -24,9 +24,45 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 using nlohmann::json;
+
+/* The bundled type library — the authoritative defaults layer the
+   plugin loads from the qrc; the test reads the same files from
+   the source tree (the suite runs from tests/). */
+static std::vector<studio::DevicePreset> PackagedPresets()
+{
+    const std::filesystem::path candidates[2] = {
+        std::filesystem::path("..") / "plugins"
+            / "DesktopLightingStudio" / "presets" / "devices",
+        std::filesystem::path("..") / ".." / "plugins"
+            / "DesktopLightingStudio" / "presets" / "devices",
+    };
+    std::vector<studio::DevicePreset> out;
+    std::error_code ec;
+    for(const auto& dir : candidates)
+    {
+        for(const auto& e :
+            std::filesystem::directory_iterator(dir, ec))
+        {
+            studio::DevicePreset p;
+            if(e.is_regular_file()
+               && studio::DevicePresetFromJsonFile(e.path().string(),
+                                                   p, nullptr))
+            {
+                out.push_back(p);
+            }
+        }
+        if(!out.empty())
+        {
+            break;
+        }
+    }
+    return out;
+}
 
 static int failures = 0;
 static int checks   = 0;
@@ -810,7 +846,7 @@ static void TestDefaultWorkspace()
     using namespace studio;
 
     PresetRegistry reg;
-    reg.SetDefaults(DefaultDevicePresets());
+    reg.SetDefaults(PackagedPresets());
 
     StudioDocument w = BuildDefaultWorkspace();
     std::vector<std::string> errors;
@@ -834,6 +870,78 @@ static void TestDefaultWorkspace()
     CHECK(!expanded, "default: compact text has no expanded content");
 }
 
+/*---------------------------------------------------------*\
+||| ui.favorites — pinned device-type ids. Order kept,     ||
+||| deduped; malformed entries drop with a warning         ||
+||| (recoverable config-field behavior). UI state only —   ||
+||| never undoable, never part of the scene.               ||
+\*---------------------------------------------------------*/
+static void TestUiFavorites()
+{
+    using namespace studio;
+    std::vector<std::string> errors, warnings;
+    StudioDocument doc;
+
+    {
+        json j = {{"schema_version", STUDIO_SCHEMA_VERSION}};
+        j["ui"] = {
+            {"favorites", { "fan-120", "ram-stick", "fan-120",
+                            "gpu-fan" }},
+        };
+        CHECK(FromJson(j, doc, &errors, &warnings)
+              && doc.meta.ui.favorites.size() == 3
+              && doc.meta.ui.favorites[0] == "fan-120"
+              && doc.meta.ui.favorites[1] == "ram-stick"
+              && doc.meta.ui.favorites[2] == "gpu-fan",
+              "favorites: order kept, duplicates collapse");
+        const json back = ToJson(doc);
+        CHECK(back["ui"]["favorites"].size() == 3
+              && back["ui"]["favorites"][1] == "ram-stick",
+              "favorites: serialized");
+        StudioDocument doc2;
+        errors.clear(); warnings.clear();
+        CHECK(FromJson(back, doc2, &errors, &warnings)
+              && doc2.meta.ui.favorites.size() == 3
+              && doc2.meta.ui.favorites[2] == "gpu-fan",
+              "favorites: round-trip");
+    }
+    /* non-string entries and bad identifiers drop with a
+       warning — the doc still parses. */
+    {
+        json j = {{"schema_version", STUDIO_SCHEMA_VERSION}};
+        j["ui"] = {
+            {"favorites", { "fan-120", 42, "bad id!", json::object(),
+                            "gpu-fan" }},
+        };
+        warnings.clear();
+        CHECK(FromJson(j, doc, &errors, &warnings)
+              && doc.meta.ui.favorites.size() == 2
+              && doc.meta.ui.favorites[0] == "fan-120"
+              && doc.meta.ui.favorites[1] == "gpu-fan",
+              "favorites: bad entries dropped");
+        CHECK(HasError(warnings, "favorites[1]")
+              && HasError(warnings, "favorites[2]")
+              && HasError(warnings, "favorites[3]"),
+              "favorites: drops reported as warnings");
+    }
+    /* a non-array favorites field is dropped wholesale */
+    {
+        json j = {{"schema_version", STUDIO_SCHEMA_VERSION}};
+        j["ui"] = {{"favorites", "fan-120"}};
+        warnings.clear();
+        CHECK(FromJson(j, doc, &errors, &warnings)
+              && doc.meta.ui.favorites.empty()
+              && HasError(warnings, "favorites"),
+              "favorites: non-array dropped with warning");
+    }
+    /* absent favorites stays absent — no noise in the file */
+    {
+        doc = StudioDocument{};
+        CHECK(!ToJson(doc)["ui"].contains("favorites"),
+              "favorites: omitted when empty");
+    }
+}
+
 int main()
 {
     TestWorkspaceRoundTrip();
@@ -843,6 +951,7 @@ int main()
     TestEffectsSection();
     TestDocumentLimits();
     TestDefaultWorkspace();
+    TestUiFavorites();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
