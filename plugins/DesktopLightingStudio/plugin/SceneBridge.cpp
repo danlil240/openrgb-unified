@@ -578,39 +578,34 @@ void SceneBridge::setPaintColor(const QColor& color)
 
 void SceneBridge::undo()
 {
-    /* An active gesture's snapshot predates the stack op — cancel
-       it (restores previewed transforms into the workspace) before
-       applyEdit rewrites the workspace underneath it. */
-    const bool had = editor.GestureActive();
-    const std::set<std::string> gids = editor.GestureIds();
-    editor.Cancel();
-    undo_stack->undo();
-    /* The stack op may not re-resolve: an empty stack is a no-op and
-       overlay commands (color/emitter/brightness) mutate doc fields
-       directly. If a gesture was just cancelled, doc would otherwise
-       keep the last previewed pose — the gesture is dead, so no
-       further preview would heal it. Re-resolve the restored
-       workspace; the one extra resolve in the already-adopted case
-       is cheap. */
-    if(had)
+    /* Refuse under a live transform gesture — the stack op would
+       write beneath the snapshot the gesture is previewing against
+       (the same refusal contract the EditorController ops use). The
+       gesture survives and keeps previewing; the status hint tells
+       the user why nothing happened. The QML shortcut/button gates
+       catch this first — this guard is the contract for every
+       caller. */
+    if(editor.GestureActive())
     {
-        previewAdopt(gids);
+        emit statusMessage(
+            QStringLiteral("undo refused — finish the drag first"));
+        return;
     }
+    undo_stack->undo();
     PruneSelection();
     emit undoChanged();
 }
 
 void SceneBridge::redo()
 {
-    /* Same gesture-cancel + re-resolve reasoning as undo(). */
-    const bool had = editor.GestureActive();
-    const std::set<std::string> gids = editor.GestureIds();
-    editor.Cancel();
-    undo_stack->redo();
-    if(had)
+    /* Same mid-gesture refusal as undo(). */
+    if(editor.GestureActive())
     {
-        previewAdopt(gids);
+        emit statusMessage(
+            QStringLiteral("redo refused — finish the drag first"));
+        return;
     }
+    undo_stack->redo();
     PruneSelection();
     emit undoChanged();
 }

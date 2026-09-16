@@ -62,7 +62,7 @@ TestCase {
 
     function makeCam() {
         return {
-            ortho: true, deferPose: false, log: [],
+            ortho: true, deferPose: false, deferredSave: false, log: [],
             origin: { forward: Qt.vector3d(0, 0, -1) },
             poseSnapshot: function() {
                 return { t: Qt.vector3d(0, 0, 0), yaw: 0, pitch: -38,
@@ -70,7 +70,14 @@ TestCase {
             },
             panPixels: function(dx, dy) { this.log.push("pan") },
             orbitPixels: function(dx, dy) { this.log.push("orbit") },
-            endPose: function() { this.log.push("endPose") },
+            endPose: function() { this.deferredSave = false
+                                  this.log.push("endPose") },
+            flushDeferredPose: function() {
+                if (this.deferredSave) {
+                    this.deferredSave = false
+                    this.log.push("flush")
+                }
+            },
             restorePose: function(s) { this.log.push("restore") },
             pointUnderPointer: function(x, y) {
                 return Qt.vector3d(0.1, 0.02, 0.2)
@@ -227,19 +234,89 @@ TestCase {
         compare(logged(brStub.log, "commitT").length, 0)
     }
 
-    /* I3: spaceDown never outlives a gesture or a cancel. */
-    function test_spaceDown_clears() {
+    /* D1: spaceDown tracks the physical key — gesture end and
+       cancel() must NOT clear it (only key release / application
+       deactivation do, in the host scene). Clearing it on reset()
+       desynced from a still-held Space and, since held-key
+       autorepeat is filtered, misrouted every second held-space
+       drag to move/marquee. */
+    function test_spaceDown_survives_gesture_end() {
         sel.spaceDown = true
         sel.cancel()
-        compare(sel.spaceDown, false)
-        sel.spaceDown = true
+        compare(sel.spaceDown, true, "cancel desynced spaceDown")
         sel.beginPressAt(100, 100, Qt.LeftButton, 0,
                          "obj|kbd", Qt.vector3d(0, 0.02, 0.2))
         sel.dragTo(160, 100, 0)
         compare(sel.gesture, 1)          /* space+drag pans */
         sel.endGesture(160, 100, Qt.LeftButton, 0)
-        compare(sel.spaceDown, false)
+        compare(sel.spaceDown, true, "gesture end desynced spaceDown")
         compare(logged(camStub.log, "pan").length, 1)
+        compare(logged(camStub.log, "endPose").length, 1)
+        /* Second held-space drag must pan too — the regression. */
+        sel.beginPressAt(200, 200, Qt.LeftButton, 0, "", null)
+        sel.dragTo(260, 200, 0)
+        compare(sel.gesture, 1, "second held-space drag did not pan")
+        sel.endGesture(260, 200, Qt.LeftButton, 0)
+        sel.spaceDown = false
+    }
+
+    /* D4: deferPose is armed at PRESS for every gesture-capable
+       button — a wheel inside the click-candidate window can't
+       persist a pose a later Escape would roll back. */
+    function test_defer_pose_at_press() {
+        sel.beginPressAt(100, 100, Qt.LeftButton, 0, "", null)
+        compare(camStub.deferPose, true,
+                "click-candidate press did not defer pose saves")
+        sel.endGesture(100, 100, Qt.LeftButton, 0)
+        compare(camStub.deferPose, false)
+    }
+
+    /* D4b (real CameraController): a wheel zoom deferred inside a
+       non-camera gesture persists ONCE at gesture end — deferral is
+       delay-to-release, not a drop — while Escape on a camera
+       gesture drops it (the snapshot restore wins). */
+    function test_deferred_zoom_flush_and_drop() {
+        var c = makeRealCam()
+        var saves = 0
+        c.poseFinished.connect(function() { saves++ })
+        sel.cam = c
+
+        /* Wheel during a click-candidate -> move drag: deferred at
+           zoom, flushed once at release. */
+        sel.beginPressAt(100, 100, Qt.LeftButton, 0,
+                         "obj|kbd", Qt.vector3d(0, 0.02, 0.2))
+        compare(c.deferPose, true)
+        sel.wheelAt(100, 100, 120)
+        compare(saves, 0, "zoom persisted inside the press window")
+        compare(c.deferredSave, true)
+        sel.dragTo(160, 100, 0)
+        compare(sel.gesture, 2)
+        sel.endGesture(160, 100, Qt.LeftButton, 0)
+        compare(saves, 1, "deferred zoom not flushed at release")
+        compare(c.deferPose, false)
+
+        /* Wheel during a pan, then Escape: snapshot restore wins —
+           the deferred save is dropped, never persisted. */
+        sel.beginPressAt(100, 100, Qt.MiddleButton, 0, "", null)
+        compare(sel.gesture, 1)
+        sel.wheelAt(100, 100, 120)
+        compare(c.deferredSave, true)
+        sel.cancel()
+        compare(saves, 1, "deferred zoom persisted past a restore")
+        compare(c.deferredSave, false)
+    }
+
+    /* D7: releasing a different button must not end the gesture —
+       only the button that started the press does. */
+    function test_cross_button_release_ignored() {
+        sel.beginPressAt(100, 100, Qt.MiddleButton, 0, "", null)
+        compare(sel.gesture, 1)
+        sel.dragTo(140, 100, 0)
+        sel.endGesture(140, 100, Qt.LeftButton, 0)   /* wrong button */
+        compare(sel.pressed, true, "foreign release ended the gesture")
+        compare(logged(camStub.log, "endPose").length, 0)
+        sel.endGesture(140, 100, Qt.MiddleButton, 0)
+        compare(sel.pressed, false)
         compare(logged(camStub.log, "endPose").length, 1)
     }
 

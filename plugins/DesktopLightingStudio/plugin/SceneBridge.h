@@ -144,6 +144,8 @@ public slots:
     void setLive(bool on);
     void setCaseGhost(bool on);
     void setPaintColor(const QColor& color);
+    /* Both refuse (statusMessage hint, gesture survives) while a
+       transform gesture is live — see gestureActive(). */
     void undo();
     void redo();
     void refreshDevices();

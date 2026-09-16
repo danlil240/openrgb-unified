@@ -129,6 +129,34 @@ Rectangle {
             bridge.clearEditorSelection()
     }
 
+    /* True while any gesture-capable press window is open: the
+       click candidate, live pan/orbit/move/rotate/marquee/paint,
+       or the bridge's transform gesture. Frame commands emit
+       poseFinished under the press's camera snapshot — gate them
+       on this the same way undo is gated. */
+    function gestureBusy() {
+        return selCtl.pressed
+               || (typeof bridge !== "undefined" && bridge.gestureActive())
+    }
+
+    /* Undo/redo never run under a live gesture — the stack op would
+       write beneath the snapshot the gesture is previewing against.
+       The bridge slot refuses too (defense for ungated callers);
+       gating here lets the swallowed shortcut say WHY via the
+       results box. */
+    function undoOrRedo(redo) {
+        if (typeof bridge === "undefined")
+            return
+        if (bridge.gestureActive()) {
+            bridge.statusMessage("finish the drag first")
+            return
+        }
+        if (redo)
+            bridge.redo()
+        else
+            bridge.undo()
+    }
+
     View3D {
         id: view
         anchors.fill: parent
@@ -526,22 +554,18 @@ Rectangle {
                onActivated: selCtl.setTool(1) }
     Shortcut { sequence: "P";    enabled: !inspector.textFocus
                onActivated: selCtl.setTool(2) }
+    /* Frame commands emit poseFinished under a live gesture's camera
+       snapshot — gate them on the press window the same way. */
     Shortcut { sequence: "F";    enabled: !inspector.textFocus
-               onActivated: selCtl.frameSelection() }
+               onActivated: if (!root.gestureBusy()) selCtl.frameSelection() }
     Shortcut { sequence: "Home"; enabled: !inspector.textFocus
-               onActivated: selCtl.frameAll() }
-    /* Undo/redo must not run under a live gesture — it would write
-       beneath the snapshot the gesture is previewing against.
-       Checked at activation time (gestureActive has no NOTIFY). */
+               onActivated: if (!root.gestureBusy()) selCtl.frameAll() }
     Shortcut { sequence: "Ctrl+Z"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined"
-                                && !bridge.gestureActive()) bridge.undo() }
+               onActivated: root.undoOrRedo(false) }
     Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined"
-                                && !bridge.gestureActive()) bridge.redo() }
+               onActivated: root.undoOrRedo(true) }
     Shortcut { sequence: "Ctrl+Y"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined"
-                                && !bridge.gestureActive()) bridge.redo() }
+               onActivated: root.undoOrRedo(true) }
     Shortcut { sequence: "Escape"
                onActivated: root.escapeAll() }
 
@@ -551,13 +575,21 @@ Rectangle {
     }
 
     /* Focus loss mid-space-hold would leave a sticky pan modifier —
-       the next left-drag would unexpectedly pan. Clear on deactivate
-       (selCtl.reset() covers the gesture-end path too). */
+       the next left-drag would unexpectedly pan. spaceDown mirrors
+       the physical key, so it is cleared ONLY here (app deactivation)
+       and on key release — never on gesture end.
+       This must key off Qt.application.state, not Window.active:
+       under QQuickWidget the offscreen QQuickWindow never becomes
+       active, so activeChanged never fires — application state is
+       app-global and does. The cancel() also drops any gesture whose
+       grab deactivation ate (pressed/deferPose can't stick). */
     Connections {
-        target: root.Window.window
-        function onActiveChanged() {
-            if (target && !target.active)
+        target: Qt.application
+        function onStateChanged() {
+            if (Qt.application.state !== Qt.ApplicationActive) {
                 selCtl.spaceDown = false
+                selCtl.cancel()
+            }
         }
     }
 

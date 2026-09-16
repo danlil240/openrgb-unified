@@ -543,14 +543,66 @@ private slots:
                { c.x() + 200, c.y(), (int)Qt::LeftButton, 0 });
     }
 
-    /* I3 regression: spaceDown is a momentary modifier — gesture end
-       / cancel must clear it (a sticky flag would turn the next
-       left-drag into an unexpected pan). */
-    void spaceDown_clearsOnReset()
+    /* D1 regression: spaceDown mirrors the PHYSICAL Space key — it
+       clears only on key release or app deactivation (host-side
+       Connections), never on gesture end. Clearing it in reset()
+       desynced from a still-held Space, and because held-key
+       autorepeat is filtered, nothing re-armed it — every second
+       held-space drag misrouted to move/marquee. */
+    void spaceDown_survivesGestureEnd()
     {
         sel->setProperty("spaceDown", true);
+        const QPoint c(w->width() / 2, w->height() / 2);
+
+        callFn(sel, "beginPressAt",
+               { c.x(), c.y(), (int)Qt::LeftButton, 0, "", QVariant() });
+        callFn(sel, "dragTo", { c.x() + 60, c.y() + 30, 0 });
+        QCOMPARE(sel->property("gesture").toInt(), 1);   /* space pans */
+        callFn(sel, "endGesture",
+               { c.x() + 60, c.y() + 30, (int)Qt::LeftButton, 0 });
+        QCOMPARE(sel->property("spaceDown").toBool(), true);
+
+        /* cancel() doesn't clear it either — after Escape the key is
+           still down and the next drag SHOULD pan. */
         callFn(sel, "cancel", {});
-        QCOMPARE(sel->property("spaceDown").toBool(), false);
+        QCOMPARE(sel->property("spaceDown").toBool(), true);
+
+        /* The second held-space drag must pan again — the regression
+           misrouted it to marquee/move. */
+        callFn(sel, "beginPressAt",
+               { c.x(), c.y(), (int)Qt::LeftButton, 0, "", QVariant() });
+        callFn(sel, "dragTo", { c.x() + 40, c.y() - 20, 0 });
+        QCOMPARE(sel->property("gesture").toInt(), 1);
+        callFn(sel, "endGesture",
+               { c.x() + 40, c.y() - 20, (int)Qt::LeftButton, 0 });
+        sel->setProperty("spaceDown", false);
+    }
+
+    /* D5 regression: undo()/redo() REFUSE mid-gesture — the gesture
+       survives and keeps previewing; a statusMessage hint fires. */
+    void undoRedo_refusedMidGesture()
+    {
+        const QString obj = firstDeviceObjectId();
+        const QPoint c(w->width() / 2, w->height() / 2);
+
+        callFn(sel, "beginPressAt",
+               { c.x(), c.y(), (int)Qt::LeftButton, 0,
+                 "obj|" + obj, QVariant::fromValue(worldPosOf(obj)) });
+        callFn(sel, "dragTo", { c.x() + 50, c.y(), 0 });
+        QCOMPARE(sel->property("gesture").toInt(), 2);   /* gMove */
+        QVERIFY(bridge->gestureActive());
+
+        QSignalSpy spy(bridge, &studio::SceneBridge::statusMessage);
+        bridge->undo();
+        QVERIFY(bridge->gestureActive());   /* not cancelled */
+        QCOMPARE(spy.count(), 1);
+        bridge->redo();
+        QVERIFY(bridge->gestureActive());
+        QCOMPARE(spy.count(), 2);
+
+        callFn(sel, "cancel", {});
+        QVERIFY(!bridge->gestureActive());
+        QVERIFY(!bridge->canUndo());
     }
 
     /* I2: end-to-end left press over a device. Synthesized events go

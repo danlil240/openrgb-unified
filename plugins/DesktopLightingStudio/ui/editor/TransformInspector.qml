@@ -243,10 +243,12 @@ Rectangle {
             Item { width: 8; height: 1 }
             TBtn { text: "Undo"; w: 44
                    opacity: (typeof bridge !== "undefined" && bridge.canUndo) ? 1 : 0.4
-                   onClicked: if (typeof bridge !== "undefined") bridge.undo() }
+                   onClicked: if (typeof bridge !== "undefined"
+                                  && !bridge.gestureActive()) bridge.undo() }
             TBtn { text: "Redo"; w: 44
                    opacity: (typeof bridge !== "undefined" && bridge.canRedo) ? 1 : 0.4
-                   onClicked: if (typeof bridge !== "undefined") bridge.redo() }
+                   onClicked: if (typeof bridge !== "undefined"
+                                  && !bridge.gestureActive()) bridge.redo() }
         }
         Row {
             spacing: 4

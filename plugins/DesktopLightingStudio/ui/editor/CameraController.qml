@@ -47,11 +47,16 @@ QtObject {
        can re-evaluate their bindings. */
     property int poseStamp: 0
 
-    /* True while a pan/orbit gesture is live — zoomAt must not
-       persist a mid-gesture pose (Escape would restore the snapshot
-       after prefs already saved it). The gesture's endPose persists
-       once at release. */
+    /* True while any press window is open (SelectionController arms
+       it at every press) — zoomAt must not persist a mid-gesture
+       pose (Escape would restore the snapshot after prefs already
+       saved it). Pan/orbit persist once at release via endPose;
+       other gestures flush a deferred wheel-zoom save through
+       flushDeferredPose. */
     property bool deferPose: false
+    /* A poseFinished skipped while deferred — flushed once at
+       gesture end; cancel drops it when a snapshot restore wins. */
+    property bool deferredSave: false
 
     signal poseFinished()
 
@@ -259,6 +264,8 @@ QtObject {
         }
         if (!deferPose)
             poseFinished()
+        else
+            deferredSave = true
     }
 
     function projectPoint(worldPos) {
@@ -286,7 +293,18 @@ QtObject {
     }
 
     /* Gesture end — persist the final pose (editor prefs). */
-    function endPose() { poseFinished() }
+    function endPose() { deferredSave = false; poseFinished() }
+
+    /* Release of a NON-camera gesture: persist only when a wheel
+       zoom was deferred during the press window (delay-to-release,
+       not drop). cancel() drops the flag instead wherever a pose
+       snapshot is restored. */
+    function flushDeferredPose() {
+        if (deferredSave) {
+            deferredSave = false
+            poseFinished()
+        }
+    }
 
     function stateMap() {
         return {

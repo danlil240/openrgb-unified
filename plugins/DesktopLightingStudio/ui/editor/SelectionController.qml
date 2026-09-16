@@ -145,6 +145,11 @@ Item {
         camSnapshot = cam ? cam.poseSnapshot() : null
         lastPainted = ""
         marqueeRect = Qt.rect(0, 0, 0, 0)
+        /* Defer pose persistence for the WHOLE press window, not just
+           promoted pan/orbit: a wheel inside the click-candidate
+           window must not write a pose a later Escape would roll
+           back. Cleared in reset(). */
+        if (cam) cam.deferPose = true
 
         /* Middle pan wins over every surface and every tool. The
            middle_drag controls pref can redirect it to orbit — only
@@ -156,7 +161,6 @@ Item {
                    ? br().cameraState.middle_drag : "pan"
             gesture = (md === "orbit" && tool !== 2 && cam && !cam.ortho)
                     ? gOrbit : gPan
-            if (cam) cam.deferPose = true
             return
         }
         if (button !== Qt.LeftButton)
@@ -294,15 +298,15 @@ Item {
         if (tool === 2)
             return
 
-        /* Gesture promotion, in contract order. */
+        /* Gesture promotion, in contract order. deferPose is already
+           armed from beginPressAt. */
         if (spaceDown) {
             gesture = gPan
-            if (cam) { cam.deferPose = true; cam.panPixels(mx, my) }
+            if (cam) cam.panPixels(mx, my)
             return
         }
         if ((mods & Qt.AltModifier) && cam && !cam.ortho) {
             gesture = gOrbit
-            cam.deferPose = true
             cam.orbitPixels(mx, my)
             return
         }
@@ -336,6 +340,11 @@ Item {
     function endGesture(x, y, button, mods) {
         if (!pressed)
             return
+        /* Only the button that STARTED the press ends it — a release
+           of a different button (e.g. letting go of left while a
+           middle-pan is still held) must not commit/reset early. */
+        if (button !== pressButton)
+            return
         lastPos = Qt.point(x, y)
         var g = gesture
         if (g === gMove || g === gRotate) {
@@ -351,6 +360,10 @@ Item {
                    && pressButton === Qt.LeftButton) {
             clickAt(mods)
         }
+        /* A wheel zoom deferred during the press window persists
+           once here (pan/orbit already saved via endPose above —
+           its deferredSave flag is cleared there). */
+        flushCamPose()
         reset()
     }
 
@@ -374,26 +387,43 @@ Item {
         if (g === gMove || g === gRotate) {
             if (hasBridge())
                 br().cancelTransformGesture()
+            flushCamPose()        /* camera pose isn't restored — a
+                                     deferred wheel zoom still saves */
         } else if (g === gPan || g === gOrbit) {
             if (cam)
-                cam.restorePose(camSnapshot)   /* no save */
+                cam.restorePose(camSnapshot)   /* no save; the snapshot
+                                                  wins over any
+                                                  deferred zoom */
+        } else {
+            flushCamPose()        /* gNone/gPaint/gMarquee — nothing
+                                     camera-side to restore */
         }
         reset()
         return wasPressed || g !== gNone
     }
 
+    /* Persist a wheel-zoom pose deferred during the press window —
+       no-op when the camera doesn't track one (test stubs). */
+    function flushCamPose() {
+        if (cam && typeof cam.flushDeferredPose === "function")
+            cam.flushDeferredPose()
+    }
+
     function reset() {
         gesture     = gNone
         pressed     = false
-        /* Never leave a sticky pan modifier or a deferred camera save
-           behind — gesture end and focus loss both land here. */
-        spaceDown   = false
+        /* spaceDown is NOT cleared here — it mirrors the physical
+           Space key and is synced only by key press/release and
+           application deactivation (StudioScene). Clearing it on
+           gesture end would desync from a still-held Space (held-key
+           autorepeat is filtered out, so nothing would re-arm it) and
+           misroute the next left-drag to move/marquee. */
         pressHit    = ""
         hitObject   = ""
         startHit    = null
         marqueeRect = Qt.rect(0, 0, 0, 0)
         lastPainted = ""
-        if (cam) cam.deferPose = false
+        if (cam) { cam.deferPose = false; cam.deferredSave = false }
     }
 
     /*-----------------------------------------------------*\
