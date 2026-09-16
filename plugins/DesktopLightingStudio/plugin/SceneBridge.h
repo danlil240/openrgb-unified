@@ -423,9 +423,12 @@ private:
        so controller edits never lose paint; ResolveWorkspace runs
        the authoring doc through SceneResolver; AdoptResolved
        swaps in the resolved scene and refreshes the model,
-       matrix layouts and key lookup; applyEdit is the undo path;
-       commitEdit resolves + adopts + pushes one undo command;
-       previewAdopt is the dirty-free gesture path. */
+       matrix layouts and key lookup — plus the adapter's resolved
+       bindings when the edit carries a bindings delta, so a
+       freshly minted binding reaches output/verify in-session;
+       applyEdit is the undo path; commitEdit resolves + adopts +
+       pushes one undo command; previewAdopt is the dirty-free
+       gesture path. */
     void SyncWorkspace();
     /* Drop selection ids the workspace no longer has (undo/redo,
        rollback paths). `selected` keeps its stored OBJECT id while

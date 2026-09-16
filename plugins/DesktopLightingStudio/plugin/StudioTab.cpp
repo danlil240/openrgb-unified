@@ -277,12 +277,12 @@ void StudioTab::uiOpenWorkspaceFolder()
 
 void StudioTab::uiExportBundle()
 {
-    /* Pick (or create) a folder — the export writes studio.json +
+    /* Pick a destination folder — the export writes studio.json +
        presets/devices/ + assets/ into it. The bundle's own rule
-       refuses an occupied bundle dir; the prompt is the
-       overwrite flag the user grants. */
+       refuses an occupied dir without an explicit overwrite; the
+       prompts below are the overwrite grant the user gives. */
     const QString dir = QFileDialog::getExistingDirectory(this,
-        QStringLiteral("Export studio bundle — pick or create a folder"),
+        QStringLiteral("Export studio bundle — choose a folder"),
         bridge->workspaceDir());
     if(dir.isEmpty())
     {
@@ -295,6 +295,23 @@ void StudioTab::uiExportBundle()
             QStringLiteral("Overwrite bundle?"),
             QStringLiteral("%1 already contains a studio.json bundle.\n"
                            "Replace it?").arg(dir),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if(choice != QMessageBox::Yes)
+        {
+            return;
+        }
+        overwrite = true;
+    }
+    else if(!QDir(dir).entryList(
+                QDir::NoDotAndDotDot | QDir::AllEntries).isEmpty())
+    {
+        /* Non-empty but no studio.json — ExportBundle refuses
+           foreign content without overwrite, so ask here rather
+           than dead-ending on the export error. */
+        const auto choice = QMessageBox::warning(this,
+            QStringLiteral("Folder not empty"),
+            QStringLiteral("%1 is not empty.\n"
+                           "Export the bundle into it anyway?").arg(dir),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if(choice != QMessageBox::Yes)
         {

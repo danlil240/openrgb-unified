@@ -26,6 +26,7 @@ HEADERS += $$STUDIO/plugin/SceneBridge.h \
     $$STUDIO/config/ConfigStore.h \
     $$STUDIO/editor/SceneObjectModel.h \
     $$STUDIO/editor/PresetListModel.h \
+    $$STUDIO/presets/PresetBundle.h \
     $$STUDIO/inputs/ScreenSampler.h
 
 SOURCES += main.cpp \
@@ -39,6 +40,7 @@ SOURCES += main.cpp \
     $$STUDIO/editor/PresetListModel.cpp \
     $$STUDIO/output/ControllerAdapter.cpp \
     $$STUDIO/presets/DevicePreset.cpp \
+    $$STUDIO/presets/PresetBundle.cpp \
     $$STUDIO/presets/PresetRegistry.cpp \
     $$STUDIO/scene/SceneTypes.cpp \
     $$STUDIO/scene/SceneGraph.cpp \

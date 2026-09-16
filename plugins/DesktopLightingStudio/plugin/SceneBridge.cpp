@@ -981,6 +981,20 @@ void SceneBridge::AdoptResolved(const SceneDocument& r, const EditorEdit& e)
 {
     doc      = r;
     doc.name = workspace.meta.name;
+    if(!e.bindings.Empty())
+    {
+        /* The edit minted or dropped a bindings entry — re-resolve
+           the adapter's bindings now or Resolution()/ZoneMatrix()/
+           LEDName() can't see the change (and PushZone reports
+           "unresolved: no binding") until an unrelated hardware
+           refresh. Same io lock pair refreshDevices() uses; runs
+           before the matrix/key rebuilds below, which read adapter
+           state. applyEdit funnels through here, so undo/redo of a
+           bind edit refreshes identically. */
+        QMutexLocker lock(&io_mutex);
+        QMutexLocker lock_fast(&fast_io_mutex);
+        adapter.Refresh(doc);
+    }
     rebuildMatrixLayouts();
     rebuildKeyLookup();      /* moved keyboards ripple from the new pos */
     if(obj_model != nullptr)
@@ -1988,13 +2002,14 @@ QVariantMap SceneBridge::savePresetType(const QVariantMap& candidate,
     {
         doc      = resolved;
         doc.name = workspace.meta.name;
-        rebuildMatrixLayouts();
-        rebuildKeyLookup();
-        if(obj_model != nullptr)
-        {
-            obj_model->ResetFrom();
-        }
-        emit sceneChanged();
+        /* Same adoption path reloadDeviceTypes() uses — adapter
+           re-resolve + matrix/key rebuilds + model reset, so a
+           type save that renames or drops zones re-resolves the
+           affected bindings in-session instead of waiting for a
+           hardware refresh. refreshDevices() touches no editor,
+           gesture or selection state, so a live drag or the
+           current selection is undisturbed. */
+        refreshDevices();
         setStatus(QStringLiteral("saved type '%1'%2")
             .arg(QString::fromStdString(p.id),
                  instances > 0
