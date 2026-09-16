@@ -26,7 +26,7 @@
 ||    addDeviceInstance(typeId, x, y, z)                  ||
 ||    setTypeFavorite(typeId, fav)                        ||
 ||    saveInstanceAsVariant(inst, newTypeId, name)        ||
-||    createTypeFromSelection(newTypeId, name)            ||
+||    createTypeFromSelection(instanceIds, newTypeId, name)            ||
 ||\*.--------------------------------------------------------*/
 import QtQuick
 import QtQuick.Controls.Basic
@@ -207,7 +207,8 @@ Rectangle {
     /* Dialog dispatch — one seam for the ok button AND the QML
        test (the dialog internals aren't reachable by id from a
        test object). mode "variant" repoints `inst`; "assembly"
-       builds a child-ref type from the bridge's selection. */
+       builds a child-ref type from the CURRENT selection — the
+       bridge validates the explicit id list itself. */
     function submitNewType(mode, inst, tid, nm) {
         var b = br()
         if (!b)
@@ -216,7 +217,7 @@ Rectangle {
             if (typeof b.saveInstanceAsVariant === "function")
                 b.saveInstanceAsVariant(inst, tid, nm)
         } else if (typeof b.createTypeFromSelection === "function") {
-            b.createTypeFromSelection(tid, nm)
+            b.createTypeFromSelection(selIds(), tid, nm)
         }
     }
 

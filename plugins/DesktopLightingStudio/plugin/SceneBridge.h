@@ -243,22 +243,24 @@ public slots:
        instance becomes the selection. setTypeFavorite is a UI pref
        (meta.ui.favorites, dirty path, NOT undoable).
        saveInstanceAsVariant writes the instance's resolved type to
-       presets/devices/<newTypeId>.device.json then repoints the
-       instance — one undoable structural edit.
-       createTypeFromSelection writes a child-reference type from
-       the selected instances' world transforms; writing the file is
-       enough (the original placements stay put — undoing the write
-       is just deleting the file). All four refuse invalid input
-       without touching scene, workspace or files, and explain via
-       statusMessage. */
+       presets/devices/<newTypeId>.device.json with the instance's
+       painted object colors baked into entity appearance.body_color,
+       then repoints the instance — one undoable structural edit.
+       createTypeFromSelection writes a child-reference type from an
+       explicit list of root instance ids (the caller passes the
+       selection); writing the file is enough (the original
+       placements stay put — undoing the write is just deleting the
+       file). All four refuse invalid input without touching scene,
+       workspace or files, and explain via statusMessage. */
     Q_INVOKABLE void addDeviceInstance(const QString& typeId,
                                        double x, double y, double z);
     Q_INVOKABLE void setTypeFavorite(const QString& typeId, bool fav);
     Q_INVOKABLE void saveInstanceAsVariant(const QString& instanceId,
                                            const QString& newTypeId,
                                            const QString& displayName);
-    Q_INVOKABLE void createTypeFromSelection(const QString& newTypeId,
-                                             const QString& displayName);
+    Q_INVOKABLE void createTypeFromSelection(
+        const QStringList& instanceIds, const QString& newTypeId,
+        const QString& displayName);
     /* alignSelected(axis, mode): axis 0=X/1=Y/2=Z; mode 0=min,
        1=center, 2=max. distributeSelected(axis): even spacing,
        endpoints hold. Both are one undo record. */

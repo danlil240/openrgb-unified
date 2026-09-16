@@ -76,8 +76,10 @@ TestCase {
             saveInstanceAsVariant: function(inst, tid, nm) {
                 this.variantCalls.push(inst + "->" + tid + "|" + nm)
             },
-            createTypeFromSelection: function(tid, nm) {
-                this.createCalls.push(tid + "|" + nm)
+            /* explicit id list — the bridge validates it */
+            createTypeFromSelection: function(ids, tid, nm) {
+                this.createCalls.push(ids.join("+") + "->"
+                                      + tid + "|" + nm)
             }
         }
     }
@@ -233,8 +235,10 @@ TestCase {
         lib.submitNewType("variant", "fan0", "fan-x", "Fan X")
         compare(b.variantCalls.join(","), "fan0->fan-x|Fan X")
         compare(b.createCalls.length, 0)
+        /* assembly mode passes the live selection id list through */
+        b.selectedInstances = ["fan0", "fan1"]
         lib.submitNewType("assembly", "", "rig-1", "Rig")
-        compare(b.createCalls.join(","), "rig-1|Rig")
+        compare(b.createCalls.join(","), "fan0+fan1->rig-1|Rig")
         compare(b.variantCalls.length, 1)
         lib.destroy()
     }

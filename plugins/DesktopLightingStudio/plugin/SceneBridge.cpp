@@ -1549,10 +1549,16 @@ void SceneBridge::saveInstanceAsVariant(const QString& instanceId,
     /* The resolved type definition is the variant's seed — entities,
        zones, binding_hints and authored appearance hints carry over
        verbatim; only id/name change. No expanded entity data ever
-       lands in studio.json (only the repointed `type` string). */
+       lands in studio.json (only the repointed `type` string).
+       Sync first so workspace.object_colors carries the live paint,
+       then bake the instance's painted look onto the variant's
+       entity appearance.body_color — the saved type reproduces what
+       the user sees. Emitter paint stays workspace data. */
+    SyncWorkspace();
     DevicePreset v = *src;
     v.id   = tid;
     v.name = nm;
+    editor.BakePaintedColors(iid, v);
     QString werr;
     if(store == nullptr || !store->WritePresetFile(v, &werr))
     {
@@ -1585,13 +1591,13 @@ void SceneBridge::saveInstanceAsVariant(const QString& instanceId,
     }
 }
 
-void SceneBridge::createTypeFromSelection(const QString& newTypeId,
+void SceneBridge::createTypeFromSelection(const QStringList& instanceIds,
+                                          const QString& newTypeId,
                                           const QString& displayName)
 {
     const std::string tid = newTypeId.toStdString();
     const std::string nm  = displayName.trimmed().toStdString();
-    const std::vector<std::string>& sel = editor.Selection();
-    if(sel.empty())
+    if(instanceIds.isEmpty())
     {
         setStatus(QStringLiteral(
             "create preset refused: nothing selected"));
@@ -1616,15 +1622,22 @@ void SceneBridge::createTypeFromSelection(const QString& newTypeId,
         setStatus(QStringLiteral("create preset refused: name required"));
         return;
     }
-    /* Child-reference type: one `type`-ref entity per selected
+    /* Child-reference type: one `type`-ref entity per listed root
        instance carrying its world transform — see
-       BuildPresetFromInstances for the shared-origin choice. No
-       workspace edit is needed: the placed instances stay put (the
-       preset is a new library entry, not a rewrite of the desk), so
-       there is nothing to undo — deleting the file removes it. */
+       BuildPresetFromInstances for the shared-origin choice and the
+       root-id gate (it validates `ids` field by field; nested paths
+       refuse). No workspace edit is needed: the placed instances
+       stay put (the preset is a new library entry, not a rewrite of
+       the desk), so there is nothing to undo — deleting the file
+       removes it. */
+    std::vector<std::string> ids;
+    ids.reserve((size_t)instanceIds.size());
+    for(const QString& q : instanceIds)
+    {
+        ids.push_back(q.toStdString());
+    }
     DevicePreset p;
-    if(!editor.BuildPresetFromInstances({ sel.begin(), sel.end() },
-                                        tid, nm, registry, p))
+    if(!editor.BuildPresetFromInstances(ids, tid, nm, registry, p))
     {
         setStatus(QString::fromStdString(editor.LastError()));
         return;
@@ -1639,7 +1652,7 @@ void SceneBridge::createTypeFromSelection(const QString& newTypeId,
     }
     ReloadPresets();
     setStatus(QStringLiteral("saved type '%1' from %2 instance(s)")
-                  .arg(newTypeId).arg((int)sel.size()));
+                  .arg(newTypeId).arg((int)p.entities.size()));
 }
 
 QVariantMap SceneBridge::cameraState() const

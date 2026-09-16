@@ -1267,12 +1267,19 @@ static void TestBuildPresetFromInstances()
                      { 0.0f, 0.0f, 0.0f }, 1e-4f),
           "bp: single instance sits on the origin");
 
-    /* object ids map to their owning instance */
+    /* Root ids only — a resolved path like "fan1/body" names an
+       entity under an instance, not a placement; the builder must
+       refuse it (field-specific message), NOT coerce it to its
+       root via InstanceOf. */
     DevicePreset byObj;
-    CHECK(ctl.BuildPresetFromInstances({ "fan1/body" }, "o2",
-                                       "O2", reg, byObj)
-          && byObj.entities.count("fan1") == 1,
-          "bp: object id resolves to its instance");
+    CHECK(!ctl.BuildPresetFromInstances({ "fan1/body" }, "o2",
+                                        "O2", reg, byObj),
+          "bp: nested path refused (root ids only)");
+    CHECK(ctl.LastError().find("root instance")
+              != std::string::npos,
+          "bp: refusal names the root-instance requirement");
+    CHECK(byObj.entities.empty(),
+          "bp: refusal left the candidate untouched");
 
     /* duplicates collapse — one entity per instance */
     DevicePreset dup;
@@ -1301,6 +1308,53 @@ static void TestBuildPresetFromInstances()
           "bp: unresolvable instance type refused");
 }
 
+/*---------------------------------------------------------*\
+||| Task 4.2 fix — BakePaintedColors: the variant file    ||
+||| must reproduce the instance's painted look. Keys are  ||
+||| resolved "<inst>/<entity>" paths; only entities the   ||
+||| type actually has get body_color; nested child paint  ||
+||| and emitter overrides stay workspace data.            ||
+\*---------------------------------------------------------*/
+static void TestBakePaintedColors()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();   /* fan0/body painted #204080 */
+    EditorController ctl(w);
+
+    /* Variant seed = the source type plus one entity the instance
+       never painted, so "untouched" is observable. */
+    DevicePreset v = FanType();
+    PresetEntity shroud;
+    shroud.id       = "shroud";
+    shroud.geometry = "box";
+    shroud.size_m   = { 0.13f, 0.03f, 0.13f };
+    v.entities["shroud"] = shroud;
+
+    /* Ignored keys: a nested path inside a child type, an entity
+       the type doesn't have, and another instance's paint. */
+    w.object_colors["fan0/nested/inner"] =
+        MakeSceneColor(0xAA, 0xBB, 0xCC);
+    w.object_colors["fan0/nope"]  = MakeSceneColor(0x11, 0x22, 0x33);
+    w.object_colors["fan1/body"]  = MakeSceneColor(0x99, 0x88, 0x77);
+
+    CHECK(ctl.BakePaintedColors("fan0", v) == 1,
+          "bake: exactly the one matching entity painted");
+    const nlohmann::json& a = v.entities.at("body").appearance;
+    CHECK(a.is_object() && a.value("body_color", "") == "#204080",
+          "bake: painted entity carries appearance.body_color");
+    CHECK(a.size() == 1,
+          "bake: emitter paint stayed workspace data");
+    CHECK(v.entities.at("shroud").appearance.is_null(),
+          "bake: unpainted entity untouched");
+
+    /* An instance with no paint leaves every entity untouched. */
+    DevicePreset v2 = FanType();
+    CHECK(ctl.BakePaintedColors("desk", v2) == 0
+          && v2.entities.at("body").appearance.is_null(),
+          "bake: unpainted instance bakes nothing");
+}
+
 int main()
 {
     TestDragOneRecord();
@@ -1322,6 +1376,7 @@ int main()
     TestAddInstance();
     TestRetype();
     TestBuildPresetFromInstances();
+    TestBakePaintedColors();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -194,14 +194,30 @@ public:
        instance's y — documented choice: the new type's origin sits
        under the arrangement's center at desk height). No entities
        are copied; `out.zones` stays empty (child types carry their
-       own). Refuses (false + LastError) mid-gesture, on empty input,
-       on ids that aren't existing root instances, and on instances
-       whose type doesn't resolve in `reg`. */
+       own). `ids` must be ROOT instance ids (devices map keys) —
+       resolved paths like "case/case_fans" are refused outright
+       (InstanceOf is NOT applied: silently coercing a nested path to
+       its root would build a type the user didn't ask for). Refuses
+       (false + LastError) mid-gesture, on empty input, on non-root/
+       unknown ids, and on instances whose type doesn't resolve in
+       `reg`. */
     bool BuildPresetFromInstances(const std::vector<std::string>& ids,
                                   const std::string& new_id,
                                   const std::string& name,
                                   const PresetRegistry& reg,
                                   DevicePreset& out);
+
+    /* Bake instance `iid`'s painted base colors into a type variant:
+       object_colors keys "<iid>/<entity>" copy onto
+       entities[<entity>].appearance["body_color"] ("#RRGGBB") when
+       the variant has that entity. Keys that don't name a variant
+       entity are ignored — including deeper nested paths
+       ("<iid>/<child>/<sub>", which belong to the child type, not
+       this variant). Emitter-level paint (emitter_colors) stays
+       workspace data and is NEVER baked into the type. Returns the
+       number of entities painted. */
+    unsigned int BakePaintedColors(const std::string& iid,
+                                   DevicePreset& variant) const;
 
     /* Snapping — defaults come from ControlsPrefs (10 mm / 15 deg). */
     static Vec3  SnapTranslate(const Vec3& v, float step_m = 0.01f);

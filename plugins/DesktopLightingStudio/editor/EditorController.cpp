@@ -8,6 +8,7 @@
 
 #include "../presets/DevicePreset.h"
 #include "../presets/PresetRegistry.h"
+#include "../scene/SceneJson.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1306,12 +1307,22 @@ bool EditorController::BuildPresetFromInstances(
     /* Dedupe while keeping first-seen order — a double-passed id
        would collide on the entity key. */
     std::vector<std::string> insts;
-    for(const std::string& raw : ids)
+    for(const std::string& id : ids)
     {
-        const std::string id = InstanceOf(raw);
-        if(!Exists(id))
+        /* Root instances only — a resolved path like
+           "case/case_fans" names a nested child, not a placement.
+           InstanceOf() must NOT run here: coercing the path to its
+           root would silently build a different type than asked. */
+        if(id.find('/') != std::string::npos)
         {
-            last_error = "create preset refused: '" + raw
+            last_error = "create preset refused: '" + id
+                       + "' is not a root instance id "
+                         "(nested paths are not accepted)";
+            return false;
+        }
+        if(ws.devices.find(id) == ws.devices.end())
+        {
+            last_error = "create preset refused: '" + id
                        + "' is not a desk instance";
             return false;
         }
@@ -1380,6 +1391,38 @@ bool EditorController::BuildPresetFromInstances(
     }
     out = p;
     return true;
+}
+
+unsigned int EditorController::BakePaintedColors(
+    const std::string& iid, DevicePreset& variant) const
+{
+    /* object_colors keys are resolved paths "<inst>/<entity>".
+       Stripping the "<iid>/" prefix leaves the entity id for a
+       direct child — or "<child>/<sub>" for paint inside a nested
+       child type, which can never be an entity id here ('/' isn't
+       in the id charset) so the plain map lookup filters both. */
+    unsigned int   painted = 0;
+    const std::string prefix = iid + "/";
+    for(const auto& kv : ws.object_colors)
+    {
+        if(kv.first.compare(0, prefix.size(), prefix) != 0)
+        {
+            continue;
+        }
+        const auto eit = variant.entities.find(kv.first.substr(
+            prefix.size()));
+        if(eit == variant.entities.end())
+        {
+            continue;
+        }
+        if(!eit->second.appearance.is_object())
+        {
+            eit->second.appearance = nlohmann::json::object();
+        }
+        eit->second.appearance["body_color"] = SceneColorHex(kv.second);
+        painted++;
+    }
+    return painted;
 }
 
 /*---------------------------------------------------------*\
