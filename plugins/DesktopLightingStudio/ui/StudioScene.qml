@@ -1,24 +1,44 @@
+/*---------------------------------------------------------*\
+|| StudioScene.qml                                         ||
+||                                                         ||
+||   Desk viewport: View3D + object delegates + the M2.2  ||
+||   editor layer (CameraController / SelectionController ||
+||   / TransformGizmo / TransformInspector).              ||
+||                                                         ||
+||   Interaction contract (spec §4):                      ||
+||     left click           select / empty-space clears   ||
+||     left drag, device    move on the active plane      ||
+||     left drag, empty     marquee selection             ||
+||     middle drag          camera pan — ALWAYS           ||
+||     space + left drag    camera pan (alternative)      ||
+||     alt + left drag      orbit (free view only)        ||
+||     wheel                pointer-centered zoom, clamped||
+||     W / E                move / rotate tools           ||
+||     Shift during gesture temporary snap 10mm / 15°     ||
+||     F / Home             frame selection / frame desk  ||
+||     Escape               cancel gesture, restore state ||
+||     Ctrl+Z / Ctrl+Shift+Z undo / redo                  ||
+||   Paint is an explicit tool: its drags paint emitters  ||
+||   and can never move objects or orbit the camera.      ||
+\*---------------------------------------------------------*/
 import QtQuick
 import QtQuick3D
-import QtQuick3D.Helpers
+import "editor" as Ed
 
 Rectangle {
     id: root
     color: "#101014"
+    focus: true
 
     // Diagnostic state readable from the probe / debug overlays.
     property string dbg: ""
     property real camYaw: cameraOrigin.eulerRotation.y
 
-    // Canonical body specs. The bridge publishes the resolved body
-    // size (obj.bx/by/bz): authored size_m with a per-axis fallback
-    // to the geometry's canonical size — a 0 component means
-    // "canonical axis" (the contract is owned by ResolvedBodySize in
-    // the scene core so schema, validator, and renderer agree).
+    // Canonical body specs — dispatch on the geometry string.
     // #Cube/#Cylinder/#Sphere are 100-unit primitives, so scale =
     // meters / 100. transform.scale stays dimensionless on the node.
-    function bodySpec(obj) {
-        switch (obj.geometry) {
+    function bodySpec(geom) {
+        switch (geom) {
         case "desk":          return { src: "#Cube",     c: "#4a3b32" }
         case "case_shell":    return { src: "#Cube",     c: "#e8e8ec", ghost: true }
         case "monitor":       return { src: "#Cube",     c: "#0a0a0c" }
@@ -32,27 +52,88 @@ Rectangle {
         }
     }
 
-    // object id -> Node. The delegate reparents through this map so
-    // the QML node tree composes exactly like the core's resolved
-    // world matrices (parentWorld * local).
+    function emitterSize(geom) {
+        return geom === "keyboard_body" ? 0.006 : 0.011
+    }
+
+    // object id -> delegate Node. The delegate reparents through
+    // this map so the QML node tree composes exactly like the
+    // core's resolved world matrices (parentWorld * local).
     property var objNodes: ({})
     function fixupParents() {
-        var objs = (typeof bridge !== "undefined") ? bridge.objectList : []
-        for (var i = 0; i < objs.length; i++) {
-            var n = objNodes[objs[i].id]
-            if (!n) continue
-            var p = (objs[i].parentId && objNodes[objs[i].parentId])
+        for (var id in objNodes) {
+            var n = objNodes[id]
+            var p = (n.oParent && objNodes[n.oParent])
             n.parent = p ? p : sceneRoot
         }
     }
 
-    function emitterSize(obj) {
-        return obj.geometry === "keyboard_body" ? 0.006 : 0.011
+    // World bounds over the object-node map. ids = instance ids to
+    // include; null/empty = the whole scene. Used by F / Home and
+    // the case preset view.
+    function instanceWorldBounds(ids) {
+        var want = null
+        if (ids && ids.length) {
+            want = {}
+            for (var k = 0; k < ids.length; k++)
+                want[ids[k]] = true
+        }
+        var sx = 0, sy = 0, sz = 0, n = 0
+        var pts = []
+        for (var id in objNodes) {
+            var item = objNodes[id]
+            if (!item || !item.visible)
+                continue
+            if (want && !want[item.oInst])
+                continue
+            var p = item.scenePosition
+            pts.push({ p: p, r: 0.5 * Math.max(item.oBx, item.oBy, item.oBz) })
+            sx += p.x; sy += p.y; sz += p.z; n++
+        }
+        if (n === 0)
+            return null
+        var c = Qt.vector3d(sx / n, sy / n, sz / n)
+        var r = 0.05
+        for (var i = 0; i < pts.length; i++) {
+            var d = pts[i].p.minus(c).length() + pts[i].r
+            if (d > r)
+                r = d
+        }
+        return { c: c, r: r }
+    }
+
+    // Test seam: world/screen position of an object id's node.
+    function worldPosOf(objectId) {
+        var n = objNodes[objectId]
+        return n ? n.scenePosition : null
+    }
+    function screenPosOf(objectId) {
+        var w = worldPosOf(objectId)
+        return (w && view) ? view.mapFrom3DScene(w) : null
+    }
+
+    function eachNode(cb) {
+        for (var id in objNodes)
+            cb(objNodes[id])
+    }
+
+    function escapeAll() {
+        /* Escape priority: live gesture > text focus > selection. */
+        if (selCtl.cancel())
+            return
+        if (inspector.textFocus) {
+            forceActiveFocus()
+            return
+        }
+        if (typeof bridge !== "undefined")
+            bridge.clearEditorSelection()
     }
 
     View3D {
         id: view
         anchors.fill: parent
+        onHeightChanged: camCtl.apply()
+        onWidthChanged: camCtl.apply()
 
         environment: SceneEnvironment {
             backgroundMode: SceneEnvironment.Color
@@ -60,18 +141,26 @@ Rectangle {
             antialiasingMode: SceneEnvironment.NoAA
         }
 
-        // OrbitCameraController requires `origin` to be a Node whose
-        // eulerRotation it rotates; the camera must be its child.
+        // Camera rig: `origin` carries the pose (position = target,
+        // eulerRotation = view yaw/pitch — camera nodes may use
+        // eulerRotation; the object-transform ban doesn't apply).
         Node {
             id: cameraOrigin
             position: Qt.vector3d(0.1, 0.18, 0.05)
             eulerRotation.x: -38
 
-            PerspectiveCamera {
-                id: camera
-                position: Qt.vector3d(0, 0, 1.21)
+            OrthographicCamera {
+                id: camOrtho
                 clipNear: 0.01
                 clipFar: 100
+                position: Qt.vector3d(0, 0, 3)
+            }
+            PerspectiveCamera {
+                id: camPersp
+                clipNear: 0.01
+                clipFar: 100
+                fieldOfView: 60
+                position: Qt.vector3d(0, 0, 1.21)
             }
         }
 
@@ -87,33 +176,54 @@ Rectangle {
             color: "#9090b0"
         }
 
-        // Scene objects from the bridge — one Node per object,
-        // parented per parent_id under this scene root.
+        // Scene objects — the stable QAbstractListModel is the
+        // primary source (granular transform updates keep delegates
+        // alive through drags); the legacy objectList stays as the
+        // probe fallback. rf() reads either shape.
         Node {
             id: sceneRoot
 
         Repeater3D {
             id: objRepeater
-            model: (typeof bridge !== "undefined") ? bridge.objectList : []
+            model: (typeof bridge !== "undefined" && bridge.objectModel)
+                   ? bridge.objectModel
+                   : ((typeof bridge !== "undefined") ? bridge.objectList : [])
 
             // New model = new delegate set; drop stale node refs.
             onModelChanged: root.objNodes = ({})
 
             delegate: Node {
                 id: objNode
-                property var obj: modelData
-                property var spec: root.bodySpec(obj)
+
+                // Field reader: list-model role first, plain-map
+                // modelData second (quickwidget_probe fallback).
+                function rf(name, dflt) {
+                    var v = model[name]
+                    if (v === undefined && typeof modelData !== "undefined")
+                        v = modelData[name]
+                    return v === undefined ? dflt : v
+                }
+
+                property string oId:     rf("id", "")
+                property string oGeom:   rf("geometry", "")
+                property string oParent: rf("parentId", "")
+                property string oInst:   rf("instancePath", oId)
+                property string oKind:   rf("kind", "decor")
+                property string oBound:  rf("bound", "none")
+                property real   oBx:     rf("bx", 0)
+                property real   oBy:     rf("by", 0)
+                property real   oBz:     rf("bz", 0)
+                property var    spec:    root.bodySpec(oGeom)
+
                 // Structure (positions) and colors are split: the
-                // Repeater's model is emitterPos, which only changes on
-                // a scene/layout change, so delegates persist. Per-tick
-                // updates only reassign emitterColors — bindings
-                // re-evaluate in place instead of rebuilding ~300
-                // emitter Models every frame.
+                // Repeater's model is emitterPos, which only changes
+                // on a scene/layout change, so delegates persist.
+                // Per-tick updates only reassign emitterColors.
                 property var emitterPos: []
                 property var emitterColors: []
 
                 function reloadLayout() {
-                    var list = (typeof bridge !== "undefined") ? bridge.emittersOf(obj.id) : []
+                    var list = (typeof bridge !== "undefined") ? bridge.emittersOf(oId) : []
                     emitterPos = list
                     var cols = []
                     for (var i = 0; i < list.length; i++) cols.push(list[i].c)
@@ -121,20 +231,22 @@ Rectangle {
                 }
 
                 function reloadColors() {
-                    emitterColors = (typeof bridge !== "undefined") ? bridge.emitterColorsOf(obj.id) : []
+                    emitterColors = (typeof bridge !== "undefined") ? bridge.emitterColorsOf(oId) : []
                 }
 
-                position: Qt.vector3d(obj.x, obj.y, obj.z)
-                // One shared rotation convention: the core converts the
-                // stored XYZ degrees (Rz*Ry*Rx) into this quaternion —
-                // eulerRotation here would silently apply ZXY instead.
-                rotation: Qt.quaternion(obj.qw, obj.qx, obj.qy, obj.qz)
-                scale: Qt.vector3d(obj.sx, obj.sy, obj.sz)
-                visible: obj.visible
+                position: Qt.vector3d(rf("x", 0), rf("y", 0), rf("z", 0))
+                // One shared rotation convention: the core converts
+                // the stored XYZ degrees (Rz*Ry*Rx) into this
+                // quaternion — eulerRotation here would silently
+                // apply ZXY instead.
+                rotation: Qt.quaternion(rf("qw", 1), rf("qx", 0),
+                                        rf("qy", 0), rf("qz", 0))
+                scale: Qt.vector3d(rf("sx", 1), rf("sy", 1), rf("sz", 1))
+                visible: rf("visible", true)
 
                 Component.onCompleted: {
-                    root.objNodes[obj.id] = objNode
-                    var p = root.objNodes[obj.parentId]
+                    root.objNodes[oId] = objNode
+                    var p = root.objNodes[oParent]
                     objNode.parent = p ? p : sceneRoot
                     reloadLayout()
                     // Last delegate done — repair any parent that was
@@ -143,30 +255,30 @@ Rectangle {
                         root.fixupParents()
                 }
                 Component.onDestruction: {
-                    if (root.objNodes[obj.id] === objNode)
-                        delete root.objNodes[obj.id]
+                    if (root.objNodes[oId] === objNode)
+                        delete root.objNodes[oId]
                 }
 
                 Connections {
                     target: (typeof bridge !== "undefined") ? bridge : null
                     function onEmittersChanged(changedId) {
-                        if (changedId === objNode.obj.id) objNode.reloadColors()
+                        if (changedId === objNode.oId) objNode.reloadColors()
                     }
                     function onSceneChanged() { objNode.reloadLayout() }
                 }
 
                 // Body mesh — ghost shells (the case) are translucent
-                // containers; leaving them pickable would swallow every
-                // pick aimed at hardware inside them.
+                // containers; leaving them pickable would swallow
+                // every pick aimed at hardware inside them.
                 Model {
-                    objectName: "obj|" + objNode.obj.id
+                    objectName: "obj|" + objNode.oId
                     pickable: !(objNode.spec && objNode.spec.ghost)
                     visible: objNode.spec !== null
                     source: objNode.spec ? objNode.spec.src : "#Cube"
                     scale: objNode.spec
-                           ? Qt.vector3d(objNode.obj.bx / 100,
-                                         objNode.obj.by / 100,
-                                         objNode.obj.bz / 100)
+                           ? Qt.vector3d(objNode.oBx / 100,
+                                         objNode.oBy / 100,
+                                         objNode.oBz / 100)
                            : Qt.vector3d(0, 0, 0)
                     materials: PrincipledMaterial {
                         baseColor: objNode.spec ? objNode.spec.c : "#000000"
@@ -182,30 +294,30 @@ Rectangle {
                     delegate: Node {
                         required property var modelData
 
-                        // Visible dot — not pickable itself (too small);
-                        // the proxy below handles picking.
+                        // Visible dot — not pickable itself (too
+                        // small); the proxy below handles picking.
                         Model {
                             source: "#Sphere"
                             position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
-                            property real d: root.emitterSize(objNode.obj) / 100
+                            property real d: root.emitterSize(objNode.oGeom) / 100
                             scale: Qt.vector3d(d, d, d)
                             materials: PrincipledMaterial {
                                 lighting: PrincipledMaterial.NoLighting
                                 property color c: (modelData.i < objNode.emitterColors.length)
                                                   ? objNode.emitterColors[modelData.i] : "#000000"
-                                baseColor: (objNode.obj.bound === "ok" || objNode.obj.bound === "none")
+                                baseColor: (objNode.oBound === "ok" || objNode.oBound === "none")
                                            ? c : Qt.darker(c, 2.5)
                             }
                         }
 
-                        // Invisible pick proxy ~2.6x the dot so LEDs are
-                        // actually hittable with a mouse.
+                        // Invisible pick proxy ~2.6x the dot so LEDs
+                        // are actually hittable with a mouse.
                         Model {
-                            objectName: "emit|" + objNode.obj.id + "|" + modelData.i
+                            objectName: "emit|" + objNode.oId + "|" + modelData.i
                             pickable: true
                             source: "#Sphere"
                             position: Qt.vector3d(modelData.x, modelData.y, modelData.z)
-                            property real pd: root.emitterSize(objNode.obj) * 2.6 / 100
+                            property real pd: root.emitterSize(objNode.oGeom) * 2.6 / 100
                             scale: Qt.vector3d(pd, pd, pd)
                             castsShadows: false
                             materials: PrincipledMaterial {
@@ -220,7 +332,7 @@ Rectangle {
 
                 // Selection marker
                 Model {
-                    visible: (typeof bridge !== "undefined") && bridge.selectedId === objNode.obj.id
+                    visible: (typeof bridge !== "undefined") && bridge.selectedId === objNode.oId
                     source: "#Sphere"
                     position: Qt.vector3d(0, 0.09, 0)
                     scale: Qt.vector3d(0.00014, 0.00014, 0.00014)
@@ -231,53 +343,130 @@ Rectangle {
                 }
             }
         }
+
+        // Move-tool pivot marker: 3D axis cross at the shared
+        // selection pivot (rotate mode's handle is the 2D ring on
+        // the gizmo overlay).
+        Node {
+            id: pivotMarker
+            visible: gizmo.hasPivot && selCtl.tool === 0 && selCtl.gesture === 0
+            position: gizmo.pivotWorld ? gizmo.pivotWorld : Qt.vector3d(0, 0, 0)
+            Model {
+                source: "#Cube"; position: Qt.vector3d(0.035, 0, 0)
+                scale: Qt.vector3d(0.0007, 0.00008, 0.00008)
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#e05050"
+                }
+            }
+            Model {
+                source: "#Cube"; position: Qt.vector3d(0, 0.035, 0)
+                scale: Qt.vector3d(0.00008, 0.0007, 0.00008)
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#50c050"
+                }
+            }
+            Model {
+                source: "#Cube"; position: Qt.vector3d(0, 0, 0.035)
+                scale: Qt.vector3d(0.00008, 0.00008, 0.0007)
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#5080e0"
+                }
+            }
+            Model {
+                source: "#Sphere"
+                scale: Qt.vector3d(0.00012, 0.00012, 0.00012)
+                materials: PrincipledMaterial {
+                    lighting: PrincipledMaterial.NoLighting
+                    baseColor: "#ffd040"
+                }
+            }
+        }
         }
 
-        OrbitCameraController {
-            anchors.fill: parent
-            camera: camera
+        /*-----------------------------------------------------*\
+        || Editor controllers                                   ||
+        \*-----------------------------------------------------*/
+        Ed.CameraController {
+            id: camCtl
+            view3d: view
             origin: cameraOrigin
-            panEnabled: true
-            xSpeed: 0.12
-            ySpeed: 0.12
-
-            // Shift+click an emitter dot to paint it.
-            TapHandler {
-                acceptedButtons: Qt.LeftButton
-                acceptedModifiers: Qt.ShiftModifier
-                onTapped: function(eventPoint) {
-                    var result = view.pick(eventPoint.position.x, eventPoint.position.y)
-                    if (!result.objectHit || typeof bridge === "undefined") {
-                        return
-                    }
-                    var name = result.objectHit.objectName
-                    root.dbg = "shift-tap " + name
-                    if (name.indexOf("emit|") === 0) {
-                        var p = name.split("|")
-                        bridge.paintEmitter(p[1], parseInt(p[2]), bridge.paintColor)
-                    }
-                }
-            }
-
-            // Plain click selects the hit device or emitter's object.
-            TapHandler {
-                acceptedButtons: Qt.LeftButton
-                acceptedModifiers: Qt.NoModifier
-                onTapped: function(eventPoint) {
-                    var result = view.pick(eventPoint.position.x, eventPoint.position.y)
-                    root.dbg = "tap hit=" + (result.objectHit ? result.objectHit.objectName : "none")
-                    if (!result.objectHit || typeof bridge === "undefined") {
-                        return
-                    }
-                    var name = result.objectHit.objectName
-                    if (name.indexOf("emit|") === 0) {
-                        bridge.select(name.split("|")[1])
-                    } else if (name.indexOf("obj|") === 0) {
-                        bridge.select(name.substring(4))
-                    }
-                }
+            orthoCam: camOrtho
+            perspCam: camPersp
+            boundsOf: root.instanceWorldBounds
+            onPoseFinished: {
+                if (typeof bridge !== "undefined")
+                    bridge.setCameraState(stateMap())
             }
         }
+
+        Ed.SelectionController {
+            id: selCtl
+            view3d: view
+            cam: camCtl
+            gizmo: gizmo
+            eachNode: root.eachNode
+        }
+
+        Ed.TransformGizmo {
+            id: gizmo
+            anchors.fill: parent
+            view3d: view
+            cam: camCtl
+            ctl: selCtl
+            eachNode: root.eachNode
+        }
+
+        /* Single input router — every pointer press/drag/release
+           and wheel goes through selCtl. Middle-button pan wins
+           over any surface; see SelectionController.qml. */
+        MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+            onPressed: function(m) {
+                root.forceActiveFocus()
+                selCtl.press(m.x, m.y, m.button, m.modifiers)
+            }
+            onPositionChanged: function(m) {
+                if (m.buttons === 0)
+                    return
+                selCtl.dragTo(m.x, m.y, m.modifiers)
+            }
+            onReleased: function(m) {
+                selCtl.endGesture(m.x, m.y, m.button, m.modifiers)
+            }
+            onCanceled: selCtl.cancel()
+            onWheel: function(w) {
+                selCtl.wheelAt(w.x, w.y, w.angleDelta.y)
+                w.accepted = true
+            }
+        }
+
+        /* Marquee rubber band. */
+        Rectangle {
+            visible: selCtl.gesture === 4
+            x: selCtl.marqueeRect.x
+            y: selCtl.marqueeRect.y
+            width: selCtl.marqueeRect.width
+            height: selCtl.marqueeRect.height
+            color: "#206a9ad0"
+            border.color: "#6a9ad0"
+            border.width: 1
+        }
+    }
+
+    /*-----------------------------------------------------*\
+    || Editor panel + hints                                 ||
+    \*-----------------------------------------------------*/
+    Ed.TransformInspector {
+        id: inspector
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 10
+        ctl: selCtl
+        cam: camCtl
     }
 
     Text {
@@ -286,10 +475,10 @@ Rectangle {
         anchors.top: parent.top
         anchors.margins: 10
         color: "#d8d8e0"
-        font.pixelSize: 14
+        font.pixelSize: 13
         text: (typeof bridge !== "undefined" && bridge.selectedId !== "")
               ? "selected: " + bridge.selectedId
-              : "drag: orbit  ·  wheel: zoom  ·  click: select  ·  shift+click LED: paint"
+              : "click: select · drag: move/marquee · MMB/Space+drag: pan · wheel: zoom · W/E/P tools · F/Home: frame"
     }
 
     Rectangle {
@@ -310,4 +499,48 @@ Rectangle {
             text: "LIVE"
         }
     }
+
+    /*-----------------------------------------------------*\
+    || Keyboard — shortcuts never fire while a text field   ||
+    || has focus (inspector.textFocus). Escape is global:   ||
+    || it always cancels the live gesture.                  ||
+    \*-----------------------------------------------------*/
+    Keys.onPressed: function(e) {
+        if (e.key === Qt.Key_Space && !e.isAutoRepeat) {
+            selCtl.spaceDown = true
+            e.accepted = true
+        }
+    }
+    Keys.onReleased: function(e) {
+        if (e.key === Qt.Key_Space) {
+            selCtl.spaceDown = false
+            e.accepted = true
+        }
+    }
+
+    Shortcut { sequence: "W";    enabled: !inspector.textFocus
+               onActivated: selCtl.setTool(0) }
+    Shortcut { sequence: "E";    enabled: !inspector.textFocus
+               onActivated: selCtl.setTool(1) }
+    Shortcut { sequence: "P";    enabled: !inspector.textFocus
+               onActivated: selCtl.setTool(2) }
+    Shortcut { sequence: "F";    enabled: !inspector.textFocus
+               onActivated: selCtl.frameSelection() }
+    Shortcut { sequence: "Home"; enabled: !inspector.textFocus
+               onActivated: selCtl.frameAll() }
+    Shortcut { sequence: "Ctrl+Z"; enabled: !inspector.textFocus
+               onActivated: if (typeof bridge !== "undefined") bridge.undo() }
+    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !inspector.textFocus
+               onActivated: if (typeof bridge !== "undefined") bridge.redo() }
+    Shortcut { sequence: "Ctrl+Y"; enabled: !inspector.textFocus
+               onActivated: if (typeof bridge !== "undefined") bridge.redo() }
+    Shortcut { sequence: "Escape"
+               onActivated: root.escapeAll() }
+
+    Connections {
+        target: (typeof bridge !== "undefined") ? bridge : null
+        function onCameraChanged() { camCtl.applyFromBridge() }
+    }
+
+    Component.onCompleted: camCtl.applyFromBridge()
 }

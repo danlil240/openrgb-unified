@@ -1,6 +1,10 @@
 <RCC>
     <qresource prefix="/studio">
         <file alias="StudioScene.qml">StudioScene.qml</file>
+        <file alias="editor/CameraController.qml">editor/CameraController.qml</file>
+        <file alias="editor/SelectionController.qml">editor/SelectionController.qml</file>
+        <file alias="editor/TransformGizmo.qml">editor/TransformGizmo.qml</file>
+        <file alias="editor/TransformInspector.qml">editor/TransformInspector.qml</file>
         <file alias="studio.schema.json">../schemas/studio.schema.json</file>
         <file alias="device.schema.json">../schemas/device.schema.json</file>
         <file alias="presets/devices/desk.device.json">../presets/devices/desk.device.json</file>

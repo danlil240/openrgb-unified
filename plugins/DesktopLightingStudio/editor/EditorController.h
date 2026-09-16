@@ -142,6 +142,16 @@ public:
        parent the group nests under it (so a later move of that
        parent carries the members); mixed or root-level parents
        root the group. */
+    /* Align the movable selection on a world axis: mode 0 = min,
+       1 = center (mean), 2 = max. Each member keeps its other axes;
+       the new world position is converted into its parent frame.
+       One record for the whole op. */
+    std::optional<EditorEdit> Align(int axis /*0=X,1=Y,2=Z*/, int mode);
+    /* Evenly space the movable selection along a world axis — the
+       two extremes keep their positions, interior members land at
+       equal intervals in sorted order. Needs >= 3 movable. */
+    std::optional<EditorEdit> Distribute(int axis);
+
     std::optional<EditorEdit> Group(const std::string& base_id = "group");
     /* Dissolves selected type-"group" instances: children move to
        the group's parent with world placement preserved.

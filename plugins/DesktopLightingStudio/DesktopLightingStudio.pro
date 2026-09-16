@@ -89,6 +89,10 @@ RESOURCES += \
 DISTFILES += \
     plugin/metadata.json \
     ui/StudioScene.qml \
+    ui/editor/CameraController.qml \
+    ui/editor/SelectionController.qml \
+    ui/editor/TransformGizmo.qml \
+    ui/editor/TransformInspector.qml \
     schemas/studio.schema.json \
     schemas/device.schema.json \
     presets/devices/desk.device.json \

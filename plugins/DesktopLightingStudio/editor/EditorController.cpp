@@ -55,6 +55,23 @@ Mat4 RotationOnly(const Mat4& m)
     return r;
 }
 
+float AxisComp(const Vec3& v, int axis)
+{
+    return axis == 0 ? v.x : axis == 1 ? v.y : v.z;
+}
+
+void SetAxisComp(Vec3& v, int axis, float c)
+{
+    if(axis == 0)      { v.x = c; }
+    else if(axis == 1) { v.y = c; }
+    else               { v.z = c; }
+}
+
+const char* AxisName(int axis)
+{
+    return axis == 0 ? "x" : axis == 1 ? "y" : "z";
+}
+
 } /* anonymous namespace */
 
 std::string EditorController::InstanceOf(const std::string& object_id)
@@ -453,6 +470,126 @@ EditorController::SetPositionWorld(const std::string& id, const Vec3& pos)
     const std::map<std::string, Mat4> worlds = InstanceWorlds();
     const Vec3 lp = RigidInversePoint(ParentFrame(worlds, id), pos);
     return SetPosition(id, lp);
+}
+
+/*---------------------------------------------------------*\
+|| Align / Distribute — world-axis batch edits. Each     ||
+|| member's new world position is converted back into    ||
+|| its own parent frame; the whole op is one record.     ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::Align(int axis, int mode)
+{
+    last_error.clear();
+    if(gesture.active || axis < 0 || axis > 2 || mode < 0 || mode > 2)
+    {
+        return std::nullopt;
+    }
+    const std::set<std::string> mov = Movable();
+    if(mov.size() < 2)
+    {
+        last_error = selection.empty()
+            ? "align: nothing selected"
+            : "align needs 2+ movable instances (locked ids are skipped)";
+        return std::nullopt;
+    }
+    const std::map<std::string, Mat4> worlds = InstanceWorlds();
+
+    float target = AxisComp(Mat4Translation(worlds.at(*mov.begin())), axis);
+    if(mode == 0 || mode == 2)
+    {
+        for(const std::string& id : mov)
+        {
+            const float c = AxisComp(Mat4Translation(worlds.at(id)), axis);
+            target = (mode == 0) ? std::min(target, c)
+                                 : std::max(target, c);
+        }
+    }
+    else
+    {
+        float sum = 0.0f;
+        for(const std::string& id : mov)
+        {
+            sum += AxisComp(Mat4Translation(worlds.at(id)), axis);
+        }
+        target = sum / (float)mov.size();
+    }
+
+    EditorEdit e;
+    e.label = std::string("align ") + AxisName(axis)
+            + (mode == 0 ? " min" : mode == 1 ? " center" : " max");
+    for(const std::string& id : mov)
+    {
+        const Vec3 wp  = Mat4Translation(worlds.at(id));
+        Vec3       nwp = wp;
+        SetAxisComp(nwp, axis, target);
+        if(NearVec(wp, nwp, 1e-6f))
+        {
+            continue;
+        }
+        SnapshotKey(e.devices, ws.devices, id);
+        ws.devices[id].position =
+            RigidInversePoint(ParentFrame(worlds, id), nwp);
+        CaptureKey(e.devices, ws.devices, id);
+    }
+    if(e.Empty())
+    {
+        return std::nullopt;
+    }
+    return e;
+}
+
+std::optional<EditorEdit> EditorController::Distribute(int axis)
+{
+    last_error.clear();
+    if(gesture.active || axis < 0 || axis > 2)
+    {
+        return std::nullopt;
+    }
+    const std::set<std::string> mov = Movable();
+    if(mov.size() < 3)
+    {
+        last_error = selection.empty()
+            ? "distribute: nothing selected"
+            : "distribute needs 3+ movable instances (locked ids are skipped)";
+        return std::nullopt;
+    }
+    const std::map<std::string, Mat4> worlds = InstanceWorlds();
+
+    /* Sort by the axis coordinate; endpoints hold, interior lands
+       at equal intervals between them. */
+    std::vector<std::pair<float, std::string>> order;
+    for(const std::string& id : mov)
+    {
+        order.emplace_back(AxisComp(Mat4Translation(worlds.at(id)), axis), id);
+    }
+    std::sort(order.begin(), order.end());
+    const float lo   = order.front().first;
+    const float hi   = order.back().first;
+    const float step = (hi - lo) / (float)(order.size() - 1);
+
+    EditorEdit e;
+    e.label = std::string("distribute ") + AxisName(axis);
+    for(size_t i = 1; i + 1 < order.size(); i++)
+    {
+        const std::string& id = order[i].second;
+        const Vec3 wp  = Mat4Translation(worlds.at(id));
+        Vec3       nwp = wp;
+        SetAxisComp(nwp, axis, lo + step * (float)i);
+        if(NearVec(wp, nwp, 1e-6f))
+        {
+            continue;
+        }
+        SnapshotKey(e.devices, ws.devices, id);
+        ws.devices[id].position =
+            RigidInversePoint(ParentFrame(worlds, id), nwp);
+        CaptureKey(e.devices, ws.devices, id);
+    }
+    if(e.Empty())
+    {
+        return std::nullopt;
+    }
+    return e;
 }
 
 /*---------------------------------------------------------*\

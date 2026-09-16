@@ -72,6 +72,14 @@ struct CameraPrefs
 {
     std::string view       = "desk";          /* desk|top|front|case|free */
     std::string projection = "orthographic";  /* orthographic|perspective */
+    /* Final pose of the last camera gesture — editor prefs, never
+       scene-object history. All fields optional in studio.json;
+       missing keys keep these defaults. */
+    Vec3        target     = { 0.1f, 0.18f, 0.05f }; /* pan/orbit focus (m) */
+    float       yaw_deg    = 0.0f;    /* free-view orbit yaw             */
+    float       pitch_deg  = -38.0f;  /* free-view orbit pitch           */
+    float       distance   = 1.21f;   /* perspective dolly distance (m)  */
+    float       span       = 0.9f;    /* ortho vertical extent (m)       */
 };
 
 struct ControlsPrefs

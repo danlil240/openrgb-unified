@@ -723,6 +723,7 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
     doc       = w.scene;
     doc.name  = w.meta.name;
     meta      = w.meta;
+    emit cameraChanged();   /* loaded prefs replace the live pose */
 
     editor.ClearSelection();
     if(!selected.isEmpty())
@@ -1238,6 +1239,122 @@ void SceneBridge::duplicateMirrored()
     {
         setStatus(QString::fromStdString(editor.LastError()));
     }
+}
+
+void SceneBridge::alignSelected(int axis, int mode)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.Align(axis, mode);
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
+    }
+}
+
+void SceneBridge::distributeSelected(int axis)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.Distribute(axis);
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
+    }
+}
+
+QVariantMap SceneBridge::instanceState(const QString& id) const
+{
+    QVariantMap m;
+    const std::string iid = EditorController::InstanceOf(id.toStdString());
+    const auto it = workspace.devices.find(iid);
+    if(it == workspace.devices.end())
+    {
+        return m;
+    }
+    const DeviceInstance& d = it->second;
+    m["id"]   = QString::fromStdString(iid);
+    m["type"] = QString::fromStdString(d.type);
+    m["x"]  = d.position.x;
+    m["y"]  = d.position.y;
+    m["z"]  = d.position.z;
+    m["rx"] = d.rotation_deg.x;
+    m["ry"] = d.rotation_deg.y;
+    m["rz"] = d.rotation_deg.z;
+    const auto sit = workspace.device_settings.find(iid);
+    m["visible"] = (sit == workspace.device_settings.end())
+                 || sit->second.visible;
+    m["locked"]  = (sit != workspace.device_settings.end())
+                 && sit->second.locked;
+    return m;
+}
+
+QVariantMap SceneBridge::cameraState() const
+{
+    QVariantMap m;
+    m["view"]       = QString::fromStdString(meta.camera.view);
+    m["projection"] = QString::fromStdString(meta.camera.projection);
+    m["tx"]       = meta.camera.target.x;
+    m["ty"]       = meta.camera.target.y;
+    m["tz"]       = meta.camera.target.z;
+    m["yaw"]      = meta.camera.yaw_deg;
+    m["pitch"]    = meta.camera.pitch_deg;
+    m["distance"] = meta.camera.distance;
+    m["span"]     = meta.camera.span;
+    return m;
+}
+
+void SceneBridge::setCameraState(const QVariantMap& state)
+{
+    /* Camera prefs ride the dirty/autosave path — final pose lands
+       in studio.json without touching the undo stack. */
+    CameraPrefs& c = meta.camera;
+    if(state.contains("view"))
+    {
+        const QString v = state["view"].toString();
+        if(v == "desk" || v == "top" || v == "front"
+           || v == "case" || v == "free")
+        {
+            c.view = v.toStdString();
+        }
+    }
+    if(state.contains("projection"))
+    {
+        const QString v = state["projection"].toString();
+        if(v == "orthographic" || v == "perspective")
+        {
+            c.projection = v.toStdString();
+        }
+    }
+    auto num = [&state](const char* k, float& dst)
+    {
+        if(state.contains(k))
+        {
+            bool ok = false;
+            const double v = state[k].toDouble(&ok);
+            if(ok && std::isfinite(v))
+            {
+                dst = (float)v;
+            }
+        }
+    };
+    num("tx", c.target.x);
+    num("ty", c.target.y);
+    num("tz", c.target.z);
+    num("yaw",   c.yaw_deg);
+    num("pitch", c.pitch_deg);
+    num("distance", c.distance);
+    num("span",     c.span);
+    if(c.distance <= 0.0f) { c.distance = 1.21f; }
+    if(c.span     <= 0.0f) { c.span     = 0.9f;  }
+    markDirty();
+    emit cameraChanged();
 }
 
 bool SceneBridge::dirty() const

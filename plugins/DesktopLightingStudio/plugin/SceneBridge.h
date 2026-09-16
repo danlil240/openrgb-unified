@@ -72,6 +72,9 @@ class SceneBridge : public QObject
     /* Editor (M2): stable object model + multi-selection. */
     Q_PROPERTY(QObject* objectModel READ objectModel CONSTANT)
     Q_PROPERTY(QVariantList selectedInstances READ selectedInstances NOTIFY selectionChanged)
+    /* Camera pose/view — editor prefs persisted in meta.camera;
+       never undo history, never the scene. */
+    Q_PROPERTY(QVariantMap cameraState READ cameraState NOTIFY cameraChanged)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -111,6 +114,7 @@ public:
     /* Editor (M2). */
     QObject*        objectModel() const;
     QVariantList    selectedInstances() const;
+    QVariantMap     cameraState() const;
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -182,6 +186,10 @@ public slots:
                                              double degrees, bool snap);
     Q_INVOKABLE void commitTransformGesture();
     Q_INVOKABLE void cancelTransformGesture();
+    /* True while a transform gesture is live (post-begin,
+       pre-commit/cancel) — the QML input router and tests
+       gate gesture promotion on it. */
+    Q_INVOKABLE bool gestureActive() const { return editor.GestureActive(); }
     Q_INVOKABLE bool setInstancePosition(const QString& id,
                                          double x, double y, double z);
     Q_INVOKABLE bool setInstanceRotation(const QString& id,
@@ -193,6 +201,18 @@ public slots:
     Q_INVOKABLE void ungroupSelected();
     Q_INVOKABLE void deleteSelected();
     Q_INVOKABLE void duplicateMirrored();
+    /* alignSelected(axis, mode): axis 0=X/1=Y/2=Z; mode 0=min,
+       1=center, 2=max. distributeSelected(axis): even spacing,
+       endpoints hold. Both are one undo record. */
+    Q_INVOKABLE void alignSelected(int axis, int mode);
+    Q_INVOKABLE void distributeSelected(int axis);
+    /* Per-instance inspector state: authored local transform +
+       visible/locked flags. Empty map for unknown ids. */
+    Q_INVOKABLE QVariantMap instanceState(const QString& id) const;
+    /* Persist a camera gesture's final pose into meta.camera
+       (editor prefs — dirty/autosave path, never undo). Keys:
+       view, projection, tx/ty/tz, yaw, pitch, distance, span. */
+    Q_INVOKABLE void setCameraState(const QVariantMap& state);
 
 signals:
     void sceneChanged();
@@ -214,6 +234,8 @@ signals:
     void externalChangeDetected(bool dirty);
     /* A valid autosave differing from studio.json exists. */
     void recoveryAvailable();
+    /* meta.camera changed (setCameraState or a workspace load). */
+    void cameraChanged();
 
 private:
     friend class SceneColorCommand;

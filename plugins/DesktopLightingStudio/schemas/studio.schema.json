@@ -25,7 +25,18 @@
       "type": "object",
       "properties": {
         "view": { "type": "string", "enum": ["desk", "top", "front", "case", "free"], "default": "desk" },
-        "projection": { "type": "string", "enum": ["orthographic", "perspective"], "default": "orthographic" }
+        "projection": { "type": "string", "enum": ["orthographic", "perspective"], "default": "orthographic" },
+        "target": {
+          "type": "object",
+          "description": "Pan/orbit focus point in world meters. Optional; persisted after camera gestures.",
+          "properties": {
+            "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" }
+          }
+        },
+        "yaw_deg": { "type": "number", "default": 0, "description": "Free-view orbit yaw." },
+        "pitch_deg": { "type": "number", "default": -38, "description": "Free-view orbit pitch." },
+        "distance": { "type": "number", "exclusiveMinimum": 0, "default": 1.21, "description": "Perspective dolly distance, meters." },
+        "span": { "type": "number", "exclusiveMinimum": 0, "default": 0.9, "description": "Orthographic vertical extent, meters." }
       }
     },
     "controls": {

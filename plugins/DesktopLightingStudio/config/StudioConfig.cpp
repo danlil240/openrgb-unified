@@ -253,6 +253,15 @@ nlohmann::json ToJson(const StudioDocument& doc)
     j["camera"] = {
         {"view",       doc.meta.camera.view},
         {"projection", doc.meta.camera.projection},
+        {"target", {
+            {"x", doc.meta.camera.target.x},
+            {"y", doc.meta.camera.target.y},
+            {"z", doc.meta.camera.target.z},
+        }},
+        {"yaw_deg",   doc.meta.camera.yaw_deg},
+        {"pitch_deg", doc.meta.camera.pitch_deg},
+        {"distance",  doc.meta.camera.distance},
+        {"span",      doc.meta.camera.span},
     };
     j["controls"] = {
         {"middle_drag",     doc.meta.controls.middle_drag},
@@ -375,6 +384,25 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
         out.meta.camera.projection = FieldEnum(*s, "projection",
             out.meta.camera.projection,
             {"orthographic", "perspective"}, "camera", errs);
+        /* Pose fields are optional — a camera section that only
+           carries view/projection (pre-2.2 files) keeps defaults. */
+        if(const nlohmann::json* t = Section(*s, "target", errs))
+        {
+            CameraPrefs& c = out.meta.camera;
+            c.target.x = (float)FieldNum(*t, "x", c.target.x,
+                                         "camera.target", errs);
+            c.target.y = (float)FieldNum(*t, "y", c.target.y,
+                                         "camera.target", errs);
+            c.target.z = (float)FieldNum(*t, "z", c.target.z,
+                                         "camera.target", errs);
+        }
+        CameraPrefs& c = out.meta.camera;
+        c.yaw_deg   = (float)FieldNum(*s, "yaw_deg",   c.yaw_deg,   "camera", errs);
+        c.pitch_deg = (float)FieldNum(*s, "pitch_deg", c.pitch_deg, "camera", errs);
+        c.distance  = (float)FieldNum(*s, "distance",  c.distance,  "camera", errs);
+        c.span      = (float)FieldNum(*s, "span",      c.span,      "camera", errs);
+        if(c.distance <= 0.0f) { c.distance = 1.21f; }
+        if(c.span     <= 0.0f) { c.span     = 0.9f;  }
     }
     if(const nlohmann::json* s = Section(j, "controls", errs))
     {
