@@ -840,6 +840,26 @@ static void TestGestureLifecycle()
         CHECK(!ctl.Commit().has_value(),
               "life5: nothing left to commit");
     }
+
+    /* InstanceWorlds walks parent chains — a dangling parent id is
+       pushed before the existence check and must NOT be inserted
+       into ws.devices by operator[] (same hazard class as I-1) */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        w.devices["fan2"].parent = "ghost";   /* dangling ref */
+        const size_t n0 = w.devices.size();
+        ctl.Select("fan1");
+        CHECK(ctl.BeginTransform(), "dangle: begin");
+        CHECK(w.devices.size() == n0 && w.devices.count("ghost") == 0,
+              "dangle: InstanceWorlds inserted no phantom instance");
+        ctl.Cancel();
+        /* group path calls InstanceWorlds too */
+        ctl.SetSelection({ "fan1", "fan0m" });
+        CHECK(ctl.Group().has_value(), "dangle: group");
+        CHECK(w.devices.count("ghost") == 0,
+              "dangle: group path inserted no phantom instance");
+    }
 }
 
 /*---------------------------------------------------------*\
@@ -976,6 +996,26 @@ static void TestLockedCascade()
         CHECK(w.devices.count("fan0") == 1
               && w.devices["fan2"].parent == "fan0",
               "lockr: nothing re-keyed");
+    }
+
+    /* all-locked delete selection -> refused WITH a reason, not a
+       silent no-op (bridge surfaces LastError via status) */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        w.device_settings["fan1"].locked = true;
+        ctl.SetSelection({ "fan1" });
+        CHECK(!ctl.DeleteSelected().has_value(),
+              "lockd: all-locked delete refused");
+        CHECK(!ctl.LastError().empty(),
+              "lockd: refusal carries a reason");
+        CHECK(w.devices.count("fan1") == 1,
+              "lockd: nothing deleted");
+
+        /* all-locked group selection likewise reports */
+        CHECK(!ctl.Group().has_value()
+              && !ctl.LastError().empty(),
+              "lockd: all-locked group refused with reason");
     }
 }
 

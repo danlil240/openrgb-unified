@@ -579,18 +579,38 @@ void SceneBridge::setPaintColor(const QColor& color)
 void SceneBridge::undo()
 {
     /* An active gesture's snapshot predates the stack op — cancel
-       it (restores previewed transforms) before applyEdit rewrites
-       the workspace underneath it. */
+       it (restores previewed transforms into the workspace) before
+       applyEdit rewrites the workspace underneath it. */
+    const bool had = editor.GestureActive();
+    const std::set<std::string> gids = editor.GestureIds();
     editor.Cancel();
     undo_stack->undo();
+    /* The stack op may not re-resolve: an empty stack is a no-op and
+       overlay commands (color/emitter/brightness) mutate doc fields
+       directly. If a gesture was just cancelled, doc would otherwise
+       keep the last previewed pose — the gesture is dead, so no
+       further preview would heal it. Re-resolve the restored
+       workspace; the one extra resolve in the already-adopted case
+       is cheap. */
+    if(had)
+    {
+        previewAdopt(gids);
+    }
     PruneSelection();
     emit undoChanged();
 }
 
 void SceneBridge::redo()
 {
+    /* Same gesture-cancel + re-resolve reasoning as undo(). */
+    const bool had = editor.GestureActive();
+    const std::set<std::string> gids = editor.GestureIds();
     editor.Cancel();
     undo_stack->redo();
+    if(had)
+    {
+        previewAdopt(gids);
+    }
     PruneSelection();
     emit undoChanged();
 }
@@ -603,12 +623,30 @@ void SceneBridge::PruneSelection()
        SetSelection re-filters through Exists — copy first since it
        clears the very vector Selection() returns. */
     const std::vector<std::string> keep = editor.Selection();
+    const std::set<std::string> before_set(keep.begin(), keep.end());
     editor.SetSelection(keep);
-    const QString primary =
-        QString::fromStdString(editor.PrimarySelection());
-    if(selected != primary)
+    const std::set<std::string> after_set(editor.Selection().begin(),
+                                        editor.Selection().end());
+
+    bool changed = (before_set != after_set);
+    /* `selected` holds the raw object id select() stored — keep it
+       while its owning instance stays selected so sub-object
+       granularity survives undo/redo; otherwise fall back to the
+       primary instance id. */
+    const std::string sel_inst =
+        EditorController::InstanceOf(selected.toStdString());
+    if(sel_inst.empty() || !editor.IsSelected(sel_inst))
     {
-        selected = primary;
+        const QString primary =
+            QString::fromStdString(editor.PrimarySelection());
+        if(selected != primary)
+        {
+            selected = primary;
+            changed  = true;
+        }
+    }
+    if(changed)
+    {
         emit selectionChanged();
     }
 }
@@ -916,13 +954,17 @@ void SceneBridge::commitEdit(EditorEdit&& e)
     {
         /* The controller already mutated `workspace` — roll the
            edit back so document and scene stay consistent, then
-           re-adopt so `doc` doesn't keep a stale preview state. */
+           re-adopt so `doc` doesn't keep a stale preview state.
+           The revert restores the document but not the selection —
+           prune it so a rolled-back op (e.g. a failed Group) leaves
+           no phantom ids selected. */
         RevertEditorEdit(workspace, e);
         SceneDocument back;
         if(ResolveWorkspace(back))
         {
             AdoptResolved(back, e);
         }
+        PruneSelection();
         return;
     }
     AdoptResolved(resolved, e);
@@ -1113,6 +1155,10 @@ void SceneBridge::setInstanceVisible(const QString& id, bool on)
     {
         commitEdit(std::move(*e));
     }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
+    }
 }
 
 void SceneBridge::setInstanceLocked(const QString& id, bool on)
@@ -1123,6 +1169,10 @@ void SceneBridge::setInstanceLocked(const QString& id, bool on)
     if(e.has_value())
     {
         commitEdit(std::move(*e));
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
     }
 }
 
@@ -1135,6 +1185,10 @@ void SceneBridge::groupSelected()
         commitEdit(std::move(*e));
         selected = QString::fromStdString(editor.PrimarySelection());
         emit selectionChanged();
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
     }
 }
 
@@ -1179,6 +1233,10 @@ void SceneBridge::duplicateMirrored()
         commitEdit(std::move(*e));
         selected = QString::fromStdString(editor.PrimarySelection());
         emit selectionChanged();
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
     }
 }
 

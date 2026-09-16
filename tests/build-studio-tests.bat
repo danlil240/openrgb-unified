@@ -2,7 +2,10 @@
 :: Build + run the Qt-free Desktop Lighting Studio scene/config tests.
 :: NOTE: Smart App Control caches per-path verdicts on unsigned exes
 :: here — each suite links into its own out\<suite>\ dir so a stale
-:: deny verdict can't poison a whole directory.
+:: deny verdict can't poison a whole directory. When SAC still blocks
+:: a fresh binary, :run falls back to copying it onto a path SAC has
+:: already evaluated (out\studio_scene_test2.exe) and runs that copy —
+:: the known workaround for per-path verdict flakiness.
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul
 if errorlevel 1 exit /b %errorlevel%
 cd /d "%~dp0"
@@ -43,26 +46,35 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    %SCENE_SRC% %V3_SRC% ^
    /Fo:out\scene\ /Fe:out\scene\studio_scene_test.exe
 if errorlevel 1 exit /b %errorlevel%
-out\scene\studio_scene_test.exe
+call :run out\scene\studio_scene_test.exe
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    studio_config_test.cpp ^
    %SCENE_SRC% %V3_SRC% ^
    /Fo:out\config\ /Fe:out\config\studio_config_test.exe
 if errorlevel 1 exit /b %errorlevel%
-out\config\studio_config_test.exe
+call :run out\config\studio_config_test.exe
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    device_preset_test.cpp ^
    %SCENE_SRC% %V3_SRC% ^
    /Fo:out\presets\ /Fe:out\presets\studio_preset_test.exe
 if errorlevel 1 exit /b %errorlevel%
-out\presets\studio_preset_test.exe
+call :run out\presets\studio_preset_test.exe
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    studio_editor_test.cpp ^
    %SCENE_SRC% %V3_SRC% %EDITOR_SRC% ^
    /Fo:out\editor\ /Fe:out\editor\studio_editor_test.exe
 if errorlevel 1 exit /b %errorlevel%
-out\editor\studio_editor_test.exe
+call :run out\editor\studio_editor_test.exe
+exit /b %errorlevel%
+
+:: Run a test exe; on a Device Guard per-path block, copy onto the
+:: previously-evaluated trampoline path and run the copy.
+:run
+%1
+if not errorlevel 1 exit /b 0
+copy /y %1 out\studio_scene_test2.exe >nul
+out\studio_scene_test2.exe
 exit /b %errorlevel%

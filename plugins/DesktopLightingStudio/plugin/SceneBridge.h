@@ -266,6 +266,11 @@ private:
        commitEdit resolves + adopts + pushes one undo command;
        previewAdopt is the dirty-free gesture path. */
     void SyncWorkspace();
+    /* Drop selection ids the workspace no longer has (undo/redo,
+       rollback paths). `selected` keeps its stored OBJECT id while
+       its owning instance remains selected (sub-object granularity
+       survives undo); it falls back to the primary instance id only
+       when the object no longer resolves. */
     void PruneSelection();
     bool ResolveWorkspace(SceneDocument& out);
     void AdoptResolved(const SceneDocument& r, const EditorEdit& e);

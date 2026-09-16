@@ -189,7 +189,19 @@ std::map<std::string, Mat4> EditorController::InstanceWorlds() const
                                                   : Mat4Identity();
         for(auto it = chain.rbegin(); it != chain.rend(); ++it)
         {
-            const DeviceInstance& d = ws.devices[*it];
+            /* find(), never operator[]: a dangling parent id lands in
+               `chain` before the existence check, and inserting a
+               phantom empty DeviceInstance into the authoring doc
+               from this read-only-looking path is exactly the hazard
+               class the gesture lifecycle fix removed. Treat it as
+               an identity root frame. */
+            const auto dit = ws.devices.find(*it);
+            if(dit == ws.devices.end())
+            {
+                world[*it] = pw;
+                continue;
+            }
+            const DeviceInstance& d = dit->second;
             Transform t;
             t.position     = d.position;
             t.rotation_deg = d.rotation_deg;
@@ -570,8 +582,13 @@ EditorController::Rename(const std::string& id, const std::string& new_id)
 std::optional<EditorEdit>
 EditorController::SetVisible(const std::string& id, bool on)
 {
+    last_error.clear();
     if(gesture.active || !Exists(id))
     {
+        if(!Exists(id))
+        {
+            last_error = "visibility refused: unknown instance " + id;
+        }
         return std::nullopt;
     }
     const auto it = ws.device_settings.find(id);
@@ -591,8 +608,13 @@ EditorController::SetVisible(const std::string& id, bool on)
 std::optional<EditorEdit>
 EditorController::SetLocked(const std::string& id, bool on)
 {
+    last_error.clear();
     if(gesture.active || !Exists(id))
     {
+        if(!Exists(id))
+        {
+            last_error = "lock refused: unknown instance " + id;
+        }
         return std::nullopt;
     }
     const auto it = ws.device_settings.find(id);
@@ -633,6 +655,18 @@ EditorController::Delete(const std::vector<std::string>& ids)
     }
     if(kill.empty())
     {
+        /* Nothing survived the filter — report a locked selection
+           instead of silently no-op'ing (all-missing ids stay
+           silent: there was nothing real to delete). */
+        for(const std::string& id : ids)
+        {
+            const std::string iid = InstanceOf(id);
+            if(Exists(iid) && IsLocked(iid))
+            {
+                last_error = "delete refused: selection is locked";
+                break;
+            }
+        }
         return std::nullopt;
     }
     /* Cascade: descendants ride along so no dangling parent is
@@ -767,6 +801,7 @@ std::optional<EditorEdit> EditorController::DeleteSelected()
 std::optional<EditorEdit>
 EditorController::Group(const std::string& base_id)
 {
+    last_error.clear();
     if(gesture.active)
     {
         return std::nullopt;
@@ -774,6 +809,9 @@ EditorController::Group(const std::string& base_id)
     const std::set<std::string> mov = Movable();
     if(mov.empty())
     {
+        last_error = selection.empty()
+            ? "group: nothing selected"
+            : "group refused: selection is locked";
         return std::nullopt;
     }
     const std::map<std::string, Mat4> worlds = InstanceWorlds();
@@ -1000,6 +1038,7 @@ std::optional<EditorEdit> EditorController::Ungroup()
 \*---------------------------------------------------------*/
 std::optional<EditorEdit> EditorController::DuplicateMirrored()
 {
+    last_error.clear();
     if(gesture.active)
     {
         return std::nullopt;
@@ -1014,6 +1053,7 @@ std::optional<EditorEdit> EditorController::DuplicateMirrored()
     }
     if(sources.empty())
     {
+        last_error = "duplicate: nothing selected";
         return std::nullopt;
     }
 
