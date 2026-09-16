@@ -132,8 +132,10 @@ Rectangle {
     View3D {
         id: view
         anchors.fill: parent
-        onHeightChanged: camCtl.apply()
-        onWidthChanged: camCtl.apply()
+        /* camCtl is declared further down the file — guard the
+           forward id refs so a resize during construction is safe. */
+        onHeightChanged: if (typeof camCtl !== "undefined" && camCtl) camCtl.apply()
+        onWidthChanged:  if (typeof camCtl !== "undefined" && camCtl) camCtl.apply()
 
         environment: SceneEnvironment {
             backgroundMode: SceneEnvironment.Color
@@ -528,18 +530,35 @@ Rectangle {
                onActivated: selCtl.frameSelection() }
     Shortcut { sequence: "Home"; enabled: !inspector.textFocus
                onActivated: selCtl.frameAll() }
+    /* Undo/redo must not run under a live gesture — it would write
+       beneath the snapshot the gesture is previewing against.
+       Checked at activation time (gestureActive has no NOTIFY). */
     Shortcut { sequence: "Ctrl+Z"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined") bridge.undo() }
+               onActivated: if (typeof bridge !== "undefined"
+                                && !bridge.gestureActive()) bridge.undo() }
     Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined") bridge.redo() }
+               onActivated: if (typeof bridge !== "undefined"
+                                && !bridge.gestureActive()) bridge.redo() }
     Shortcut { sequence: "Ctrl+Y"; enabled: !inspector.textFocus
-               onActivated: if (typeof bridge !== "undefined") bridge.redo() }
+               onActivated: if (typeof bridge !== "undefined"
+                                && !bridge.gestureActive()) bridge.redo() }
     Shortcut { sequence: "Escape"
                onActivated: root.escapeAll() }
 
     Connections {
         target: (typeof bridge !== "undefined") ? bridge : null
         function onCameraChanged() { camCtl.applyFromBridge() }
+    }
+
+    /* Focus loss mid-space-hold would leave a sticky pan modifier —
+       the next left-drag would unexpectedly pan. Clear on deactivate
+       (selCtl.reset() covers the gesture-end path too). */
+    Connections {
+        target: root.Window.window
+        function onActiveChanged() {
+            if (target && !target.active)
+                selCtl.spaceDown = false
+        }
     }
 
     Component.onCompleted: camCtl.applyFromBridge()

@@ -67,7 +67,18 @@ Item {
     property rect   marqueeRect: Qt.rect(0, 0, 0, 0)
     property string lastPainted: ""
 
-    function hasBridge() { return typeof bridge !== "undefined" && bridge !== null }
+    /* Test seam: the real scene uses the `bridge` context property;
+       the qmltestrunner suite (no C++ context) injects a stub here.
+       `bridge` is an unqualified name — referencing it when absent
+       throws ReferenceError, so the fallback lives behind try/catch. */
+    property var bridgeOverride: null
+
+    function br() {
+        if (bridgeOverride !== null)
+            return bridgeOverride
+        try { return bridge } catch (e) { return null }
+    }
+    function hasBridge() { return br() !== null }
 
     function ownerOf(hitName) {
         if (!hitName)
@@ -118,8 +129,10 @@ Item {
     }
 
     function beginPressAt(x, y, button, mods, hitName, hitPos) {
+        /* A second press mid-gesture cancels the live one — a release
+           here would commit a half-finished move. */
         if (pressed)
-            endGesture(lastPos.x, lastPos.y, pressButton, pressMods)
+            cancel()
         pressed     = true
         gesture     = gNone
         pressPos    = Qt.point(x, y)
@@ -133,9 +146,17 @@ Item {
         lastPainted = ""
         marqueeRect = Qt.rect(0, 0, 0, 0)
 
-        /* Middle pan wins over every surface and every tool. */
+        /* Middle pan wins over every surface and every tool. The
+           middle_drag controls pref can redirect it to orbit — only
+           meaningful in the perspective free view, so ortho presets
+           keep panning (orbitPixels would no-op). Paint mode still
+           forbids orbit: the pref degrades to pan there. */
         if (button === Qt.MiddleButton) {
-            gesture = gPan
+            var md = (hasBridge() && br().cameraState)
+                   ? br().cameraState.middle_drag : "pan"
+            gesture = (md === "orbit" && tool !== 2 && cam && !cam.ortho)
+                    ? gOrbit : gPan
+            if (cam) cam.deferPose = true
             return
         }
         if (button !== Qt.LeftButton)
@@ -170,8 +191,9 @@ Item {
     function beginTransform() {
         if (!hasBridge())
             return false
-        bridge.beginTransformGesture()
-        if (bridge.gestureActive && !bridge.gestureActive())
+        var b = br()
+        b.beginTransformGesture()
+        if (b.gestureActive && !b.gestureActive())
             return false
         if (!startHit)
             startHit = cam ? cam.pointUnderPointer(pressPos.x, pressPos.y) : null
@@ -197,12 +219,12 @@ Item {
         if (!hasBridge() || hitObject === "")
             return
         var inst = instOf(hitObject)
-        if (bridge.selectedInstances.indexOf(inst) >= 0)
+        if (br().selectedInstances.indexOf(inst) >= 0)
             return
         if (mods & Qt.ControlModifier)
-            bridge.selectInstance(inst, true)
+            br().selectInstance(inst, true)
         else
-            bridge.select(hitObject)
+            br().select(hitObject)
     }
 
     function startRotate() {
@@ -239,8 +261,8 @@ Item {
             var hp = planePoint(x, y)
             if (hp && startHit && hasBridge()) {
                 var d = hp.minus(startHit)
-                bridge.updateTransformGesture(d.x, d.y, d.z,
-                                              editPlane, snapNow(mods))
+                br().updateTransformGesture(d.x, d.y, d.z,
+                                            editPlane, snapNow(mods))
             }
             return
         }
@@ -248,9 +270,9 @@ Item {
             var a  = gizmo ? gizmo.angleAt(x, y) : 0
             var ax = rotateAxis()
             if (hasBridge())
-                bridge.updateRotateGestureAxis(ax.x, ax.y, ax.z,
-                                               a - startAngle,
-                                               snapNow(mods))
+                br().updateRotateGestureAxis(ax.x, ax.y, ax.z,
+                                             a - startAngle,
+                                             snapNow(mods))
             return
         }
         if (gesture === gMarquee) {
@@ -266,19 +288,26 @@ Item {
         if (Math.sqrt(mx * mx + my * my) < clickPx)
             return
 
+        /* Paint mode: a left-drag that started outside an emit| proxy
+           can NEVER promote into movement, orbit or marquee — pointer
+           gestures in Paint do nothing but paint. */
+        if (tool === 2)
+            return
+
         /* Gesture promotion, in contract order. */
         if (spaceDown) {
             gesture = gPan
-            if (cam) cam.panPixels(mx, my)
+            if (cam) { cam.deferPose = true; cam.panPixels(mx, my) }
             return
         }
         if ((mods & Qt.AltModifier) && cam && !cam.ortho) {
             gesture = gOrbit
+            cam.deferPose = true
             cam.orbitPixels(mx, my)
             return
         }
         if (tool === 1 && gizmo && gizmo.ringHit(pressPos.x, pressPos.y)
-            && hasBridge() && bridge.selectedInstances.length > 0) {
+            && hasBridge() && br().selectedInstances.length > 0) {
             if (beginTransform()) {
                 startRotate()
                 gesture = gRotate
@@ -311,7 +340,7 @@ Item {
         var g = gesture
         if (g === gMove || g === gRotate) {
             if (hasBridge())
-                bridge.commitTransformGesture()
+                br().commitTransformGesture()
         } else if (g === gMarquee) {
             var r = normRect(pressPos, lastPos)
             selectMarquee(r.x, r.y, r.x + r.width, r.y + r.height)
@@ -329,13 +358,13 @@ Item {
         if (!hasBridge())
             return
         if (hitObject === "") {
-            bridge.select("")              /* empty space clears */
+            br().select("")                /* empty space clears */
             return
         }
         if (mods & Qt.ControlModifier)
-            bridge.selectInstance(instOf(hitObject), true)
+            br().selectInstance(instOf(hitObject), true)
         else
-            bridge.select(hitObject)
+            br().select(hitObject)
     }
 
     /* Escape — restore pre-gesture state, zero history. */
@@ -344,7 +373,7 @@ Item {
         var wasPressed = pressed
         if (g === gMove || g === gRotate) {
             if (hasBridge())
-                bridge.cancelTransformGesture()
+                br().cancelTransformGesture()
         } else if (g === gPan || g === gOrbit) {
             if (cam)
                 cam.restorePose(camSnapshot)   /* no save */
@@ -356,11 +385,15 @@ Item {
     function reset() {
         gesture     = gNone
         pressed     = false
+        /* Never leave a sticky pan modifier or a deferred camera save
+           behind — gesture end and focus loss both land here. */
+        spaceDown   = false
         pressHit    = ""
         hitObject   = ""
         startHit    = null
         marqueeRect = Qt.rect(0, 0, 0, 0)
         lastPainted = ""
+        if (cam) cam.deferPose = false
     }
 
     /*-----------------------------------------------------*\
@@ -385,7 +418,7 @@ Item {
         if (p.length < 3)
             return
         lastPainted = name
-        bridge.paintEmitter(p[1], parseInt(p[2]), bridge.paintColor)
+        br().paintEmitter(p[1], parseInt(p[2]), br().paintColor)
     }
 
     /* Marquee: project every non-decor node and keep the enclosed
@@ -404,14 +437,14 @@ Item {
                 && ids.indexOf(item.oInst) < 0)
                 ids.push(item.oInst)
         })
-        bridge.clearEditorSelection()
+        br().clearEditorSelection()
         for (var k = 0; k < ids.length; k++)
-            bridge.selectInstance(ids[k], true)
+            br().selectInstance(ids[k], true)
     }
 
     function frameSelection() {
-        if (hasBridge() && cam && bridge.selectedInstances.length > 0)
-            cam.frameIds(bridge.selectedInstances)
+        if (hasBridge() && cam && br().selectedInstances.length > 0)
+            cam.frameIds(br().selectedInstances)
     }
 
     function frameAll() {

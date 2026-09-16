@@ -211,7 +211,9 @@ public slots:
     Q_INVOKABLE QVariantMap instanceState(const QString& id) const;
     /* Persist a camera gesture's final pose into meta.camera
        (editor prefs — dirty/autosave path, never undo). Keys:
-       view, projection, tx/ty/tz, yaw, pitch, distance, span. */
+       view, projection, tx/ty/tz, yaw, pitch, distance, span.
+       cameraState() also carries controls.middle_drag so the
+       QML router can honor the pan|orbit pref. */
     Q_INVOKABLE void setCameraState(const QVariantMap& state);
 
 signals:

@@ -1307,6 +1307,9 @@ QVariantMap SceneBridge::cameraState() const
     m["pitch"]    = meta.camera.pitch_deg;
     m["distance"] = meta.camera.distance;
     m["span"]     = meta.camera.span;
+    /* Rides along on the prefs read so the QML router can honor the
+       middle_drag: pan|orbit control pref without a second API. */
+    m["middle_drag"] = QString::fromStdString(meta.controls.middle_drag);
     return m;
 }
 

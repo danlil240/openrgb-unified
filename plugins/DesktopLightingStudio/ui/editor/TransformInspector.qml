@@ -191,6 +191,9 @@ Rectangle {
                     startVal = parseFloat(input.text)
                     if (!isFinite(startVal))
                         startVal = 0
+                    /* Scrubbing is editing — shortcuts (W/E/F, undo)
+                       must not fire mid-scrub. */
+                    inspector.activeField = nf
                 }
                 onPositionChanged: function(m) {
                     if (!pressed)
@@ -198,7 +201,15 @@ Rectangle {
                     var cur = mapToItem(null, m.x, m.y).x
                     input.text = nf.fmt(startVal + (cur - anchor) * nf.scrubStep)
                 }
-                onReleased: nf.commitText()
+                onReleased: function(m) {
+                    if (inspector.activeField === nf && !input.activeFocus)
+                        inspector.activeField = null
+                    nf.commitText()
+                }
+                onCanceled: {
+                    if (inspector.activeField === nf)
+                        inspector.activeField = null
+                }
             }
         }
         Text {

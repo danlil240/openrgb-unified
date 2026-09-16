@@ -146,6 +146,22 @@ class EditorQmlTest : public QObject
         return s < 0 ? objectId : objectId.left(s);
     }
 
+    /* Object id belonging to a given instance ("" when absent). */
+    QString deviceObjectIdFor(const QString& inst)
+    {
+        for(const QVariant& v : bridge->objectList())
+        {
+            const QVariantMap m = v.toMap();
+            if(m["kind"].toString() == "device"
+               && m["instancePath"].toString() == inst
+               && m["geometry"].toString() != "case_shell")
+            {
+                return m["id"].toString();
+            }
+        }
+        return QString();
+    }
+
     QVector3D worldPosOf(const QString& objectId)
     {
         return callFn(root, "worldPosOf", { objectId }).value<QVector3D>();
@@ -194,7 +210,7 @@ private slots:
             QDir(QStringLiteral(STUDIO_UI_DIR)).absoluteFilePath("StudioScene.qml");
         w->setSource(QUrl::fromLocalFile(QDir::cleanPath(qml)));
         w->show();
-        QTest::qWaitForWindowExposed(w);
+        (void)QTest::qWaitForWindowExposed(w);
         QTRY_VERIFY_WITH_TIMEOUT(w->status() == QQuickWidget::Ready, 10000);
         pump(1000);   /* scene graph + first frames */
 
@@ -358,10 +374,14 @@ private slots:
         QVERIFY(bridge->selectedInstances().isEmpty());
     }
 
-    /* Marquee: enclosed instances only. */
+    /* Marquee: enclosed instances only — and ONLY those. */
     void marquee_selectsEnclosed()
     {
-        const QString obj  = firstDeviceObjectId();
+        /* The mouse sits apart from the keyboard/case cluster — the
+           isolation target for the tight box. */
+        QString obj = deviceObjectIdFor("mouse");
+        if(obj.isEmpty())
+            obj = firstDeviceObjectId();
         const QString inst = instanceOf(obj);
         const QVector3D sp =
             callFn(root, "screenPosOf", { obj }).value<QVector3D>();
@@ -377,6 +397,9 @@ private slots:
         QVERIFY2(gotNames.contains(inst),
                  qPrintable(QStringLiteral("marquee missed %1 (got %2)")
                     .arg(inst).arg(gotNames.join(','))));
+        /* Exclusion, not just containment: the tight box must not
+           pull in neighbouring instances. */
+        QCOMPARE(gotNames.size(), 1);
 
         /* Whole-view box -> everything non-decor. */
         callFn(sel, "selectMarquee",
@@ -456,6 +479,135 @@ private slots:
         bridge->undo();
         QVERIFY(!bridge->canUndo());
         callFn(sel, "setTool", { 0 });
+    }
+
+    /* C1 regression: Paint mode — a left-drag on a device body must
+       never promote to a move (or orbit/marquee): no transform
+       gesture, no undo record, camera untouched. */
+    void paintModeDrag_neverMoves()
+    {
+        const QString obj = firstDeviceObjectId();
+        const QString digest0 = transformDigest();
+        const QVector3D t0 = camTarget();
+        const bool undo0 = bridge->canUndo();
+
+        callFn(sel, "setTool", { 2 });
+        QCOMPARE(sel->property("tool").toInt(), 2);
+
+        const QPoint c(w->width() / 2, w->height() / 2);
+        callFn(sel, "beginPressAt",
+               { c.x(), c.y(), (int)Qt::LeftButton, 0,
+                 "obj|" + obj, QVariant::fromValue(worldPosOf(obj)) });
+        for(int i = 1; i <= 5; i++)
+            callFn(sel, "dragTo", { c.x() + i * 20, c.y() + i * 10, 0 });
+        QCOMPARE(sel->property("gesture").toInt(), 0);   /* no promotion */
+        QVERIFY(!bridge->gestureActive());
+        callFn(sel, "endGesture",
+               { c.x() + 100, c.y() + 50, (int)Qt::LeftButton, 0 });
+
+        QCOMPARE(transformDigest(), digest0);
+        QCOMPARE(bridge->canUndo(), undo0);
+        QVERIFY2((camTarget() - t0).length() < 1e-4,
+                 "paint-mode drag moved the camera");
+        callFn(sel, "setTool", { 0 });
+    }
+
+    /* M2 regression: a second press mid-drag cancels the live
+       gesture — it must not commit a half-finished move. */
+    void secondPress_cancelsGesture()
+    {
+        const QString obj  = firstDeviceObjectId();
+        const QString inst = instanceOf(obj);
+        const QVariantMap st0 = bridge->instanceState(inst);
+        const QPoint c(w->width() / 2, w->height() / 2);
+
+        callFn(sel, "beginPressAt",
+               { c.x(), c.y(), (int)Qt::LeftButton, 0,
+                 "obj|" + obj, QVariant::fromValue(worldPosOf(obj)) });
+        callFn(sel, "dragTo", { c.x() + 50, c.y(), 0 });
+        QCOMPARE(sel->property("gesture").toInt(), 2);
+        QVERIFY(bridge->gestureActive());
+
+        /* Second press while the move is live -> cancel, not commit. */
+        callFn(sel, "beginPressAt",
+               { c.x() + 200, c.y(), (int)Qt::LeftButton, 0,
+                 "", QVariant() });
+        QCOMPARE(sel->property("gesture").toInt(), 0);
+        QVERIFY(!bridge->gestureActive());
+        QVERIFY(!bridge->canUndo());
+
+        const QVariantMap st1 = bridge->instanceState(inst);
+        QVERIFY(std::fabs(st1["x"].toDouble() - st0["x"].toDouble()) < 1e-5
+                && std::fabs(st1["z"].toDouble() - st0["z"].toDouble()) < 1e-5);
+        callFn(sel, "endGesture",
+               { c.x() + 200, c.y(), (int)Qt::LeftButton, 0 });
+    }
+
+    /* I3 regression: spaceDown is a momentary modifier — gesture end
+       / cancel must clear it (a sticky flag would turn the next
+       left-drag into an unexpected pan). */
+    void spaceDown_clearsOnReset()
+    {
+        sel->setProperty("spaceDown", true);
+        callFn(sel, "cancel", {});
+        QCOMPARE(sel->property("spaceDown").toBool(), false);
+    }
+
+    /* I2: end-to-end left press over a device. Synthesized events go
+       MouseArea -> selCtl.press -> view.pick -> beginPressAt; if the
+       platform eats them, press() alone still proves the pick
+       resolves an obj|/emit| name (not "" -> marquee). */
+    void realMouse_leftDrag_device()
+    {
+        /* Back on a sane view — wheelZoom_bounded left spanMax. */
+        callFn(cam, "applyView", { "desk" });
+        pump(200);
+
+        const QString obj = firstDeviceObjectId();
+        const QVector3D sp =
+            callFn(root, "screenPosOf", { obj }).value<QVector3D>();
+        QVERIFY2(!sp.isNull(), "mapFrom3DScene unavailable");
+        const QPoint p((int)sp.x(), (int)sp.y());
+        const bool undo0 = bridge->canUndo();
+
+        sendMouse(QEvent::MouseButtonPress, p, Qt::LeftButton,
+                  Qt::LeftButton);
+        pump(50);
+        for(int i = 1; i <= 6; i++)
+        {
+            sendMouse(QEvent::MouseMove, p + QPoint(i * 12, 0),
+                      Qt::NoButton, Qt::LeftButton);
+            pump(30);
+        }
+
+        if(sel->property("gesture").toInt() != 2)
+        {
+            qWarning() << "synthesized left-drag not delivered —"
+                          "verifying the pick path directly";
+            callFn(sel, "press",
+                   { p.x(), p.y(), (int)Qt::LeftButton, 0 });
+            const QString hit = sel->property("pressHit").toString();
+            QVERIFY2(hit.startsWith("obj|") || hit.startsWith("emit|"),
+                     qPrintable(QStringLiteral(
+                         "pick under device resolved to '%1'").arg(hit)));
+            callFn(sel, "dragTo", { p.x() + 60, p.y(), 0 });
+            QCOMPARE(sel->property("gesture").toInt(), 2);
+            callFn(sel, "endGesture",
+                   { p.x() + 60, p.y(), (int)Qt::LeftButton, 0 });
+        }
+        else
+        {
+            sendMouse(QEvent::MouseButtonRelease, p + QPoint(72, 0),
+                      Qt::LeftButton, Qt::NoButton);
+            pump(200);
+            QCOMPARE(sel->property("gesture").toInt(), 0);
+        }
+
+        /* Either path committed one move record — pop it so the
+           stack stays clean for later tests. */
+        QVERIFY(bridge->canUndo() != undo0);
+        bridge->undo();
+        QVERIFY(!bridge->canUndo());
     }
 
     /* End-to-end: synthesized QMouseEvent middle-drag into the real

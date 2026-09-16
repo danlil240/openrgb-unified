@@ -47,6 +47,12 @@ QtObject {
        can re-evaluate their bindings. */
     property int poseStamp: 0
 
+    /* True while a pan/orbit gesture is live — zoomAt must not
+       persist a mid-gesture pose (Escape would restore the snapshot
+       after prefs already saved it). The gesture's endPose persists
+       once at release. */
+    property bool deferPose: false
+
     signal poseFinished()
 
     function clampNum(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v) }
@@ -109,7 +115,10 @@ QtObject {
             pitchDeg = -30
             yawDeg   = 0
             apply()
-            frameIds(["case"])     /* also saves the pose */
+            /* frameIds saves the pose on success; a workspace without
+               a "case" instance still persists the view change. */
+            if (!frameIds(["case"]))
+                poseFinished()
             return
         }
         /* "free" keeps the current pose; projection flips to the
@@ -124,10 +133,10 @@ QtObject {
     \*-----------------------------------------------------*/
     function frameIds(ids) {
         if (!boundsOf)
-            return
+            return false
         var b = boundsOf(ids)
         if (!b || b.r <= 0)
-            return
+            return false
         target = b.c
         var r = Math.max(b.r, 0.05)
         if (ortho) {
@@ -140,6 +149,7 @@ QtObject {
         }
         apply()
         poseFinished()
+        return true
     }
 
     /*-----------------------------------------------------*\
@@ -247,7 +257,8 @@ QtObject {
             target = target.plus(anchor.minus(after))
             apply()
         }
-        poseFinished()
+        if (!deferPose)
+            poseFinished()
     }
 
     function projectPoint(worldPos) {
