@@ -101,11 +101,32 @@ Node {
             baseColor: "#1a1a22"; roughness: 0.5; metalness: 0.2
         }
     }
+    /* Invisible pick plate covering the open light face — the
+       posts/bars/hub alone left most of the face unpickable, so
+       clicks through the blades fell to empty space and cleared
+       the selection. Same pattern as the emit| proxies. */
+    Model {
+        visible: !body.isPump
+        objectName: body.pickName
+        pickable: body.pickOn
+        source: "#Cube"
+        scale: Qt.vector3d(body.bx / 100, 0.001 / 100, body.bz / 100)
+        castsShadows: false
+        materials: PrincipledMaterial {
+            lighting: PrincipledMaterial.NoLighting
+            baseColor: "#00000000"
+            opacity: 0.0
+            depthDrawMode: PrincipledMaterial.NeverDepthDraw
+        }
+    }
+
     Repeater3D {
         model: body.isPump ? 0 : 7
         delegate: Model {
             required property var modelData
             property int index: modelData
+            objectName: body.pickName
+            pickable: body.pickOn
             source: "#Cube"
             /* Blade yaw = index * 360/7 + a fixed sweep offset. */
             property real a: index * (2 * Math.PI / 7) + 0.35

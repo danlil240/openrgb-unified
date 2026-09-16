@@ -53,6 +53,8 @@ Node {
         delegate: Model {
             required property var modelData
             property int index: modelData
+            objectName: body.pickName
+            pickable: body.pickOn
             source: "#Cylinder"
             property real s: index === 0 ? 1 : -1
             position: Qt.vector3d(s * body.bx * 0.22, 0,

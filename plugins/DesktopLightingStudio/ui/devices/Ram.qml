@@ -43,6 +43,8 @@ Node {
 
     /* Gold contact edge along the bottom. */
     Model {
+        objectName: body.pickName
+        pickable: body.pickOn
         source: "#Cube"
         position: Qt.vector3d(0, -body.by * 0.44, 0)
         scale: Qt.vector3d(body.bx * 0.9 / 100, 0.0025 / 100,
