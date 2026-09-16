@@ -493,6 +493,88 @@ static void TestValidation()
               "unknown layer key rejected");
     }
 
+    /* Spec objects carry EXACTLY one key — an extra key after the
+       spec key used to pass SpecKeyCount and get silently dropped.
+       Rejected in every field position that accepts a spec. */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["speed"] = {{"remix", {0.0, 1.0}}, {"foo", 2}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "scalar spec + trailing key rejected");
+        j = MinimalDoc();
+        j["layers"][0]["speed"] = {{"foo", 2}, {"remix", {0.0, 1.0}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "scalar spec + leading key rejected");
+        j = MinimalDoc();
+        j["layers"][0]["seed"] = {{"remix_u32", {0, 10}}, {"foo", 2}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix_u32 + extra key rejected");
+        j = MinimalDoc();
+        j["layers"][0]["direction"] =
+            {{"remix_yaw", {1.0, 0.0, 0.0, -1.0, 1.0}}, {"foo", 2}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix_yaw + extra key rejected");
+        j = MinimalDoc();
+        nlohmann::ordered_json el;
+        el["remix01"] = true;
+        el["foo"]     = 2;
+        j["layers"][0]["origin"] =
+            nlohmann::ordered_json::array({ el, 0.0, 0.0 });
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "vector-element spec + extra key rejected");
+        /* palette stop pos goes through the same scalar path */
+        j = MinimalDoc();
+        nlohmann::ordered_json s0;
+        s0["pos"]   = {{"remix", {0.0, 0.5}}, {"foo", 2}};
+        s0["color"] = "#102030";
+        j["layers"][0]["palette"] =
+            nlohmann::ordered_json::array({ s0 });
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "palette pos spec + extra key rejected");
+    }
+
+    /* Finite-double values that overflow float width are errors,
+       not clamps — check AFTER narrowing like PathField does. */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["speed"] = 1e300;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "1e300 speed rejected (narrows to inf)");
+        j = MinimalDoc();
+        j["layers"][0]["phase"] = -1e300;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "-1e300 phase rejected");
+        j = MinimalDoc();
+        j["layers"][0]["density"] = 1e300;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "1e300 density rejected");
+        j = MinimalDoc();
+        j["layers"][0]["scale"] = 1e300;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "1e300 scale rejected");
+        j = MinimalDoc();
+        j["layers"][0]["origin"] =
+            nlohmann::ordered_json::array({ 1e300, 0.0, 0.0 });
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "1e300 vector component rejected");
+        /* a remix spec whose implied domain can't fit float is
+           rejected too — some seed would draw non-finite */
+        j = MinimalDoc();
+        j["layers"][0]["speed"] = {{"remix", {0.0, 1e300}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix bound 1e300 rejected");
+        j = MinimalDoc();
+        j["layers"][0]["direction"] =
+            {{"remix_yaw", {1e300, 0.0, 0.0, -1.0, 1.0}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix_yaw component 1e300 rejected");
+        /* float-finite huge values still pass — no false alarm */
+        j = MinimalDoc();
+        j["layers"][0]["speed"] = 1e38;
+        CHECK(EffectDocumentFromJson(j, d, &errs),
+              "1e38 (float-finite) speed accepted");
+    }
+
     /* palette errors */
     {
         nlohmann::ordered_json j = MinimalDoc();

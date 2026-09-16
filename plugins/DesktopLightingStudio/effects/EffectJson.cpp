@@ -150,7 +150,10 @@ bool ScalarSpec(const J& v, RemixRng* rng, double& out,
                 double& imp_lo, double& imp_hi,
                 const std::string& path, std::vector<std::string>& errs)
 {
-    if(SpecKeyCount(v) != 1)
+    /* Exactly one key AND it must be a spec key: SpecKeyCount
+       alone counted only spec keys, so {"remix":[..],"foo":2}
+       passed and silently dropped the extra key. */
+    if(v.size() != 1 || SpecKeyCount(v) != 1)
     {
         AddErr(errs, path, "expected one remix spec key");
         return false;
@@ -281,7 +284,19 @@ bool NumField(const J& v, float& out, double lo, double hi,
                            + ".." + std::to_string(hi));
         return false;
     }
+    /* Narrow to float THEN check finiteness — a finite double
+       inside the declared bounds (speed/phase/density allow up
+       to DBL_MAX) still overflows to inf at float width, and a
+       remix spec whose implied domain doesn't fit float would
+       produce inf for some seed. Non-finite is an error, not a
+       clamp — same rule PathField already applies. */
     out = (float)d;
+    if(!std::isfinite(out) || !std::isfinite((float)il)
+       || !std::isfinite((float)ih))
+    {
+        AddErr(errs, path, "expected float-finite number");
+        return false;
+    }
     return true;
 }
 
@@ -299,7 +314,8 @@ bool VecField(const J& v, Vec3& out, bool allow_yaw, RemixRng* rng,
                                " — literals only");
             return false;
         }
-        if(SpecKeyCount(v) != 1 || !v.contains("remix_yaw"))
+        if(v.size() != 1 || SpecKeyCount(v) != 1
+           || !v.contains("remix_yaw"))
         {
             AddErr(errs, path, "expected one remix spec key"
                                " (vectors support remix_yaw only)");
@@ -332,11 +348,24 @@ bool VecField(const J& v, Vec3& out, bool allow_yaw, RemixRng* rng,
             AddErr(errs, sp, "remix bounds: lo > hi");
             return false;
         }
+        /* Narrow to float and re-check — a finite double (1e300)
+           still overflows to inf at float width and would poison
+           Normalize/Range with inf/NaN. */
+        const float fn[5] = { (float)n[0], (float)n[1], (float)n[2],
+                              (float)n[3], (float)n[4] };
+        for(int i = 0; i < 5; i++)
+        {
+            if(!std::isfinite(fn[i]))
+            {
+                AddErr(errs, sp,
+                       "expected float-finite [x,y,z,lo,hi]");
+                return false;
+            }
+        }
         if(rng != nullptr)
         {
-            const float a = rng->Range((float)n[3], (float)n[4]);
-            out = RotateYaw(Normalize({ (float)n[0], (float)n[1],
-                                      (float)n[2] }), a);
+            const float a = rng->Range(fn[3], fn[4]);
+            out = RotateYaw(Normalize({ fn[0], fn[1], fn[2] }), a);
         }
         return true;
     }
@@ -354,12 +383,13 @@ bool VecField(const J& v, Vec3& out, bool allow_yaw, RemixRng* rng,
         if(e.is_number())
         {
             const double d = e.template get<double>();
-            if(!std::isfinite(d))
+            const float  f = (float)d;
+            if(!std::isfinite(d) || !std::isfinite(f))
             {
                 AddErr(errs, ep, "expected finite number");
                 return false;
             }
-            *comps[i] = (float)d;
+            *comps[i] = f;
             continue;
         }
         if(e.is_object())
@@ -375,7 +405,16 @@ bool VecField(const J& v, Vec3& out, bool allow_yaw, RemixRng* rng,
             {
                 return false;
             }
-            *comps[i] = (float)d;
+            /* Same narrowing rule as NumField: the drawn value and
+               the spec's implied domain must survive float width. */
+            const float f = (float)d;
+            if(!std::isfinite(f) || !std::isfinite((float)il)
+               || !std::isfinite((float)ih))
+            {
+                AddErr(errs, ep, "expected float-finite number");
+                return false;
+            }
+            *comps[i] = f;
             continue;
         }
         AddErr(errs, ep, "expected number or remix spec");
@@ -565,7 +604,8 @@ bool SeedField(const J& v, unsigned int& out, RemixRng* rng,
                                " — literals only");
             return false;
         }
-        if(SpecKeyCount(v) != 1 || !v.contains("remix_u32"))
+        if(v.size() != 1 || SpecKeyCount(v) != 1
+           || !v.contains("remix_u32"))
         {
             AddErr(errs, path, "seed takes remix_u32 only");
             return false;
@@ -746,7 +786,14 @@ bool ParseLayer(const J& j, EffectLayer& l, const std::string& path,
             }
             else
             {
+                /* Post-narrowing finiteness — see NumField. */
                 out.scale = (float)d;
+                if(!std::isfinite(out.scale)
+                   || !std::isfinite((float)ih))
+                {
+                    AddErr(errs, p, "expected float-finite number");
+                    ok = false;
+                }
             }
         }
         else if(k == "phase")

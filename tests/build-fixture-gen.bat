@@ -16,12 +16,14 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    "%STUDIO%\scene\DefaultDesk.cpp" ^
    "%STUDIO%\effects\EffectTypes.cpp" ^
    "%STUDIO%\effects\EffectEngine.cpp" ^
+   "%STUDIO%\effects\EffectJson.cpp" ^
    "%STUDIO%\effects\Presets.cpp" ^
    "%STUDIO%\inputs\InputBus.cpp" ^
    "%STUDIO%\inputs\OnsetDetect.cpp" ^
    "%STUDIO%\inputs\KeyMap.cpp" ^
    "%STUDIO%\presets\DevicePreset.cpp" ^
    "%STUDIO%\presets\PresetRegistry.cpp" ^
+   "%STUDIO%\presets\EffectRegistry.cpp" ^
    "%STUDIO%\presets\PresetBundle.cpp" ^
    "%STUDIO%\scene\SceneResolver.cpp" ^
    "%STUDIO%\config\StudioConfig.cpp" ^
