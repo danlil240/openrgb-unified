@@ -521,6 +521,7 @@ Rectangle {
                 onEditRequested: function(typeId) {
                     presetEd.openForType(typeId, "")
                 }
+                onNewRequested: presetEd.openNew()
                 opacity: ws.leftTab === 1 ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity {
@@ -552,6 +553,7 @@ Rectangle {
                overlay stays for standalone/test use only. */
             overlayInspector: false
             focusPeer: insp
+            focusPeer2: presetEd
         }
 
         /* Right splitter — docked inspector width (drag +x

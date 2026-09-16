@@ -40,6 +40,10 @@ Rectangle {
        keep this file standalone: tests/editor_qml loads it bare. */
     property bool overlayInspector: true
     property var focusPeer: null
+    /* Second peer — the floating preset editor (task 4.3) is a
+       sibling of the docked inspector, so both report through
+       editingText(). */
+    property var focusPeer2: null
     readonly property var editorCtl: selCtl
     readonly property var editorCam: camCtl
     /* Test seam: the tiered environment instance (probe/qml tests
@@ -49,6 +53,7 @@ Rectangle {
     function editingText() {
         return inspector.textFocus
                || (focusPeer && focusPeer.textFocus)
+               || (focusPeer2 && focusPeer2.textFocus)
     }
 
     // Diagnostic state readable from the probe / debug overlays.

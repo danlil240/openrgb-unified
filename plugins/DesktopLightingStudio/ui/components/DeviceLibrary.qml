@@ -44,8 +44,10 @@ Rectangle {
     property var bridgeOverride: null
     property var sceneView: null
     /* Task 4.3 — the row "Edit" action opens the preset editor for
-       the type (the workspace hosts the panel). */
+       the type; the header "New" button opens a blank one. (The
+       workspace hosts the panel in both cases.) */
     signal editRequested(string typeId)
+    signal newRequested()
     function br() {
         if (bridgeOverride !== null)
             return bridgeOverride
@@ -302,11 +304,17 @@ Rectangle {
                 font.bold: true
                 anchors.verticalCenter: parent.verticalCenter
             }
-            Item { width: 1; height: 1 }
             Text {
                 text: lib.totalCount + " types"
                 color: th.textFaint; font.pixelSize: th.fontSmall
                 anchors.verticalCenter: parent.verticalCenter
+            }
+            Item { width: 1; height: 1 }
+            IconBtn {
+                text: "✚"
+                tip: "New type — open the preset editor on a blank "
+                   + "candidate"
+                onClicked: lib.newRequested()
             }
         }
 

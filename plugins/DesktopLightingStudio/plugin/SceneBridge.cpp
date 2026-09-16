@@ -1955,6 +1955,13 @@ QVariantMap SceneBridge::savePresetType(const QVariantMap& candidate,
             {
                 continue;   /* count unchecked — nothing to compare */
             }
+            /* Dynamic matrix: the bound hardware owns the mapping —
+               the type generates zero emitters by design, so a count
+               comparison would warn "now has 0 LEDs" on every save. */
+            if(z->layout.type == "matrix" && z->layout.dynamic)
+            {
+                continue;
+            }
             const size_t n = GenerateZoneEmitters(*z, "", 0).size();
             if(n < hw)
             {

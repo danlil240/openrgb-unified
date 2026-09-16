@@ -60,6 +60,8 @@ TestCase {
             presetModel: [ { typeId: "fan-120" }, { typeId: "desk" } ],
             presetDocument: function(tid) {
                 this.log.push("doc:" + tid)
+                if (tid === "")
+                    return { exists: false }
                 return { exists: true, doc: fanDoc(),
                          fromFile: true, packaged: false }
             },
@@ -90,6 +92,13 @@ TestCase {
                                       [0, 0.01, 0.05]],
                              addresses: [0, 1] }
                 z.led_count = 2
+                /* The real bridge returns a QVariantMap — keys come
+                   back alphabetical, so mimic that shuffle here to
+                   prove the editor preserves entityOrder. */
+                var sorted = {}
+                Object.keys(c.entities).sort().forEach(
+                    function(k) { sorted[k] = c.entities[k] })
+                c.entities = sorted
                 return { ok: true, candidate: c }
             },
             hardwareControllers: function() {
@@ -227,6 +236,82 @@ TestCase {
         /* re-convert refused: stub errors land in saveErrors */
         ed.convertZone(0)
         compare(ed.saveErrors.length > 0, true)
+        ed.destroy()
+    }
+
+    function test_convert_preserves_entity_order() {
+        /* doc deliberately authors entities out of alpha order —
+           convertZoneToPoints returns them re-sorted (QVariantMap);
+           the editor must keep the authored parts order. */
+        var b = makeBridge()
+        b.presetDocument = function(tid) {
+            return { exists: true, fromFile: true, packaged: false,
+                doc: { id: "multi", name: "Multi", category: "c",
+                    entities: {
+                        zz: { geometry: "box" },
+                        aa: { geometry: "box" },
+                        mm: { geometry: "box", zone: "ring" } },
+                    zones: [ { id: "ring", entity: "mm", led_count: 4,
+                               layout: { type: "ring", radius_m: 0.05,
+                                         start_angle_deg: 0,
+                                         face_y_m: 0.01,
+                                         reverse: false } } ],
+                    binding_hints: [] } }
+        }
+        var ed = makeEd(b)
+        ed.openForType("multi", "")
+        compare(ed.entityOrder, ["zz", "aa", "mm"])
+        ed.convertZone(0)
+        compare(ed.entityOrder, ["zz", "aa", "mm"])
+        ed.destroy()
+    }
+
+    function test_layout_switch_and_accessors() {
+        var ed = makeEd(makeBridge())
+        ed.openForType("fan-120", "")
+        /* selZone/selZoneLayout re-derive through stamp — a layout
+           swap must be visible to every consumer immediately. */
+        compare(ed.selZone().layout.type, "ring")
+        ed.setLayoutType(0, "strip")
+        compare(ed.selZone().layout.type, "strip")
+        compare(ed.selZoneLayout().type, "strip")
+        compare(ed.selZoneLayout().spacing_m, 0.005)
+        ed.setLayoutType(0, "points")
+        compare(ed.selZoneLayout().points.length, 2)
+        ed.destroy()
+    }
+
+    function test_open_new_blank_candidate() {
+        var b = makeBridge()
+        var ed = makeEd(b)
+        ed.openNew()
+        verify(ed.candidate !== null)
+        compare(ed.saveAsMode, true)
+        compare(ed.candidate.id, "")
+        compare(ed.originalId, "")
+        compare(ed.instanceId, "")
+        ed.destroy()
+    }
+
+    function test_save_click_surfaces_error() {
+        /* Save stays clickable with an invalid candidate — the
+           failure must land in the visible saveErrors list. */
+        var b = makeBridge()
+        var ed = makeEd(b)
+        ed.openForType("fan-120", "")
+        ed.candidate.name = ""
+        ed.doSave()
+        compare(ed.saveErrors, ["id: display name required"])
+        verify(b.saved === null)
+        ed.destroy()
+    }
+
+    function test_text_focus_flag() {
+        var ed = makeEd(makeBridge())
+        /* No window focus in the harness — the flag exists and is a
+           bool; StudioScene reads it through focusPeer2. */
+        compare(typeof ed.textFocus, "boolean")
+        compare(ed.textFocus, false)
         ed.destroy()
     }
 

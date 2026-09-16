@@ -56,6 +56,23 @@ Rectangle {
         try { return bridge } catch (e) { return null }
     }
     function hasBr() { return br() !== null }
+
+    /* True while ANY control inside the panel holds focus — not
+       just text fields: a focused button/combo must still swallow
+       the viewport's W/E/P/F/Home/Ctrl+Z shortcuts. Walks the
+       window's activeFocusItem ancestry so every control (incl.
+       ones added later) is covered without per-field plumbing;
+       StudioScene reads this through the focusPeer seam. */
+    readonly property bool textFocus: {
+        var w = ped.Window
+        var f = w ? w.activeFocusItem : null
+        while (f) {
+            if (f === ped)
+                return true
+            f = f.parent
+        }
+        return false
+    }
     function brQObj() {
         var b = br()
         return (b !== null && b.objectName !== undefined) ? b : null
@@ -416,6 +433,22 @@ Rectangle {
     }
 
     /* ================= zone model ================= */
+    /* Selected-zone accessors — functions (not `property var`) so
+       every consuming binding re-derives through `stamp`: a var
+       bound to the same object identity suppresses notify, which
+       left layout params and zone fields stale after setLayoutType
+       swapped z.layout. */
+    function selZone() {
+        stamp
+        return (candidate && selZoneIdx >= 0
+                && selZoneIdx < candidate.zones.length)
+             ? candidate.zones[selZoneIdx] : null
+    }
+    function selZoneLayout() {
+        var z = selZone()
+        return (z && z.layout) || {}
+    }
+
     function zoneIds() {
         stamp
         var out = []
@@ -728,10 +761,19 @@ Rectangle {
         var r = b.convertZoneToPoints(candidateJson(), zi)
         if (r && r.ok && r.candidate) {
             var keepId = candidate.zones[zi] ? candidate.zones[zi].id : ""
+            var prevOrder = entityOrder.slice()
             candidate = r.candidate
-            entityOrder = []
+            /* QVariantMap key order is alphabetical — keep the
+               existing parts order, appending anything new and
+               dropping removed ids, so the list doesn't reshuffle. */
+            var ord = []
+            for (var o = 0; o < prevOrder.length; o++)
+                if (candidate.entities[prevOrder[o]] !== undefined)
+                    ord.push(prevOrder[o])
             for (var k in candidate.entities)
-                entityOrder.push(k)
+                if (ord.indexOf(k) < 0)
+                    ord.push(k)
+            entityOrder = ord
             if (selEntityId !== "" && candidate.entities[selEntityId] === undefined)
                 selEntityId = entityOrder.length ? entityOrder[0] : ""
             for (var i = 0; i < candidate.zones.length; i++)
@@ -1340,8 +1382,15 @@ Rectangle {
                         width: formCol.width
                         spacing: th.spHalf
                         visible: ped.ent(ped.selEntityId) !== null
-                        property var e: ped.ent(ped.selEntityId)
-                        property bool isRef: e && (e.type || "") !== ""
+                        /* Re-derive through ent() (which reads
+                           stamp) — a `var` holding the same object
+                           never re-notifies, so child-type picks
+                           must not latch through a stale `e`. */
+                        property bool isRef: {
+                            var ent = ped.ent(ped.selEntityId)
+                            return ent !== null
+                                   && (ent.type || "") !== ""
+                        }
 
                         FR {
                             label: "part id"
@@ -1610,20 +1659,12 @@ Rectangle {
                         visible: ped.selZoneIdx >= 0
                                  && ped.candidate
                                  && ped.selZoneIdx < ped.candidate.zones.length
-                        property var zc: {
-                            ped.stamp
-                            return (ped.candidate
-                                    && ped.selZoneIdx >= 0
-                                    && ped.selZoneIdx < ped.candidate.zones.length)
-                                 ? ped.candidate.zones[ped.selZoneIdx] : null
-                        }
-                        property var lay: (zc && zc.layout) || {}
 
                         FR {
                             label: "zone id"
                             TF {
                                 fw: 110
-                                value: zoneEditor.zc ? zoneEditor.zc.id : ""
+                                value: ped.selZone() ? ped.selZone().id : ""
                                 onCommitted: function(t) {
                                     var id = t.trim()
                                     if (id !== "" && ped.validTypeId(id))
@@ -1640,8 +1681,8 @@ Rectangle {
                                 function refresh() {
                                     if (activeFocus)
                                         return
-                                    setTo(zoneEditor.zc
-                                          ? (zoneEditor.zc.entity || "") : "")
+                                    setTo(ped.selZone()
+                                          ? (ped.selZone().entity || "") : "")
                                 }
                                 onActivated: function(i) {
                                     ped.setZoneField(ped.selZoneIdx,
@@ -1653,8 +1694,8 @@ Rectangle {
                             label: "led_count"
                             NF {
                                 intOnly: true
-                                value: zoneEditor.zc
-                                       ? zoneEditor.zc.led_count : 0
+                                value: ped.selZone()
+                                       ? ped.selZone().led_count : 0
                                 onCommitted: function(v) {
                                     ped.setZoneField(ped.selZoneIdx,
                                                      "led_count", v)
@@ -1675,11 +1716,11 @@ Rectangle {
                                 function refresh() {
                                     if (activeFocus)
                                         return
-                                    setTo(zoneEditor.lay.type || "points")
+                                    setTo(ped.selZoneLayout().type || "points")
                                 }
                                 onActivated: function(i) {
                                     if (i >= 0
-                                        && items[i] !== zoneEditor.lay.type)
+                                        && items[i] !== ped.selZoneLayout().type)
                                         ped.setLayoutType(ped.selZoneIdx,
                                                           items[i])
                                 }
@@ -1690,17 +1731,17 @@ Rectangle {
                         Column {
                             width: parent.width
                             spacing: th.spHalf
-                            visible: zoneEditor.lay.type === "ring"
+                            visible: ped.selZoneLayout().type === "ring"
                             FR {
                                 label: "radius mm"
-                                NF { value: (zoneEditor.lay.radius_m || 0) * 1000
+                                NF { value: (ped.selZoneLayout().radius_m || 0) * 1000
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "radius_m", v / 1000.0) } }
                             }
                             FR {
                                 label: "start °"
-                                NF { value: zoneEditor.lay.start_angle_deg || 0
+                                NF { value: ped.selZoneLayout().start_angle_deg || 0
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "start_angle_deg", v) } }
@@ -1709,14 +1750,14 @@ Rectangle {
                                     text: "face Y"
                                     color: th.textDim; font.pixelSize: th.fontSmall
                                 }
-                                NF { value: (zoneEditor.lay.face_y_m || 0) * 1000
+                                NF { value: (ped.selZoneLayout().face_y_m || 0) * 1000
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "face_y_m", v / 1000.0) } }
                             }
                             Chk {
                                 label: "reverse direction"
-                                on: zoneEditor.lay.reverse === true
+                                on: ped.selZoneLayout().reverse === true
                                 onToggled: function(v) {
                                     ped.setLayoutParam(ped.selZoneIdx,
                                                        "reverse", v)
@@ -1728,21 +1769,21 @@ Rectangle {
                         Column {
                             width: parent.width
                             spacing: th.spHalf
-                            visible: zoneEditor.lay.type === "strip"
+                            visible: ped.selZoneLayout().type === "strip"
                             FR {
                                 label: "spacing mm"
-                                NF { value: (zoneEditor.lay.spacing_m || 0) * 1000
+                                NF { value: (ped.selZoneLayout().spacing_m || 0) * 1000
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "spacing_m", v / 1000.0) } }
                             }
                             FR {
                                 label: "origin mm"
-                                NF { value: ((zoneEditor.lay.origin || [0,0,0])[0]) * 1000
+                                NF { value: ((ped.selZoneLayout().origin || [0,0,0])[0]) * 1000
                                      onCommitted: function(v) { ped.setLayoutOriginMm(ped.selZoneIdx, 0, v) } }
-                                NF { value: ((zoneEditor.lay.origin || [0,0,0])[1]) * 1000
+                                NF { value: ((ped.selZoneLayout().origin || [0,0,0])[1]) * 1000
                                      onCommitted: function(v) { ped.setLayoutOriginMm(ped.selZoneIdx, 1, v) } }
-                                NF { value: ((zoneEditor.lay.origin || [0,0,0])[2]) * 1000
+                                NF { value: ((ped.selZoneLayout().origin || [0,0,0])[2]) * 1000
                                      onCommitted: function(v) { ped.setLayoutOriginMm(ped.selZoneIdx, 2, v) } }
                             }
                         }
@@ -1751,11 +1792,11 @@ Rectangle {
                         Column {
                             width: parent.width
                             spacing: th.spHalf
-                            visible: zoneEditor.lay.type === "matrix"
+                            visible: ped.selZoneLayout().type === "matrix"
                             Chk {
                                 label: "dynamic — emitter map comes "
                                      + "from the bound hardware zone"
-                                on: zoneEditor.lay.dynamic === true
+                                on: ped.selZoneLayout().dynamic === true
                                 onToggled: function(v) {
                                     ped.setLayoutParam(ped.selZoneIdx,
                                                        "dynamic", v)
@@ -1763,36 +1804,36 @@ Rectangle {
                             }
                             FR {
                                 label: "rows × cols"
-                                visible: !zoneEditor.lay.dynamic
+                                visible: !ped.selZoneLayout().dynamic
                                 NF { intOnly: true
-                                     value: zoneEditor.lay.rows || 0
+                                     value: ped.selZoneLayout().rows || 0
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "rows", Math.max(0, Math.round(v))) } }
                                 NF { intOnly: true
-                                     value: zoneEditor.lay.cols || 0
+                                     value: ped.selZoneLayout().cols || 0
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "cols", Math.max(0, Math.round(v))) } }
                             }
                             FR {
                                 label: "pitch mm"
-                                NF { value: (zoneEditor.lay.pitch_x_m || 0) * 1000
+                                NF { value: (ped.selZoneLayout().pitch_x_m || 0) * 1000
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "pitch_x_m", v / 1000.0) } }
-                                NF { value: (zoneEditor.lay.pitch_z_m || 0) * 1000
+                                NF { value: (ped.selZoneLayout().pitch_z_m || 0) * 1000
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "pitch_z_m", v / 1000.0) } }
                             }
                             FR {
                                 label: "empty"
-                                visible: !zoneEditor.lay.dynamic
+                                visible: !ped.selZoneLayout().dynamic
                                 NF { intOnly: true
                                      width: 110
-                                     value: (zoneEditor.lay.empty === undefined)
-                                          ? 4294967295 : zoneEditor.lay.empty
+                                     value: (ped.selZoneLayout().empty === undefined)
+                                          ? 4294967295 : ped.selZoneLayout().empty
                                      onCommitted: function(v) {
                                          ped.setLayoutParam(ped.selZoneIdx,
                                              "empty", Math.max(0, Math.round(v))) } }
@@ -1805,7 +1846,7 @@ Rectangle {
                             Column {
                                 width: parent.width
                                 spacing: 2
-                                visible: !zoneEditor.lay.dynamic
+                                visible: !ped.selZoneLayout().dynamic
                                 Text {
                                     text: "map — one row per line, "
                                         + "comma cells, '-' = empty"
@@ -1814,7 +1855,21 @@ Rectangle {
                                 TextArea {
                                     width: parent.width
                                     height: 60
-                                    text: ped.matrixMapText(ped.selZoneIdx)
+                                    /* Same own-text pattern as TF:
+                                       while focused the field shows
+                                       `own`, so an unrelated commit's
+                                       stamp bump can't clobber
+                                       in-progress typing; unfocused it
+                                       re-syncs from the candidate
+                                       (zone switch, convert, undo). */
+                                    property string own: ""
+                                    text: activeFocus ? own
+                                        : ped.matrixMapText(
+                                              ped.selZoneIdx)
+                                    onActiveFocusChanged:
+                                        if (activeFocus) own = text
+                                    onTextChanged:
+                                        if (activeFocus) own = text
                                     font.family: "monospace"
                                     font.pixelSize: th.fontSmall
                                     color: th.text
@@ -1837,7 +1892,7 @@ Rectangle {
                         Column {
                             width: parent.width
                             spacing: th.spHalf
-                            visible: zoneEditor.lay.type === "points"
+                            visible: ped.selZoneLayout().type === "points"
                             Row {
                                 spacing: th.spHalf
                                 Text {
@@ -1895,9 +1950,9 @@ Rectangle {
                         }
 
                         Btn {
-                            visible: zoneEditor.lay.type !== "points"
-                                     && !(zoneEditor.lay.type === "matrix"
-                                          && zoneEditor.lay.dynamic)
+                            visible: ped.selZoneLayout().type !== "points"
+                                     && !(ped.selZoneLayout().type === "matrix"
+                                          && ped.selZoneLayout().dynamic)
                             text: "Convert generated layout to points"
                             tip: "Bakes generated emitter positions + "
                                + "addresses into an explicit points "
@@ -2080,6 +2135,10 @@ Rectangle {
                                         id: addrF
                                         intOnly: true; width: 44
                                         value: 0
+                                        onCommitted: function(v) {
+                                            addrF.value =
+                                                Math.max(0, Math.round(v))
+                                        }
                                     }
                                     Btn {
                                         text: "Bind"; height: 20
@@ -2136,8 +2195,11 @@ Rectangle {
                             primary: true
                             text: ped.needsNew() ? "Save new type"
                                                  : "Save type"
+                            /* Stays enabled — a failing save routes
+                               saveErr() into the visible saveErrors
+                               list (doSave); gating silently is how
+                               dead buttons happen. */
                             enabled: ped.candidate !== null
-                                     && ped.saveErr() === ""
                             tip: "Write presets/devices/<id>.device.json "
                                + "— never touches the workspace"
                             onClicked: ped.doSave()
