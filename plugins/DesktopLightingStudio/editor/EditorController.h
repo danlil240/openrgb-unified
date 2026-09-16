@@ -53,6 +53,8 @@
 
 namespace studio
 {
+class PresetRegistry;
+struct DevicePreset;
 
 /* Plane a translate gesture is constrained to; Free keeps all
    axes. DeskXZ is the desk top (the default drag plane). */
@@ -168,6 +170,38 @@ public:
        wired to the output owner — never zones/bindings (a second
        writer for the same LEDs is never created). */
     std::optional<EditorEdit> DuplicateMirrored();
+
+    /*------------------------------------------------*\
+    || Device-library ops (task 4.2). AddInstance drops  ||
+    || a new UNBOUND root instance of `type_id` at pos   ||
+    || (the caller resolves/clamps placement; the type   ||
+    || id is validated against the registry up in the    ||
+    || bridge). The generated id is UniqueId(type_id)    ||
+    || and becomes the selection. Retype repoints an     ||
+    || instance's type reference — the Save-variant      ||
+    || follow-up; same-type and unknown ids are no-ops.  ||
+    \*------------------------------------------------*/
+    std::optional<EditorEdit> AddInstance(const std::string& type_id,
+                                          const Vec3& pos);
+    std::optional<EditorEdit> Retype(const std::string& id,
+                                     const std::string& new_type);
+
+    /* Read-only builder for "Create preset from selection": fills
+       `out` with one CHILD-DEVICE REFERENCE entity per id — the
+       entity carries only `type` + the instance's world transform
+       re-expressed relative to the shared origin (centroid of the
+       instances' world positions on the desk plane, y = the lowest
+       instance's y — documented choice: the new type's origin sits
+       under the arrangement's center at desk height). No entities
+       are copied; `out.zones` stays empty (child types carry their
+       own). Refuses (false + LastError) mid-gesture, on empty input,
+       on ids that aren't existing root instances, and on instances
+       whose type doesn't resolve in `reg`. */
+    bool BuildPresetFromInstances(const std::vector<std::string>& ids,
+                                  const std::string& new_id,
+                                  const std::string& name,
+                                  const PresetRegistry& reg,
+                                  DevicePreset& out);
 
     /* Snapping — defaults come from ControlsPrefs (10 mm / 15 deg). */
     static Vec3  SnapTranslate(const Vec3& v, float step_m = 0.01f);

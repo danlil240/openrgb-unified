@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
@@ -1092,6 +1093,214 @@ static void TestGroupCommonParent()
           "gcp: unselected child keeps world placement");
 }
 
+/*---------------------------------------------------------*\
+|| Task 4.2 — AddInstance: unique stable type-derived id ||
+|| (fan-120, fan-120_2, ...), unbound root placement,     ||
+|| selection follows, revert removes only the new row.    ||
+\*---------------------------------------------------------*/
+static void TestAddInstance()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    std::optional<EditorEdit> e =
+        ctl.AddInstance("fan-120", { 0.5f, 0.0f, 0.3f });
+    CHECK(e.has_value(), "add: edit produced");
+    CHECK(w.devices.count("fan-120") == 1
+          && w.devices["fan-120"].type == "fan-120"
+          && w.devices["fan-120"].parent.empty(),
+          "add: type-derived id, unbound root placement");
+    CHECK(NearVec(w.devices["fan-120"].position, { 0.5f, 0.0f, 0.3f }),
+          "add: position lands as given");
+    CHECK(ctl.PrimarySelection() == "fan-120",
+          "add: new instance selected");
+    CHECK(e->devices.after.count("fan-120") == 1
+          && e->devices.after.at("fan-120").type == "fan-120",
+          "add: record carries the insert");
+
+    e = ctl.AddInstance("fan-120", { -0.3f, 0.0f, 0.0f });
+    CHECK(e.has_value() && w.devices.count("fan-120_2") == 1,
+          "add: stable _2 suffix, no clobber");
+    RevertEditorEdit(w, *e);
+    CHECK(w.devices.count("fan-120_2") == 0
+          && w.devices.count("fan-120") == 1,
+          "add: revert removes only the new row");
+
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "add: resolves");
+    CHECK(FindObject(doc, "fan-120/body") != nullptr,
+          "add: resolved objects exist for the new instance");
+
+    /* refusals touch nothing */
+    const size_t n0 = w.devices.size();
+    CHECK(!ctl.AddInstance("bad id!", { 0, 0, 0 }).has_value()
+          && w.devices.size() == n0,
+          "add: bad type id refused, doc untouched");
+    ctl.Select("fan1");
+    CHECK(ctl.BeginTransform(), "add: gesture begins");
+    CHECK(!ctl.AddInstance("desk", { 0, 0, 0 }).has_value()
+          && w.devices.size() == n0,
+          "add: refused mid-gesture");
+    ctl.Cancel();
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.2 — Retype: repoint devices[id].type (the save-||
+|| variant follow-up). Mirror-linked instances are type- ||
+|| locked — the repoint applies but resolution refuses,  ||
+|| which is why the bridge rejects them before writing.  ||
+\*---------------------------------------------------------*/
+static void TestRetype()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    std::optional<EditorEdit> e = ctl.Retype("fan1", "desk");
+    CHECK(e.has_value() && w.devices["fan1"].type == "desk",
+          "retype: type repointed");
+    CHECK(e->devices.after.count("fan1") == 1
+          && e->devices.before.count("fan1") == 1,
+          "retype: one record (before + after)");
+    RevertEditorEdit(w, *e);
+    CHECK(w.devices["fan1"].type == "fan-120",
+          "retype: revert restores the type");
+
+    CHECK(!ctl.Retype("fan1", "fan-120").has_value(),
+          "retype: same type is a no-op");
+    CHECK(!ctl.Retype("nope", "desk").has_value(),
+          "retype: unknown instance refused");
+    CHECK(!ctl.Retype("fan1", "bad id!").has_value(),
+          "retype: bad type id refused");
+    CHECK(w.devices["fan1"].type == "fan-120"
+          && w.devices.count("nope") == 0,
+          "retype: refusals left the doc untouched");
+
+    /* fan0 is mirrored by fan0m — retype applies structurally but
+       resolution must refuse it (the bridge's early mirror check
+       exists so this never strands a written variant file). */
+    std::optional<EditorEdit> bad = ctl.Retype("fan0", "desk");
+    CHECK(bad.has_value(), "retype: mirror-target edit produced");
+    SceneDocument doc;
+    CHECK(!Resolve(w, reg, doc),
+          "retype: mirror-linked repoint fails resolve");
+    RevertEditorEdit(w, *bad);
+    CHECK(Resolve(w, reg, doc), "retype: revert restores resolve");
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.2 — BuildPresetFromInstances: one child-ref    ||
+|| entity per instance, transforms re-expressed relative ||
+|| to the shared origin (centroid on the desk plane, y = ||
+|| lowest world y). The product must serialize like a    ||
+|| hand-written *.device.json.                           ||
+\*---------------------------------------------------------*/
+static void TestBuildPresetFromInstances()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    /* instance world transforms (fan0 rides the rotated 'case') */
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "bp: fixture resolves");
+    const auto wm = ResolveWorldMatrices(doc);
+    const Vec3 w0 = Mat4Translation(wm.at("fan0/body"));
+    const Vec3 w1 = Mat4Translation(wm.at("fan1/body"));
+
+    DevicePreset p;
+    CHECK(ctl.BuildPresetFromInstances({ "fan0", "fan1" },
+                                       "my-rig", "My Rig", reg, p),
+          "bp: builds");
+    CHECK(p.id == "my-rig" && p.name == "My Rig"
+          && p.entities.size() == 2 && p.zones.empty(),
+          "bp: id/name set, two child refs, no zones");
+    const PresetEntity& e0 = p.entities.at("fan0");
+    const PresetEntity& e1 = p.entities.at("fan1");
+    CHECK(e0.type == "fan-120" && e0.geometry.empty()
+          && e0.zone.empty() && e0.parent.empty()
+          && e1.type == "fan-120",
+          "bp: entities are pure child type refs");
+
+    const Vec3 origin { (w0.x + w1.x) * 0.5f,
+                        std::min(w0.y, w1.y),
+                        (w0.z + w1.z) * 0.5f };
+    CHECK(NearVec(e0.position, { w0.x - origin.x, w0.y - origin.y,
+                               w0.z - origin.z }, 1e-3f),
+          "bp: fan0 world placement relative to origin");
+    CHECK(NearVec(e1.position, { w1.x - origin.x, w1.y - origin.y,
+                               w1.z - origin.z }, 1e-3f),
+          "bp: fan1 world placement relative to origin");
+    /* fan0 inherits the case's 30-degree yaw — the child ref must
+       carry WORLD rotation, not the instance's stored local one. */
+    CHECK(Near(std::fmod(std::fabs(e0.rotation_deg.y), 360.0f),
+               30.0f, 0.5f),
+          "bp: child ref carries world rotation");
+    CHECK(Near(std::fabs(e1.rotation_deg.y), 0.0f, 0.5f),
+          "bp: unrotated instance stays unrotated");
+
+    /* file-ready: ToJson -> DevicePresetFromJson, the same pass
+       WritePresetFile runs before and after landing the file */
+    const nlohmann::json j = ToJson(p);
+    DevicePreset back;
+    std::vector<std::string> errs;
+    CHECK(DevicePresetFromJson(j, back, &errs),
+          "bp: preset round-trips through the file schema");
+    CHECK(back.entities.at("fan0").type == "fan-120"
+          && back.entities.at("fan0").geometry.empty(),
+          "bp: child ref survives serialization");
+
+    /* a single instance is its own origin */
+    DevicePreset solo;
+    CHECK(ctl.BuildPresetFromInstances({ "fan1" }, "one-fan",
+                                       "One Fan", reg, solo),
+          "bp: single builds");
+    CHECK(solo.entities.size() == 1
+          && NearVec(solo.entities.at("fan1").position,
+                     { 0.0f, 0.0f, 0.0f }, 1e-4f),
+          "bp: single instance sits on the origin");
+
+    /* object ids map to their owning instance */
+    DevicePreset byObj;
+    CHECK(ctl.BuildPresetFromInstances({ "fan1/body" }, "o2",
+                                       "O2", reg, byObj)
+          && byObj.entities.count("fan1") == 1,
+          "bp: object id resolves to its instance");
+
+    /* duplicates collapse — one entity per instance */
+    DevicePreset dup;
+    CHECK(ctl.BuildPresetFromInstances({ "fan1", "fan1" }, "d",
+                                       "D", reg, dup)
+          && dup.entities.size() == 1,
+          "bp: duplicate ids dedupe");
+
+    /* refusals leave `out` and the workspace untouched */
+    DevicePreset keep;
+    keep.id = "keep";
+    CHECK(!ctl.BuildPresetFromInstances({}, "x", "X", reg, keep)
+          && keep.id == "keep",
+          "bp: empty selection refused");
+    CHECK(!ctl.BuildPresetFromInstances({ "nope" }, "x", "X",
+                                        reg, keep)
+          && keep.id == "keep",
+          "bp: unknown instance refused");
+
+    StudioDocument w2 = Fixture();
+    w2.devices["fan1"].type = "no-such-type";
+    EditorController ctl2(w2);
+    DevicePreset p2;
+    CHECK(!ctl2.BuildPresetFromInstances({ "fan1" }, "x", "X",
+                                         reg, p2),
+          "bp: unresolvable instance type refused");
+}
+
 int main()
 {
     TestDragOneRecord();
@@ -1110,6 +1319,9 @@ int main()
     TestMidGesturePaint();
     TestLockedCascade();
     TestGroupCommonParent();
+    TestAddInstance();
+    TestRetype();
+    TestBuildPresetFromInstances();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

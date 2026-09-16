@@ -7,6 +7,7 @@
 #include "EditorController.h"
 
 #include "../presets/DevicePreset.h"
+#include "../presets/PresetRegistry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1242,6 +1243,143 @@ std::optional<EditorEdit> EditorController::DuplicateMirrored()
     }
     selection = created;
     return e;
+}
+
+/*---------------------------------------------------------*\
+|| Device-library ops (task 4.2).                           ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::AddInstance(const std::string& type_id, const Vec3& pos)
+{
+    last_error.clear();
+    if(gesture.active || !IsPresetId(type_id))
+    {
+        return std::nullopt;
+    }
+    /* Unique stable id straight off the type: "fan-120", then
+       "fan-120_2", "fan-120_3", ... */
+    const std::string nid = UniqueId(type_id);
+
+    DeviceInstance d;
+    d.type     = type_id;
+    d.position = pos;            /* no parent — a root placement */
+    EditorEdit e;
+    e.label = "add " + nid;
+    SnapshotKey(e.devices, ws.devices, nid);
+    ws.devices[nid] = d;
+    CaptureKey(e.devices, ws.devices, nid);
+    selection = { nid };
+    return e;
+}
+
+std::optional<EditorEdit>
+EditorController::Retype(const std::string& id, const std::string& new_type)
+{
+    last_error.clear();
+    if(gesture.active || !Exists(id) || !IsPresetId(new_type))
+    {
+        return std::nullopt;
+    }
+    if(ws.devices[id].type == new_type)
+    {
+        return std::nullopt;
+    }
+    EditorEdit e;
+    e.label = "repoint " + id + " -> " + new_type;
+    SnapshotKey(e.devices, ws.devices, id);
+    ws.devices[id].type = new_type;
+    CaptureKey(e.devices, ws.devices, id);
+    return e;
+}
+
+bool EditorController::BuildPresetFromInstances(
+    const std::vector<std::string>& ids, const std::string& new_id,
+    const std::string& name, const PresetRegistry& reg,
+    DevicePreset& out)
+{
+    last_error.clear();
+    if(gesture.active)
+    {
+        last_error = "create preset refused: finish the drag first";
+        return false;
+    }
+    /* Dedupe while keeping first-seen order — a double-passed id
+       would collide on the entity key. */
+    std::vector<std::string> insts;
+    for(const std::string& raw : ids)
+    {
+        const std::string id = InstanceOf(raw);
+        if(!Exists(id))
+        {
+            last_error = "create preset refused: '" + raw
+                       + "' is not a desk instance";
+            return false;
+        }
+        if(!IsPresetId(id))
+        {
+            /* The entity id is reused verbatim — an instance id that
+               can't be an entity id would produce an unwritable file. */
+            last_error = "create preset refused: instance id '" + id
+                       + "' is not a valid entity id";
+            return false;
+        }
+        if(reg.Find(ws.devices[id].type) == nullptr)
+        {
+            last_error = "create preset refused: '" + id
+                       + "' has unknown type '" + ws.devices[id].type + "'";
+            return false;
+        }
+        if(std::find(insts.begin(), insts.end(), id) == insts.end())
+        {
+            insts.push_back(id);
+        }
+    }
+    if(insts.empty())
+    {
+        last_error = "create preset refused: nothing selected";
+        return false;
+    }
+
+    /* Shared origin: centroid of the instances' world positions on
+       the desk plane (x,z), y = the lowest instance's world y. The
+       new type's origin then sits under the middle of the
+       arrangement at desk height, and each child ref keeps the
+       instance's relative world placement + world rotation. */
+    const std::map<std::string, Mat4> worlds = InstanceWorlds();
+    Vec3  sum {};
+    float min_y = 0.0f;
+    bool  first = true;
+    for(const std::string& id : insts)
+    {
+        const Vec3 wp = Mat4Translation(worlds.at(id));
+        sum = Add(sum, wp);
+        if(first || wp.y < min_y)
+        {
+            min_y = wp.y;
+            first = false;
+        }
+    }
+    const float n = (float)insts.size();
+    const Vec3 origin { sum.x / n, min_y, sum.z / n };
+
+    DevicePreset p;
+    p.id       = new_id;
+    p.name     = name;
+    p.category = "custom";
+    for(const std::string& id : insts)
+    {
+        const Mat4& w = worlds.at(id);
+        const Vec3  wp = Mat4Translation(w);
+        PresetEntity e;
+        e.id   = id;
+        e.type = ws.devices[id].type;
+        e.position = { wp.x - origin.x, wp.y - origin.y,
+                       wp.z - origin.z };
+        e.rotation_deg = EulerDegFromMat4(RotationOnly(w));
+        p.entities[e.id] = e;
+    }
+    out = p;
+    return true;
 }
 
 /*---------------------------------------------------------*\

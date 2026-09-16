@@ -64,6 +64,9 @@ Rectangle {
     property bool inspOpen:  false        /* drawer when narrow */
     property bool diagOpen:  false
     property string diagLog: ""
+    /* Left sidebar tab: 0 = device tree (placed instances),
+       1 = device library (type catalog, task 4.2). */
+    property int leftTab: 0
 
     /* Re-eval stamps for the stub/test path (no NOTIFY). */
     property int stamp: 0
@@ -73,6 +76,7 @@ Rectangle {
        QML ids; expose the panels for the qmltestrunner suite. */
     readonly property var diagDrawer: diag
     readonly property var treePanel:  devTree
+    readonly property var libPanel:   devLib
     readonly property var shelfPanel: shelf
     readonly property var inspPanel:  insp
     readonly property var sceneView:  scene
@@ -433,18 +437,101 @@ Rectangle {
         width: ws.width
         height: ws.height - ws.hdrH - shelf.height - diag.height
 
-        C.DeviceTree {
-            id: devTree
+        /* Left sidebar — tab strip swaps the placed-instance tree
+           for the device-type library (task 4.2) in the same slot;
+           the splitter still resizes the whole column. */
+        Item {
+            id: leftBar
             x: 0; y: 0
             width: ws.treeW; height: parent.height
-            bridgeOverride: ws.bridgeOverride
+
+            Rectangle {
+                id: leftTabs
+                x: 0; y: 0
+                width: parent.width; height: 26
+                color: th.panel
+                Row {
+                    x: th.sp; spacing: th.spHalf
+                    anchors.verticalCenter: parent.verticalCenter
+                    Rectangle {
+                        width: tabDev.width + 16; height: 20
+                        radius: th.radiusSm
+                        color: ws.leftTab === 0 ? th.accentBg
+                               : (tabMa0.containsMouse ? th.panelAlt
+                                                       : "transparent")
+                        Text {
+                            id: tabDev
+                            anchors.centerIn: parent
+                            text: "Devices"
+                            color: ws.leftTab === 0 ? th.text : th.textDim
+                            font.pixelSize: th.fontBody
+                        }
+                        MouseArea {
+                            id: tabMa0
+                            anchors.fill: parent; hoverEnabled: true
+                            onClicked: ws.leftTab = 0
+                        }
+                    }
+                    Rectangle {
+                        width: tabLib.width + 16; height: 20
+                        radius: th.radiusSm
+                        color: ws.leftTab === 1 ? th.accentBg
+                               : (tabMa1.containsMouse ? th.panelAlt
+                                                       : "transparent")
+                        Text {
+                            id: tabLib
+                            anchors.centerIn: parent
+                            text: "Library"
+                            color: ws.leftTab === 1 ? th.text : th.textDim
+                            font.pixelSize: th.fontBody
+                        }
+                        MouseArea {
+                            id: tabMa1
+                            anchors.fill: parent; hoverEnabled: true
+                            onClicked: ws.leftTab = 1
+                        }
+                    }
+                }
+                Rectangle { anchors.bottom: parent.bottom
+                            width: parent.width; height: 1
+                            color: th.border }
+            }
+
+            C.DeviceTree {
+                id: devTree
+                x: 0; y: leftTabs.height
+                width: parent.width
+                height: parent.height - leftTabs.height
+                bridgeOverride: ws.bridgeOverride
+                /* Fade swap — th.dur is 0 under reduced motion. */
+                opacity: ws.leftTab === 0 ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity {
+                    NumberAnimation { duration: th.dur
+                                      easing.type: Easing.OutCubic }
+                }
+            }
+            C.DeviceLibrary {
+                id: devLib
+                x: 0; y: leftTabs.height
+                width: parent.width
+                height: parent.height - leftTabs.height
+                bridgeOverride: ws.bridgeOverride
+                sceneView: scene
+                opacity: ws.leftTab === 1 ? 1 : 0
+                visible: opacity > 0
+                Behavior on opacity {
+                    NumberAnimation { duration: th.dur
+                                      easing.type: Easing.OutCubic }
+                }
+            }
         }
 
         /* Left splitter — drag resizes the device tree. */
         Splitter {
             id: splitL
             property int w0: 0
-            x: devTree.width; y: 0; height: parent.height
+            x: leftBar.width; y: 0; height: parent.height
             onPressed: w0 = ws.treeW
             onMoved: function(dx) {
                 ws.treeW = Math.max(160, Math.min(380, w0 + dx))
@@ -453,7 +540,7 @@ Rectangle {
 
         StudioScene {
             id: scene
-            x: devTree.width + splitL.width
+            x: leftBar.width + splitL.width
             y: 0
             width: parent.width - x
                    - (ws.narrow ? 0 : insp.width + splitR.width)

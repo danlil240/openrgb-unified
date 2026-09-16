@@ -71,7 +71,9 @@ public:
          resolved from the bound hardware zone at runtime).
        - bounds_m: union of the type's local entity footprints
          (position +- rotated size_m/2); child type refs don't
-         contribute — their bounds belong to their own listing. */
+         contribute — their bounds belong to their own listing.
+       - floor_y: lowest y of that local union — placement code
+         drops instances so this rests on the desk surface. */
     struct PresetInfo
     {
         std::string  id;
@@ -81,6 +83,7 @@ public:
         unsigned int zone_count = 0;
         unsigned int led_total  = 0;
         Vec3         bounds_m;
+        float        floor_y    = 0.0f;
     };
     std::vector<PresetInfo> List() const;
 

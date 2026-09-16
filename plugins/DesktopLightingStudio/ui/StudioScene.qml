@@ -593,6 +593,39 @@ Rectangle {
             border.color: "#6a9ad0"
             border.width: 1
         }
+
+        /* Task 4.2 — device-library drops. The drag chip carries the
+           type id (drop.source.dropTypeId, mimeData key as fallback);
+           the pixel lands on the desk plane through the camera's
+           planeHitPoint — the same ray/plane math the move gesture
+           uses. The bridge clamps the footprint onto the surface and
+           the add is one undoable op. Input-only (no drag) it sits
+           inert — it never intercepts clicks. */
+        DropArea {
+            anchors.fill: parent
+            keys: ["studio-device-type"]
+            onDropped: function(drop) {
+                var tid = ""
+                if (drop.source && drop.source.dropTypeId !== undefined)
+                    tid = drop.source.dropTypeId
+                else
+                    tid = drop.getDataAsString("studio-device-type") || ""
+                if (tid === "" || typeof bridge === "undefined"
+                    || typeof bridge.addDeviceInstance !== "function") {
+                    drop.accepted = false
+                    return
+                }
+                var p = camCtl.planeHitPoint(drop.x, drop.y, 1, 0.0)
+                if (!p && camCtl.target)
+                    p = camCtl.planeHitPoint(drop.x, drop.y, -1,
+                                             camCtl.target)
+                if (!p && camCtl.target)
+                    p = camCtl.target
+                drop.accept(Qt.CopyAction)
+                bridge.addDeviceInstance(tid, p ? p.x : 0, 0,
+                                         p ? p.z : 0)
+            }
+        }
     }
 
     /*-----------------------------------------------------*\

@@ -25,6 +25,7 @@ DEFINES += "STUDIO_UI_DIR=\\\"$$STUDIO_UI_DIR\\\""
 HEADERS += $$STUDIO/plugin/SceneBridge.h \
     $$STUDIO/config/ConfigStore.h \
     $$STUDIO/editor/SceneObjectModel.h \
+    $$STUDIO/editor/PresetListModel.h \
     $$STUDIO/inputs/ScreenSampler.h
 
 SOURCES += main.cpp \
@@ -35,6 +36,7 @@ SOURCES += main.cpp \
     $$STUDIO/editor/EditorController.cpp \
     $$STUDIO/editor/TransformCommands.cpp \
     $$STUDIO/editor/SceneObjectModel.cpp \
+    $$STUDIO/editor/PresetListModel.cpp \
     $$STUDIO/output/ControllerAdapter.cpp \
     $$STUDIO/presets/DevicePreset.cpp \
     $$STUDIO/presets/PresetRegistry.cpp \

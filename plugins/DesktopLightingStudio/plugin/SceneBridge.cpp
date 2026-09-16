@@ -22,6 +22,7 @@
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
+#include "../editor/PresetListModel.h"
 #include "../editor/SceneObjectModel.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
@@ -206,6 +207,15 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
        initial row order. */
     obj_model = new SceneObjectModel(this);
     obj_model->Bind(&doc, &workspace, &adapter);
+
+    /* Device-type library model — snapshots PresetRegistry::List()
+       and reads favorites live from `meta`. ReloadPresets (and the
+       new type commands) refresh it; the initial snapshot lands
+       here because the ctor's LoadPresetDefaults ran before the
+       model existed. */
+    preset_model = new PresetListModel(this);
+    preset_model->Bind(&registry, &meta);
+    preset_model->Reload();
 
     refreshDevices();
 }
@@ -724,6 +734,11 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
     meta      = w.meta;
     emit cameraChanged();      /* loaded prefs replace the live pose */
     emit renderPrefsChanged(); /* loaded render tier/bloom too */
+    if(preset_model != nullptr)
+    {
+        preset_model->RefreshFavorites();   /* loaded ui.favorites */
+    }
+    emit presetLibraryChanged();
 
     editor.ClearSelection();
     if(!selected.isEmpty())
@@ -836,6 +851,13 @@ void SceneBridge::ReloadPresets()
                 .arg(QString::fromStdString(errs.front())));
         }
     }
+    /* The library panel's rows come from List() — re-snapshot so a
+       reload (Reload button, landed variant file) shows it. */
+    if(preset_model != nullptr)
+    {
+        preset_model->Reload();
+    }
+    emit presetLibraryChanged();
 }
 
 bool SceneBridge::LoadWorkspace()
@@ -904,6 +926,11 @@ void SceneBridge::markDirty()
 QObject* SceneBridge::objectModel() const
 {
     return obj_model;
+}
+
+QObject* SceneBridge::presetModel() const
+{
+    return preset_model;
 }
 
 QVariantList SceneBridge::selectedInstances() const
@@ -1368,6 +1395,251 @@ QVariantMap SceneBridge::instanceState(const QString& id) const
     m["locked"]  = (sit != workspace.device_settings.end())
                  && sit->second.locked;
     return m;
+}
+
+/*---------------------------------------------------------*\
+|| Task 4.2 — device library commands.                    ||
+||                                                           ||
+||   Same shape as every editor op above: validate first   ||
+||   (a refusal touches NOTHING — no workspace mutation,   ||
+||   no file write, no output), then sync -> controller op ||
+||   -> commitEdit -> resolve. Favorites are the exception ||
+||   — a UI pref like camera state: dirty path, no undo.   ||
+\*---------------------------------------------------------*/
+void SceneBridge::addDeviceInstance(const QString& typeId,
+                                    double x, double y, double z)
+{
+    const std::string tid = typeId.toStdString();
+    if(!IsPresetId(tid))
+    {
+        setStatus(QStringLiteral("add refused: '%1' is not a valid type id")
+                      .arg(typeId));
+        return;
+    }
+    const DevicePreset* p = registry.Find(tid);
+    if(p == nullptr)
+    {
+        setStatus(QStringLiteral("add refused: unknown type '%1'")
+                      .arg(typeId));
+        return;
+    }
+    /* Sit ON the surface, never inside it: the caller's y is the
+       desk height the drop measured — lift the origin by the
+       type's local footprint floor (List() floor_y). */
+    float floor_y = 0.0f;
+    if(preset_model != nullptr)
+    {
+        if(const PresetRegistry::PresetInfo* info =
+               preset_model->InfoFor(typeId))
+        {
+            floor_y = info->floor_y;
+        }
+    }
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.AddInstance(tid, { (float)x, (float)y - floor_y, (float)z });
+    if(!e.has_value())
+    {
+        setStatus(editor.LastError().empty()
+            ? QStringLiteral("add refused — finish the drag first")
+            : QString::fromStdString(editor.LastError()));
+        return;
+    }
+    commitEdit(std::move(*e));
+    selected = QString::fromStdString(editor.PrimarySelection());
+    emit selectionChanged();
+    setStatus(QStringLiteral("added %1 (%2)")
+                  .arg(selected, QString::fromStdString(p->name)));
+}
+
+void SceneBridge::setTypeFavorite(const QString& typeId, bool fav)
+{
+    const std::string tid = typeId.toStdString();
+    if(!IsPresetId(tid) || !registry.Contains(tid))
+    {
+        setStatus(QStringLiteral("favorite refused: unknown type '%1'")
+                      .arg(typeId));
+        return;
+    }
+    /* UI preference like camera state — dirty/autosave, never undo.
+       Erase-then-append keeps first-favorited-first ordering and
+       dedupes any stale repeats in one pass. */
+    std::vector<std::string>& favs = meta.ui.favorites;
+    favs.erase(std::remove(favs.begin(), favs.end(), tid), favs.end());
+    if(fav)
+    {
+        favs.push_back(tid);
+    }
+    markDirty();
+    if(preset_model != nullptr)
+    {
+        preset_model->RefreshFavorites();
+    }
+    emit presetLibraryChanged();
+    setStatus(fav ? QStringLiteral("%1 starred").arg(typeId)
+                  : QStringLiteral("%1 unstarred").arg(typeId));
+}
+
+void SceneBridge::saveInstanceAsVariant(const QString& instanceId,
+                                        const QString& newTypeId,
+                                        const QString& displayName)
+{
+    const std::string iid =
+        EditorController::InstanceOf(instanceId.toStdString());
+    const std::string tid = newTypeId.toStdString();
+    const std::string nm  = displayName.trimmed().toStdString();
+    const auto dit = workspace.devices.find(iid);
+    if(dit == workspace.devices.end())
+    {
+        setStatus(QStringLiteral("variant refused: '%1' is not an instance")
+                      .arg(instanceId));
+        return;
+    }
+    const DevicePreset* src = registry.Find(dit->second.type);
+    if(src == nullptr)
+    {
+        setStatus(QStringLiteral(
+            "variant refused: '%1' has unresolvable type '%2'")
+                .arg(instanceId, QString::fromStdString(dit->second.type)));
+        return;
+    }
+    if(!IsPresetId(tid))
+    {
+        setStatus(QStringLiteral(
+            "variant refused: '%1' is not a valid type id").arg(newTypeId));
+        return;
+    }
+    if(registry.Contains(tid))
+    {
+        setStatus(QStringLiteral(
+            "variant refused: type '%1' already exists").arg(newTypeId));
+        return;
+    }
+    if(nm.empty())
+    {
+        setStatus(QStringLiteral("variant refused: name required"));
+        return;
+    }
+    /* A repoint must survive resolution: a mirrored instance (or a
+       mirror target) is type-locked to its partner, so the edit
+       would roll back AFTER the file landed — refuse before any
+       write. */
+    {
+        const auto sit = workspace.device_settings.find(iid);
+        if(sit != workspace.device_settings.end()
+           && !sit->second.mirror_of.empty())
+        {
+            setStatus(QStringLiteral(
+                "variant refused: '%1' mirrors %2 — repoint would break the link")
+                    .arg(instanceId,
+                         QString::fromStdString(sit->second.mirror_of)));
+            return;
+        }
+        for(const auto& kv : workspace.device_settings)
+        {
+            if(kv.second.mirror_of == iid)
+            {
+                setStatus(QStringLiteral(
+                    "variant refused: '%1' is mirrored by %2 — repoint would break the link")
+                        .arg(instanceId, QString::fromStdString(kv.first)));
+                return;
+            }
+        }
+    }
+    /* The resolved type definition is the variant's seed — entities,
+       zones, binding_hints and authored appearance hints carry over
+       verbatim; only id/name change. No expanded entity data ever
+       lands in studio.json (only the repointed `type` string). */
+    DevicePreset v = *src;
+    v.id   = tid;
+    v.name = nm;
+    QString werr;
+    if(store == nullptr || !store->WritePresetFile(v, &werr))
+    {
+        setStatus(QStringLiteral("variant write failed: %1")
+                      .arg(werr.isEmpty() ? QStringLiteral("store unavailable")
+                                          : werr));
+        return;
+    }
+    /* The file is durable — a valid library asset even if the
+       repoint below is refused (e.g. the instance is a mirror and
+       the resolve keeps it tied to its owner's type). Reload first
+       so the repoint resolves against a registry that knows tid. */
+    ReloadPresets();
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.Retype(iid, tid);
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        setStatus(QStringLiteral("saved variant '%1' — %2 now uses it")
+                      .arg(newTypeId, instanceId));
+    }
+    else
+    {
+        setStatus(QStringLiteral("saved variant '%1' — %2 kept its type%3")
+                      .arg(newTypeId, instanceId,
+                           editor.LastError().empty()
+                               ? QString()
+                               : QStringLiteral(" (%1)").arg(
+                                     QString::fromStdString(editor.LastError()))));
+    }
+}
+
+void SceneBridge::createTypeFromSelection(const QString& newTypeId,
+                                          const QString& displayName)
+{
+    const std::string tid = newTypeId.toStdString();
+    const std::string nm  = displayName.trimmed().toStdString();
+    const std::vector<std::string>& sel = editor.Selection();
+    if(sel.empty())
+    {
+        setStatus(QStringLiteral(
+            "create preset refused: nothing selected"));
+        return;
+    }
+    if(!IsPresetId(tid))
+    {
+        setStatus(QStringLiteral(
+            "create preset refused: '%1' is not a valid type id")
+                      .arg(newTypeId));
+        return;
+    }
+    if(registry.Contains(tid))
+    {
+        setStatus(QStringLiteral(
+            "create preset refused: type '%1' already exists")
+                      .arg(newTypeId));
+        return;
+    }
+    if(nm.empty())
+    {
+        setStatus(QStringLiteral("create preset refused: name required"));
+        return;
+    }
+    /* Child-reference type: one `type`-ref entity per selected
+       instance carrying its world transform — see
+       BuildPresetFromInstances for the shared-origin choice. No
+       workspace edit is needed: the placed instances stay put (the
+       preset is a new library entry, not a rewrite of the desk), so
+       there is nothing to undo — deleting the file removes it. */
+    DevicePreset p;
+    if(!editor.BuildPresetFromInstances({ sel.begin(), sel.end() },
+                                        tid, nm, registry, p))
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
+        return;
+    }
+    QString werr;
+    if(store == nullptr || !store->WritePresetFile(p, &werr))
+    {
+        setStatus(QStringLiteral("create preset failed: %1")
+                      .arg(werr.isEmpty() ? QStringLiteral("store unavailable")
+                                          : werr));
+        return;
+    }
+    ReloadPresets();
+    setStatus(QStringLiteral("saved type '%1' from %2 instance(s)")
+                  .arg(newTypeId).arg((int)sel.size()));
 }
 
 QVariantMap SceneBridge::cameraState() const

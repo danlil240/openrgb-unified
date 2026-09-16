@@ -175,6 +175,7 @@ TestCase {
         var files = [ "StudioWorkspace.qml",
                       "components/Theme.qml",
                       "components/DeviceTree.qml",
+                      "components/DeviceLibrary.qml",
                       "components/Inspector.qml",
                       "components/LookShelf.qml" ]
         for (var i = 0; i < files.length; i++) {

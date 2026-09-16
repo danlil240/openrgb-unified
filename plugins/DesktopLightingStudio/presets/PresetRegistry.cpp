@@ -96,7 +96,7 @@ static unsigned int LedTotal(const DevicePreset& p, bool* dynamic)
    part contributes its position +- rotated size_m/2 box. Child
    type refs contribute nothing (their bounds are the child's own
    listing's problem — resolving them here would need recursion). */
-static Vec3 BoundsOf(const DevicePreset& p)
+static void BoundsOf(const DevicePreset& p, Vec3& lo_out, Vec3& hi_out)
 {
     Vec3 lo { 0.0f, 0.0f, 0.0f }, hi { 0.0f, 0.0f, 0.0f };
     bool any = false;
@@ -134,7 +134,8 @@ static Vec3 BoundsOf(const DevicePreset& p)
             }
         }
     }
-    return { hi.x - lo.x, hi.y - lo.y, hi.z - lo.z };
+    lo_out = lo;
+    hi_out = hi;
 }
 
 } /* anonymous namespace */
@@ -168,7 +169,10 @@ std::vector<PresetRegistry::PresetInfo> PresetRegistry::List() const
         info.zone_count = (unsigned int)p.zones.size();
         bool dynamic    = false;
         info.led_total  = LedTotal(p, &dynamic);
-        info.bounds_m   = BoundsOf(p);
+        Vec3 lo, hi;
+        BoundsOf(p, lo, hi);
+        info.bounds_m   = { hi.x - lo.x, hi.y - lo.y, hi.z - lo.z };
+        info.floor_y    = lo.y;
         out.push_back(info);
     }
     return out;

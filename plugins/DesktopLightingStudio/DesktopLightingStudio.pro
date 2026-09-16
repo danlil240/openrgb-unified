@@ -32,6 +32,7 @@ HEADERS += \
     editor/EditorController.h \
     editor/TransformCommands.h \
     editor/SceneObjectModel.h \
+    editor/PresetListModel.h \
     output/ControllerAdapter.h \
     presets/DevicePreset.h \
     presets/PresetRegistry.h \
@@ -63,6 +64,7 @@ SOURCES += \
     editor/EditorController.cpp \
     editor/TransformCommands.cpp \
     editor/SceneObjectModel.cpp \
+    editor/PresetListModel.cpp \
     output/ControllerAdapter.cpp \
     presets/DevicePreset.cpp \
     presets/PresetRegistry.cpp \
@@ -92,6 +94,7 @@ DISTFILES += \
     ui/StudioWorkspace.qml \
     ui/components/Theme.qml \
     ui/components/DeviceTree.qml \
+    ui/components/DeviceLibrary.qml \
     ui/components/Inspector.qml \
     ui/components/LookShelf.qml \
     ui/editor/CameraController.qml \
