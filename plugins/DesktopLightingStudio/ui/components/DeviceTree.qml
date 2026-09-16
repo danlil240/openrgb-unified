@@ -48,10 +48,11 @@ Rectangle {
     function pokeSel() { selStamp++ }
 
     property string search: ""
-    /* Rows currently matching the search — delegates maintain it;
-       gates the "no matches" empty state (the model count never
-       shrinks under filtering). */
+    /* Rows currently matching the search — recomputed by
+       treeList.recount() on model/search/delegate changes (the
+       model count never shrinks under filtering). */
     property int shownCount: 0
+    onSearchChanged: Qt.callLater(treeList.recount)
 
     Theme { id: th }
 
@@ -219,6 +220,21 @@ Rectangle {
             model: treeRoot.modelData()
             boundsBehavior: Flickable.StopAtBounds
 
+            /* Tally shown delegates — a +1/-1 running count drifts
+               (a bound `shown` can fire onShownChanged at creation),
+               so recount after any change via callLater. */
+            function recount() {
+                var n = 0
+                for (var i = 0; i < count; i++) {
+                    var it = itemAtIndex(i)
+                    if (it && it.shown)
+                        n++
+                }
+                treeRoot.shownCount = n
+            }
+            onCountChanged: Qt.callLater(recount)
+            onModelChanged: Qt.callLater(recount)
+
             delegate: Rectangle {
                 id: row
                 width: treeList.width
@@ -262,12 +278,8 @@ Rectangle {
                 property bool shown: matches()
                 height: shown ? 28 : 0
                 visible: shown
-                /* Maintain treeRoot.shownCount — ListView.count never
-                   changes under filtering, so the empty state needs
-                   a shown-row tally. */
-                Component.onCompleted:  if (shown) treeRoot.shownCount++
-                onShownChanged:         treeRoot.shownCount += shown ? 1 : -1
-                Component.onDestruction: if (shown) treeRoot.shownCount--
+                onShownChanged:          Qt.callLater(treeList.recount)
+                Component.onDestruction: Qt.callLater(treeList.recount)
                 radius: th.radiusSm
                 color: sel ? th.selRow : (rowMouse.containsMouse ? th.panelAlt
                                                            : "transparent")
