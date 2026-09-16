@@ -20,6 +20,7 @@
 #include "../scene/SceneGraph.h"
 #include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
+#include "../editor/SceneObjectModel.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
 #include "../inputs/ScreenSampler.h"
@@ -87,6 +88,39 @@ private:
     float        old_b, new_b;
 };
 
+/* One EditorEdit = one undo command. The Qt-free record carries
+   every section delta; applyEdit does workspace -> resolve ->
+   adopt -> model -> key lookup -> markDirty. `applied` skips the
+   redo() QUndoStack::push fires, because the committing path
+   already landed the edit. */
+class SceneEditCommand : public QUndoCommand
+{
+public:
+    SceneEditCommand(SceneBridge* b, EditorEdit e, bool already_applied)
+        : bridge(b), edit(std::move(e)), applied(already_applied)
+    {
+        setText(QString::fromStdString(edit.label));
+    }
+    void undo() override
+    {
+        bridge->applyEdit(edit, true);
+        applied = false;
+    }
+    void redo() override
+    {
+        if(applied)
+        {
+            applied = false;
+            return;
+        }
+        bridge->applyEdit(edit, false);
+    }
+private:
+    SceneBridge* bridge;
+    EditorEdit   edit;
+    bool         applied;
+};
+
 /*---------------------------------------------------------*\
 || Bridge                                                    |
 \*---------------------------------------------------------*/
@@ -94,6 +128,7 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     : QObject(parent)
     , api(plugin_api)
     , adapter(plugin_api)
+    , editor(workspace)
     , undo_stack(new QUndoStack(this))
 {
     play_timer = new QTimer(this);
@@ -161,6 +196,13 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
         doc = BuildDefaultDesk();
     }
     doc.name = workspace.meta.name;
+
+    /* Stable object model for the editor — reads doc/workspace/
+       adapter through bound member pointers; ResetFrom lands the
+       initial row order. */
+    obj_model = new SceneObjectModel(this);
+    obj_model->Bind(&doc, &workspace, &adapter);
+
     refreshDevices();
 }
 
@@ -268,28 +310,14 @@ QVariantList SceneBridge::objectList() const
         m["verified"] = o.verified;
         m["emitters"] = (int)o.emitters.size();
 
-        QString bound = "none";
-        if(o.kind == ObjectKind::Device && !o.binding.empty())
-        {
-            const ResolvedBinding* r = adapter.Resolution(o.binding);
-            if(r != nullptr)
-            {
-                bound = (r->status == BindingStatus::Resolved)  ? "ok"
-                      : (r->status == BindingStatus::Ambiguous) ? "ambiguous"
-                                                              : "unresolved";
-            }
-        }
-        else if(o.kind == ObjectKind::Linked)
-        {
-            const SceneObject* owner = FindObject(doc, o.mirror_of);
-            if(owner != nullptr && !owner->binding.empty())
-            {
-                const ResolvedBinding* r = adapter.Resolution(owner->binding);
-                bound = (r != nullptr && r->status == BindingStatus::Resolved)
-                      ? "ok" : "unresolved";
-            }
-        }
-        m["bound"] = bound;
+        m["bound"] = BoundStatusFor(doc, adapter, o);
+        /* Editor fields: owning root instance + its lock state —
+           same values the SceneObjectModel roles publish. */
+        const std::string inst = o.id.substr(0, o.id.find('/'));
+        m["instancePath"] = QString::fromStdString(inst);
+        const auto sit = workspace.device_settings.find(inst);
+        m["locked"] = sit != workspace.device_settings.end()
+                   && sit->second.locked;
         out.push_back(m);
     }
     return out;
@@ -416,6 +444,16 @@ void SceneBridge::select(const QString& objectId)
         return;
     }
     selected = objectId;
+    /* Editor selection follows the click: a resolved object id
+       maps to its owning root instance. */
+    if(objectId.isEmpty())
+    {
+        editor.ClearSelection();
+    }
+    else
+    {
+        editor.SetSelection({ objectId.toStdString() });
+    }
     emit selectionChanged();
 }
 
@@ -552,6 +590,12 @@ void SceneBridge::refreshDevices()
     }
     rebuildMatrixLayouts();
     rebuildKeyLookup();
+    if(obj_model != nullptr)
+    {
+        /* Covers both hardware-refresh bound changes and whole-doc
+           swaps (ApplyWorkspace/resetScene reach here). */
+        obj_model->ResetFrom();
+    }
     emit sceneChanged();
 }
 
@@ -698,6 +742,360 @@ void SceneBridge::markDirty()
     if(store != nullptr)
     {
         store->MarkDirty();
+    }
+}
+
+/*---------------------------------------------------------*\
+|| Editor plumbing (M2)                                   ||
+||                                                           ||
+||   The Qt-free EditorController mutates `workspace`     ||
+||   (the authoring document) and returns EditorEdit      ||
+||   records. This side resolves the workspace into the   ||
+||   runtime scene, refreshes the presentation model and  ||
+||   key lookup, dirties on COMMIT only, and adapts the   ||
+||   records onto the QUndoStack.                         ||
+\*---------------------------------------------------------*/
+QObject* SceneBridge::objectModel() const
+{
+    return obj_model;
+}
+
+QVariantList SceneBridge::selectedInstances() const
+{
+    QVariantList out;
+    for(const std::string& id : editor.Selection())
+    {
+        out.push_back(QString::fromStdString(id));
+    }
+    return out;
+}
+
+void SceneBridge::SyncWorkspace()
+{
+    /* Same runtime overlay CurrentWorkspace() applies — the
+       workspace the controller edits must already carry the live
+       colors/effect/brightness so a paint made since the last
+       save is never dropped by a transform edit's re-resolve. */
+    workspace.meta                = meta;
+    workspace.inputs.audio        = audio_on;
+    workspace.inputs.keys         = key_on;
+    workspace.inputs.screen       = screen_on;
+    workspace.inputs.screen_index = screen_index;
+    workspace.inputs.sens_pct     = audio_sens_pct;
+    workspace.inputs.decay_pct    = ripple_decay_pct;
+    workspace.object_colors       = doc.object_colors;
+    workspace.emitter_colors      = doc.emitter_colors;
+    workspace.brightness          = doc.brightness;
+    workspace.effect              = doc.effect;
+}
+
+bool SceneBridge::ResolveWorkspace(SceneDocument& out)
+{
+    std::vector<std::string> errs;
+    if(!ResolveScene(workspace, registry, out, &errs))
+    {
+        setStatus(QStringLiteral("edit resolve failed: %1")
+            .arg(QString::fromStdString(
+                errs.empty() ? "unknown" : errs.front())));
+        return false;
+    }
+    return true;
+}
+
+void SceneBridge::AdoptResolved(const SceneDocument& r, const EditorEdit& e)
+{
+    doc      = r;
+    doc.name = workspace.meta.name;
+    rebuildMatrixLayouts();
+    rebuildKeyLookup();      /* moved keyboards ripple from the new pos */
+    if(obj_model != nullptr)
+    {
+        if(e.TransformsOnly())
+        {
+            /* Granular path — drag delegates stay alive; only the
+               touched instance rows re-read. */
+            obj_model->UpdateTransforms(e.TransformIds());
+        }
+        else
+        {
+            obj_model->ResetFrom();
+            emit sceneChanged();
+        }
+    }
+    else if(!e.TransformsOnly())
+    {
+        emit sceneChanged();
+    }
+}
+
+void SceneBridge::applyEdit(const EditorEdit& e, bool reverse)
+{
+    SyncWorkspace();
+    if(reverse)
+    {
+        RevertEditorEdit(workspace, e);
+    }
+    else
+    {
+        ApplyEditorEdit(workspace, e);
+    }
+    SceneDocument resolved;
+    if(!ResolveWorkspace(resolved))
+    {
+        /* Should not happen for controller-produced edits — put
+           the workspace back the way it was so the active scene
+           stays consistent. */
+        if(reverse)
+        {
+            ApplyEditorEdit(workspace, e);
+        }
+        else
+        {
+            RevertEditorEdit(workspace, e);
+        }
+        return;
+    }
+    AdoptResolved(resolved, e);
+    markDirty();
+}
+
+void SceneBridge::commitEdit(EditorEdit&& e)
+{
+    if(e.Empty())
+    {
+        return;
+    }
+    SceneDocument resolved;
+    if(!ResolveWorkspace(resolved))
+    {
+        /* The controller already mutated `workspace` — roll the
+           edit back so document and scene stay consistent. */
+        RevertEditorEdit(workspace, e);
+        return;
+    }
+    AdoptResolved(resolved, e);
+    markDirty();
+    undo_stack->push(new SceneEditCommand(this, std::move(e),
+                                        /*already_applied*/ true));
+    emit undoChanged();
+}
+
+void SceneBridge::previewAdopt(const std::set<std::string>& ids)
+{
+    /* Gesture preview: adopt the re-resolved scene and update the
+       touched rows — never markDirty, never an undo record. */
+    SceneDocument resolved;
+    if(!ResolveWorkspace(resolved))
+    {
+        return;
+    }
+    doc      = resolved;
+    doc.name = workspace.meta.name;
+    rebuildMatrixLayouts();
+    rebuildKeyLookup();
+    if(obj_model != nullptr)
+    {
+        obj_model->UpdateTransforms(ids);
+    }
+}
+
+/*---------------------------------------------------------*\
+|| Editor slots — selection + gestures + discrete ops     ||
+\*---------------------------------------------------------*/
+void SceneBridge::selectInstance(const QString& id, bool additive)
+{
+    editor.Select(id.toStdString(), additive);
+    const QString primary =
+        QString::fromStdString(editor.PrimarySelection());
+    if(selected != primary)
+    {
+        selected = primary;
+    }
+    emit selectionChanged();
+}
+
+void SceneBridge::clearEditorSelection()
+{
+    editor.ClearSelection();
+    if(!selected.isEmpty())
+    {
+        selected.clear();
+    }
+    emit selectionChanged();
+}
+
+void SceneBridge::beginTransformGesture()
+{
+    SyncWorkspace();
+    editor.BeginTransform();
+}
+
+void SceneBridge::updateTransformGesture(double dx, double dy, double dz,
+                                         int plane, bool snap)
+{
+    if(!editor.GestureActive())
+    {
+        return;
+    }
+    editor.PreviewTranslate({ (float)dx, (float)dy, (float)dz },
+                            (EditPlane)plane, snap);
+    previewAdopt(editor.GestureIds());
+}
+
+void SceneBridge::updateRotateGesture(double degrees, bool snap)
+{
+    updateRotateGestureAxis(0.0, 1.0, 0.0, degrees, snap);
+}
+
+void SceneBridge::updateRotateGestureAxis(double ax, double ay, double az,
+                                          double degrees, bool snap)
+{
+    if(!editor.GestureActive())
+    {
+        return;
+    }
+    editor.PreviewRotate({ (float)ax, (float)ay, (float)az },
+                         (float)degrees, snap);
+    previewAdopt(editor.GestureIds());
+}
+
+void SceneBridge::commitTransformGesture()
+{
+    if(!editor.GestureActive())
+    {
+        return;
+    }
+    std::optional<EditorEdit> e = editor.Commit();
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+    }
+}
+
+void SceneBridge::cancelTransformGesture()
+{
+    if(!editor.GestureActive())
+    {
+        return;
+    }
+    const std::set<std::string> ids = editor.GestureIds();
+    editor.Cancel();
+    previewAdopt(ids);
+}
+
+bool SceneBridge::setInstancePosition(const QString& id,
+                                      double x, double y, double z)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.SetPosition(id.toStdString(),
+                           { (float)x, (float)y, (float)z });
+    if(!e.has_value())
+    {
+        return false;
+    }
+    commitEdit(std::move(*e));
+    return true;
+}
+
+bool SceneBridge::setInstanceRotation(const QString& id,
+                                      double rx, double ry, double rz)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.SetRotation(id.toStdString(),
+                           { (float)rx, (float)ry, (float)rz });
+    if(!e.has_value())
+    {
+        return false;
+    }
+    commitEdit(std::move(*e));
+    return true;
+}
+
+bool SceneBridge::renameInstance(const QString& id, const QString& newId)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.Rename(id.toStdString(), newId.toStdString());
+    if(!e.has_value())
+    {
+        setStatus(QStringLiteral("rename rejected — check the new id"));
+        return false;
+    }
+    commitEdit(std::move(*e));
+    selected = QString::fromStdString(editor.PrimarySelection());
+    emit selectionChanged();
+    return true;
+}
+
+void SceneBridge::setInstanceVisible(const QString& id, bool on)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.SetVisible(id.toStdString(), on);
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+    }
+}
+
+void SceneBridge::setInstanceLocked(const QString& id, bool on)
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e =
+        editor.SetLocked(id.toStdString(), on);
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+    }
+}
+
+void SceneBridge::groupSelected()
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.Group();
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        selected = QString::fromStdString(editor.PrimarySelection());
+        emit selectionChanged();
+    }
+}
+
+void SceneBridge::ungroupSelected()
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.Ungroup();
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        selected = QString::fromStdString(editor.PrimarySelection());
+        emit selectionChanged();
+    }
+}
+
+void SceneBridge::deleteSelected()
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.DeleteSelected();
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        selected = QString::fromStdString(editor.PrimarySelection());
+        emit selectionChanged();
+    }
+}
+
+void SceneBridge::duplicateMirrored()
+{
+    SyncWorkspace();
+    std::optional<EditorEdit> e = editor.DuplicateMirrored();
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        selected = QString::fromStdString(editor.PrimarySelection());
+        emit selectionChanged();
     }
 }
 

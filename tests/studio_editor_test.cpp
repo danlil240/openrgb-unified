@@ -1,0 +1,758 @@
+/*---------------------------------------------------------*\
+|| studio_editor_test.cpp                                    ||
+||                                                           ||
+||   Qt-free tests for the Desktop Lighting Studio editor ||
+||   core (plugins/DesktopLightingStudio/editor/):        ||
+||   gesture records, cancel/no-op, locked instances,     ||
+||   snapping, rename/delete/group/mirror edits and       ||
+||   world-placement preservation. Plain cl build via     ||
+||   build-studio-tests.bat.                              ||
+||                                                           ||
+||   SPDX-License-Identifier: GPL-2.0-or-later               ||
+\*---------------------------------------------------------*/
+
+#include "scene/SceneTypes.h"
+#include "scene/SceneGraph.h"
+#include "scene/SceneResolver.h"
+#include "config/StudioConfig.h"
+#include "presets/DevicePreset.h"
+#include "presets/PresetRegistry.h"
+#include "editor/EditorController.h"
+#include "editor/TransformCommands.h"
+
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <cstdio>
+#include <set>
+#include <string>
+
+static int failures = 0;
+static int checks   = 0;
+
+#define CHECK(cond, name)                                              \
+    do {                                                               \
+        ++checks;                                                      \
+        if(!(cond)) { ++failures; std::printf("FAIL: %s\n", name); }   \
+    } while(0)
+
+static bool Near(float a, float b, float eps = 1e-4f)
+{
+    return std::fabs(a - b) < eps;
+}
+
+static bool NearVec(const studio::Vec3& a, const studio::Vec3& b,
+                    float eps = 1e-4f)
+{
+    return Near(a.x, b.x, eps) && Near(a.y, b.y, eps)
+        && Near(a.z, b.z, eps);
+}
+
+/*---------------------------------------------------------*\
+|| Fixture: tiny type library (fan-120 / desk / group)    ||
+|| and a workspace using it — two fan instances (one     ||
+|| parented under a rotated "case" group), a mirrored    ||
+|| fan, a desk, paint + zone binding.                    ||
+\*---------------------------------------------------------*/
+static studio::DevicePreset FanType()
+{
+    studio::DevicePreset p;
+    p.id       = "fan-120";
+    p.name     = "Test fan";
+    p.category = "fan";
+    studio::PresetEntity body;
+    body.id       = "body";
+    body.geometry = "fan_body";
+    body.size_m   = { 0.12f, 0.025f, 0.12f };
+    body.zone     = "ring";
+    p.entities["body"] = body;
+    studio::DeviceZone z;
+    z.id        = "ring";
+    z.entity    = "body";
+    z.led_count = 4;
+    z.layout.type   = "points";
+    z.layout.points = { { 0.05f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.05f },
+                        { -0.05f, 0.0f, 0.0f }, { 0.0f, 0.0f, -0.05f } };
+    p.zones.push_back(z);
+    return p;
+}
+
+static studio::DevicePreset DeskType()
+{
+    studio::DevicePreset p;
+    p.id       = "desk";
+    p.name     = "Test desk";
+    p.category = "decor";
+    studio::PresetEntity top;
+    top.id       = "top";
+    top.geometry = "desk";
+    top.size_m   = { 1.4f, 0.04f, 0.75f };
+    p.entities["top"] = top;
+    return p;
+}
+
+static studio::DevicePreset GroupType()
+{
+    studio::DevicePreset p;
+    p.id       = "group";
+    p.name     = "Placement group";
+    p.category = "group";
+    return p;
+}
+
+static studio::PresetRegistry TestRegistry()
+{
+    studio::PresetRegistry reg;
+    std::vector<std::string> errs;
+    reg.Add(FanType(), &errs);
+    reg.Add(DeskType(), &errs);
+    reg.Add(GroupType(), &errs);
+    return reg;
+}
+
+static studio::StudioDocument Fixture()
+{
+    using namespace studio;
+    StudioDocument w;
+    w.meta.name = "Editor fixture";
+
+    DeviceInstance desk;
+    desk.type     = "desk";
+    desk.position = { 0.0f, -0.02f, 0.10f };
+    w.devices["desk"] = desk;
+
+    DeviceInstance grp;
+    grp.type         = "group";
+    grp.position     = { 0.4f, 0.1f, -0.1f };
+    grp.rotation_deg = { 0.0f, 30.0f, 0.0f };   /* rotated parent */
+    w.devices["case"] = grp;
+
+    DeviceInstance fan0;
+    fan0.type     = "fan-120";
+    fan0.position = { 0.0f, -0.16f, -0.14f };
+    fan0.parent   = "case";
+    w.devices["fan0"] = fan0;
+
+    DeviceInstance fan1;
+    fan1.type     = "fan-120";
+    fan1.position = { 0.2f, 0.0f, 0.0f };
+    w.devices["fan1"] = fan1;
+
+    DeviceInstance fan2;
+    fan2.type     = "fan-120";
+    fan2.position = { 0.1f, 0.05f, 0.0f };
+    fan2.parent   = "fan0";                 /* workspace child of fan0 */
+    w.devices["fan2"] = fan2;
+
+    DeviceInstance fanm;
+    fanm.type     = "fan-120";
+    fanm.position = { -0.2f, 0.0f, 0.2f };
+    w.devices["fan0m"] = fanm;
+
+    DeviceBinding bind;
+    bind.id              = "fan_bus";
+    bind.controller_name = "X870E AORUS ELITE";
+    bind.vendor          = "Gigabyte";
+    bind.zone_name       = "ARGB_V2_1";
+    bind.zone_leds       = 8;
+    w.bindings["fan_bus"] = bind;
+
+    DeviceSettings s0;
+    s0.zones["ring"] = { "fan_bus", 0, true };
+    w.device_settings["fan0"] = s0;
+    DeviceSettings sm;
+    sm.mirror_of = "fan0";
+    w.device_settings["fan0m"] = sm;
+
+    w.object_colors["fan0/body"]     = MakeSceneColor(0x20, 0x40, 0x80);
+    w.emitter_colors["fan0/body"][2] = MakeSceneColor(0xFF, 0x00, 0x10);
+    return w;
+}
+
+static bool Resolve(const studio::StudioDocument& w,
+                    const studio::PresetRegistry& reg,
+                    studio::SceneDocument& out)
+{
+    std::vector<std::string> errs;
+    if(!studio::ResolveScene(w, reg, out, &errs))
+    {
+        std::printf("  (resolve failed: %s)\n",
+                    errs.empty() ? "?" : errs.front().c_str());
+        return false;
+    }
+    return true;
+}
+
+static studio::Vec3 EmitterWorld(const studio::SceneDocument& doc,
+                                 const std::map<std::string, studio::Mat4>& world,
+                                 const std::string& obj, int idx)
+{
+    const studio::SceneObject* o = studio::FindObject(doc, obj);
+    if(o == nullptr || idx < 0 || idx >= (int)o->emitters.size())
+    {
+        return { -9999.0f, -9999.0f, -9999.0f };
+    }
+    return studio::TransformPoint(world.at(obj), o->emitters[idx].local_pos);
+}
+
+/*---------------------------------------------------------*\
+|| Drag gesture: 100 previews = ONE edit record; revert   ||
+|| restores every touched instance; moving a parent       ||
+|| restores its children's world placement on undo.       ||
+\*---------------------------------------------------------*/
+static void TestDragOneRecord()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    /* sanity: fixture resolves, fan0/body bound + verified */
+    SceneDocument before;
+    CHECK(Resolve(w, reg, before), "drag: fixture resolves");
+
+    /* 100-update drag on one instance -> exactly one record */
+    CHECK(ctl.Select("fan1"), "drag: select fan1");
+    CHECK(ctl.BeginTransform(), "drag: begin");
+    for(int i = 1; i <= 100; i++)
+    {
+        ctl.PreviewTranslate({ i * 0.001f, 99.0f, 0.0f },
+                             EditPlane::DeskXZ);
+    }
+    /* XZ plane: y delta constrained away */
+    CHECK(NearVec(w.devices["fan1"].position, { 0.3f, 0.0f, 0.0f }),
+          "drag: preview lands on XZ plane");
+    std::optional<EditorEdit> e = ctl.Commit();
+    CHECK(e.has_value(), "drag: commit yields the single record");
+    CHECK(!ctl.GestureActive(), "drag: gesture closed");
+
+    /* record reverts the workspace exactly */
+    RevertEditorEdit(w, *e);
+    CHECK(NearVec(w.devices["fan1"].position, { 0.2f, 0.0f, 0.0f }),
+          "drag: revert restores transform");
+    ApplyEditorEdit(w, *e);
+    CHECK(NearVec(w.devices["fan1"].position, { 0.3f, 0.0f, 0.0f }),
+          "drag: re-apply restores moved transform");
+
+    /* moving the "case" parent moves the whole subtree — the
+       record only carries the parent, undo restores the
+       children's world placement implicitly */
+    SceneDocument before2;
+    CHECK(Resolve(w, reg, before2), "drag: resolve before parent move");
+    const auto wm0 = ResolveWorldMatrices(before2);
+    const Vec3 fan0_e0 = EmitterWorld(before2, wm0, "fan0/body", 0);
+
+    ctl.SetSelection({ "case" });
+    CHECK(ctl.BeginTransform(), "drag: begin parent");
+    ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+    std::optional<EditorEdit> e2 = ctl.Commit();
+    CHECK(e2.has_value() && e2->devices.after.count("case") == 1
+          && e2->devices.after.count("fan0") == 0,
+          "drag: parent move records only the parent");
+
+    SceneDocument moved;
+    CHECK(Resolve(w, reg, moved), "drag: resolve after parent move");
+    const auto wm1 = ResolveWorldMatrices(moved);
+    const Vec3 fan0_moved = EmitterWorld(moved, wm1, "fan0/body", 0);
+    CHECK(Near(fan0_moved.x, fan0_e0.x + 0.1f)
+          && Near(fan0_moved.y, fan0_e0.y)
+          && Near(fan0_moved.z, fan0_e0.z),
+          "drag: child emitter rides the moved parent");
+
+    RevertEditorEdit(w, *e2);
+    SceneDocument back;
+    CHECK(Resolve(w, reg, back), "drag: resolve after undo");
+    const auto wm2 = ResolveWorldMatrices(back);
+    CHECK(NearVec(EmitterWorld(back, wm2, "fan0/body", 0), fan0_e0),
+          "drag: undo restores every affected child");
+}
+
+/*---------------------------------------------------------*\
+|| Cancel and no-op produce zero records.                 ||
+\*---------------------------------------------------------*/
+static void TestCancelAndNoOp()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+
+    ctl.Select("fan1");
+    CHECK(ctl.BeginTransform(), "cancel: begin");
+    ctl.PreviewTranslate({ 0.2f, 0.0f, 0.1f }, EditPlane::Free);
+    ctl.PreviewRotate({ 0.0f, 1.0f, 0.0f }, 45.0f);
+    ctl.Cancel();
+    CHECK(!ctl.GestureActive(), "cancel: gesture closed");
+    CHECK(NearVec(w.devices["fan1"].position, { 0.2f, 0.0f, 0.0f })
+          && NearVec(w.devices["fan1"].rotation_deg, { 0.0f, 0.0f, 0.0f }),
+          "cancel: snapshot restored");
+    CHECK(!ctl.Commit().has_value(), "cancel: commit after cancel is empty");
+
+    /* no-op: begin + commit with no preview */
+    CHECK(ctl.BeginTransform(), "noop: begin");
+    CHECK(!ctl.Commit().has_value(), "noop: empty commit yields no record");
+
+    /* zero-delta preview is still a no-op */
+    CHECK(ctl.BeginTransform(), "noop: begin zero delta");
+    ctl.PreviewTranslate({ 0.0f, 0.0f, 0.0f }, EditPlane::Free);
+    CHECK(!ctl.Commit().has_value(), "noop: zero delta yields no record");
+
+    /* no selection -> begin refused */
+    ctl.ClearSelection();
+    CHECK(!ctl.BeginTransform(), "noop: empty selection can't begin");
+}
+
+/*---------------------------------------------------------*\
+|| Locked instances: selectable, but every transform op   ||
+|| and delete/group skip them.                            ||
+\*---------------------------------------------------------*/
+static void TestLocked()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+    w.device_settings["fan1"].locked = true;
+
+    CHECK(ctl.Select("fan1"), "locked: still selectable for display");
+    CHECK(!ctl.BeginTransform(), "locked: gesture refuses all-locked");
+    CHECK(!ctl.SetPosition("fan1", { 1.0f, 0.0f, 0.0f }).has_value(),
+          "locked: SetPosition rejected");
+    CHECK(!ctl.SetRotation("fan1", { 0.0f, 90.0f, 0.0f }).has_value(),
+          "locked: SetRotation rejected");
+    CHECK(!ctl.Delete({ "fan1" }).has_value(),
+          "locked: delete rejected");
+    CHECK(!ctl.Group().has_value(),
+          "locked: group with only locked selection rejected");
+
+    /* mixed selection: the unlocked member still moves */
+    ctl.SetSelection({ "fan0", "fan1" });
+    /* fan0's ancestor isn't selected; fan1 is locked -> movable = fan0 */
+    CHECK(ctl.BeginTransform(), "locked: mixed selection begins");
+    CHECK(ctl.GestureIds().count("fan0") == 1
+          && ctl.GestureIds().count("fan1") == 0,
+          "locked: movable excludes the locked id");
+    ctl.PreviewTranslate({ 0.05f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+    CHECK(NearVec(w.devices["fan1"].position, { 0.2f, 0.0f, 0.0f }),
+          "locked: locked instance untouched");
+    std::optional<EditorEdit> e = ctl.Commit();
+    CHECK(e.has_value()
+          && e->devices.after.count("fan0") == 1
+          && e->devices.after.count("fan1") == 0,
+          "locked: record holds only the movable edit");
+
+    /* unlock restores editability */
+    std::optional<EditorEdit> un = ctl.SetLocked("fan1", false);
+    CHECK(un.has_value() && !w.device_settings["fan1"].locked,
+          "locked: SetLocked edit");
+    CHECK(ctl.SetPosition("fan1", { 0.0f, 0.0f, 0.0f }).has_value(),
+          "locked: unlocked instance editable");
+}
+
+/*---------------------------------------------------------*\
+|| Snapping.                                               ||
+\*---------------------------------------------------------*/
+static void TestSnap()
+{
+    using namespace studio;
+
+    CHECK(Near(EditorController::SnapTranslate({ 0.0137f, 0.0f, 0.0f },
+                                               0.001f).x, 0.014f),
+          "snap: 0.0137 m -> 0.014 m at 1 mm step");
+    CHECK(Near(EditorController::SnapTranslate({ 0.0137f, 0.0f, 0.0f }).x,
+               0.01f),
+          "snap: 0.0137 m -> 0.01 m at default 10 mm");
+    /* nearest-tick snapping: 23 deg is 7 deg from 30, 8 from 15 —
+       the brief's "23 -> 15" reads as grid behavior, the nearest
+       tick is what editors actually apply */
+    CHECK(Near(EditorController::SnapAngle(22.0f), 15.0f),
+          "snap: 22 deg -> 15 deg");
+    CHECK(Near(EditorController::SnapAngle(23.0f), 30.0f),
+          "snap: 23 deg -> 30 deg (nearest 15 deg tick)");
+    CHECK(Near(EditorController::SnapAngle(52.5f), 60.0f, 1e-3f)
+          || Near(EditorController::SnapAngle(52.5f), 45.0f, 1e-3f),
+          "snap: mid angle lands on a 15 deg tick");
+
+    /* snap inside a gesture honors workspace controls prefs */
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+    ctl.Select("fan1");
+    CHECK(ctl.BeginTransform(), "snap: begin");
+    ctl.PreviewTranslate({ 0.0137f, 0.0f, 0.0f }, EditPlane::DeskXZ,
+                         /*snap*/ true);
+    CHECK(Near(w.devices["fan1"].position.x, 0.21f),
+          "snap: gesture snaps to controls.move_snap_m");
+    ctl.Cancel();
+}
+
+/*---------------------------------------------------------*\
+|| Rotate gesture: multi-selection pivot, world math      ||
+|| through a rotated parent frame.                         ||
+\*---------------------------------------------------------*/
+static void TestRotate()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+
+    /* two root instances rotate around their shared pivot */
+    ctl.SetSelection({ "desk", "fan1" });
+    CHECK(ctl.BeginTransform(), "rotate: begin pair");
+    /* pivot = centroid({0,-0.02,0.1},{0.2,0,0}) = {0.1,-0.01,0.05} */
+    ctl.PreviewRotate({ 0.0f, 1.0f, 0.0f }, 90.0f);
+    std::optional<EditorEdit> e = ctl.Commit();
+    CHECK(e.has_value(), "rotate: commit");
+    /* Ry(90): rel {x,z} -> {z,-x}
+       fan1 rel {0.1,0.01,-0.05} -> {-0.05,0.01,-0.1} + pivot = {0.05,0,-0.05} */
+    CHECK(NearVec(w.devices["fan1"].position, { 0.05f, 0.0f, -0.05f }),
+          "rotate: fan1 orbits the pivot");
+    /* desk rel {-0.1,-0.01,0.05} -> {0.05,-0.01,0.1} + pivot = {0.15,-0.02,0.15} */
+    CHECK(NearVec(w.devices["desk"].position, { 0.15f, -0.02f, 0.15f }),
+          "rotate: desk orbits the pivot");
+    /* ~90 deg yaw — asin loses a couple hundredths near the pole */
+    CHECK(Near(w.devices["fan1"].rotation_deg.y, 90.0f, 0.1f)
+          && Near(w.devices["fan1"].rotation_deg.x, 0.0f, 0.1f)
+          && Near(w.devices["fan1"].rotation_deg.z, 0.0f, 0.1f),
+          "rotate: rotation lands on Y");
+
+    /* rotating a child of the rotated "case" parent keeps world
+       placement coherent: emitter world pos matches pivot math */
+    StudioDocument   w2  = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl2(w2);
+    SceneDocument    before;
+    CHECK(Resolve(w2, reg, before), "rotate: resolve fixture");
+    const auto wm = ResolveWorldMatrices(before);
+    const Vec3 fan0_wp = TransformPoint(wm.at("fan0"), { 0.0f, 0.0f, 0.0f });
+
+    ctl2.Select("fan0");
+    CHECK(ctl2.BeginTransform(), "rotate: begin child");
+    ctl2.PreviewRotate({ 0.0f, 1.0f, 0.0f }, 90.0f);
+    std::optional<EditorEdit> e2 = ctl2.Commit();
+    CHECK(e2.has_value(), "rotate: child commit");
+
+    SceneDocument after;
+    CHECK(Resolve(w2, reg, after), "rotate: resolve after");
+    const auto wm2 = ResolveWorldMatrices(after);
+    const Vec3 fan0_after = TransformPoint(wm2.at("fan0"),
+                                         { 0.0f, 0.0f, 0.0f });
+    /* single selection: pivot == own world pos, so the position is
+       unchanged and the world rotation gained 90 deg about Y */
+    CHECK(NearVec(fan0_after, fan0_wp),
+          "rotate: self-pivot keeps world position");
+    const Vec3 e_before = EmitterWorld(before, wm, "fan0/body", 0);
+    const Vec3 e_after  = EmitterWorld(after, wm2, "fan0/body", 0);
+    CHECK(!NearVec(e_after, e_before, 1e-3f),
+          "rotate: emitter world pos actually rotated");
+}
+
+/*---------------------------------------------------------*\
+|| Rename re-keys devices, settings, colors, parent and   ||
+|| mirror_of references; resolution still succeeds.       ||
+\*---------------------------------------------------------*/
+static void TestRename()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    std::optional<EditorEdit> e = ctl.Rename("fan0", "fan0r");
+    CHECK(e.has_value(), "rename: edit produced");
+    CHECK(w.devices.count("fan0") == 0
+          && w.devices.count("fan0r") == 1
+          && w.devices["fan0r"].type == "fan-120",
+          "rename: devices re-keyed");
+    CHECK(w.devices["fan2"].parent == "fan0r",
+          "rename: child parent re-pointed");
+    CHECK(w.device_settings.count("fan0r") == 1
+          && w.device_settings["fan0r"].zones["ring"].binding == "fan_bus",
+          "rename: device_settings re-keyed");
+    CHECK(w.device_settings["fan0m"].mirror_of == "fan0r",
+          "rename: mirror_of re-pointed");
+    CHECK(w.object_colors.count("fan0r/body") == 1
+          && w.object_colors.count("fan0/body") == 0
+          && w.emitter_colors["fan0r/body"].count(2) == 1,
+          "rename: color keys re-keyed");
+
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "rename: still resolves");
+    CHECK(FindObject(doc, "fan0r/body") != nullptr
+          && FindObject(doc, "fan0/body") == nullptr,
+          "rename: resolved ids follow");
+
+    /* revert restores every key */
+    RevertEditorEdit(w, *e);
+    CHECK(w.devices.count("fan0") == 1
+          && w.device_settings.count("fan0") == 1
+          && w.device_settings["fan0m"].mirror_of == "fan0"
+          && w.object_colors.count("fan0/body") == 1
+          && w.devices["fan2"].parent == "fan0",
+          "rename: revert restores all keys");
+
+    /* invalid renames produce no record */
+    CHECK(!ctl.Rename("fan0", "fan1").has_value(),   /* collision   */
+          "rename: existing id rejected");
+    CHECK(!ctl.Rename("fan0", "has space").has_value(), /* bad id    */
+          "rename: illegal id rejected");
+    CHECK(!ctl.Rename("ghost", "fan9").has_value(),    /* missing    */
+          "rename: missing id rejected");
+}
+
+/*---------------------------------------------------------*\
+|| Delete cascades descendants, strips dangling mirrors,  ||
+|| and reverts to the byte-identical document.            ||
+\*---------------------------------------------------------*/
+static void TestDeleteUndo()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+    const nlohmann::json before_json = ToJson(w);
+
+    ctl.SetSelection({ "fan0" });
+    std::optional<EditorEdit> e = ctl.DeleteSelected();
+    CHECK(e.has_value(), "delete: edit produced");
+    CHECK(w.devices.count("fan0") == 0 && w.devices.count("fan2") == 0,
+          "delete: descendants cascade");
+    CHECK(w.device_settings.count("fan0") == 0
+          && w.object_colors.count("fan0/body") == 0
+          && w.emitter_colors.count("fan0/body") == 0,
+          "delete: settings + colors removed");
+    CHECK(w.device_settings["fan0m"].mirror_of.empty(),
+          "delete: dangling mirror_of cleared");
+    CHECK(!ctl.IsSelected("fan0"), "delete: selection pruned");
+
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "delete: still resolves");
+    CHECK(FindObject(doc, "fan0/body") == nullptr,
+          "delete: resolved subtree gone");
+
+    RevertEditorEdit(w, *e);
+    CHECK(ToJson(w) == before_json,
+          "delete: revert restores document exactly");
+}
+
+/*---------------------------------------------------------*\
+|| Mirrored duplication: Linked objects, no zone writer.  ||
+\*---------------------------------------------------------*/
+static void TestDuplicateMirrored()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    ctl.Select("fan0");
+    std::optional<EditorEdit> e = ctl.DuplicateMirrored();
+    CHECK(e.has_value(), "mirror: edit produced");
+    CHECK(w.devices.count("fan0_mirror") == 1
+          && w.devices["fan0_mirror"].type == "fan-120"
+          && w.devices["fan0_mirror"].parent == "case",
+          "mirror: new instance, same type + parent");
+    CHECK(Near(w.devices["fan0_mirror"].position.x,
+               w.devices["fan0"].position.x + 0.03f),
+          "mirror: offset placement");
+    const DeviceSettings& ns = w.device_settings["fan0_mirror"];
+    CHECK(ns.mirror_of == "fan0" && ns.zones.empty(),
+          "mirror: mirror_of set, no zones/bindings");
+
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "mirror: resolves");
+    const SceneObject* linked = FindObject(doc, "fan0_mirror/body");
+    CHECK(linked != nullptr && linked->kind == ObjectKind::Linked
+          && linked->mirror_of == "fan0/body",
+          "mirror: resolved object is Linked to the source");
+    CHECK(linked->binding.empty() && linked->emitters.empty(),
+          "mirror: no output ownership");
+
+    /* a second duplicate gets a unique id and mirrors the owner,
+       never forming a chain */
+    e = ctl.DuplicateMirrored();
+    CHECK(e.has_value() && w.devices.count("fan0_mirror_2") == 1,
+          "mirror: unique follow-up id");
+    /* selection moved to the copy, so this duplicated the copy */
+    CHECK(w.device_settings["fan0_mirror_2"].mirror_of == "fan0",
+          "mirror: copy-of-copy targets the owner, no chain");
+
+    RevertEditorEdit(w, *e);
+    CHECK(w.devices.count("fan0_mirror_2") == 0
+          && w.device_settings.count("fan0_mirror_2") == 0,
+          "mirror: revert removes the copy");
+}
+
+/*---------------------------------------------------------*\
+|| Group / ungroup: world placement preserved through     ||
+|| reparenting.                                            ||
+\*---------------------------------------------------------*/
+static void TestGroup()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    SceneDocument before;
+    CHECK(Resolve(w, reg, before), "group: resolve before");
+    const auto wm0 = ResolveWorldMatrices(before);
+    const Vec3 fan0_e0 = EmitterWorld(before, wm0, "fan0/body", 0);
+    const Vec3 fan1_e0 = EmitterWorld(before, wm0, "fan1/body", 0);
+
+    ctl.SetSelection({ "fan0", "fan1" });
+    std::optional<EditorEdit> e = ctl.Group();
+    CHECK(e.has_value(), "group: edit produced");
+    CHECK(w.devices.count("group") == 1
+          && w.devices["group"].type == "group",
+          "group: group-type instance created");
+    CHECK(w.devices["fan0"].parent == "group"
+          && w.devices["fan1"].parent == "group",
+          "group: children reparented");
+    CHECK(ctl.PrimarySelection() == "group",
+          "group: selection follows the group");
+
+    SceneDocument after;
+    CHECK(Resolve(w, reg, after), "group: resolves");
+    const auto wm1 = ResolveWorldMatrices(after);
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan0/body", 0), fan0_e0, 1e-3f),
+          "group: fan0 world placement preserved");
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan1/body", 0), fan1_e0, 1e-3f),
+          "group: fan1 world placement preserved");
+
+    /* moving the group moves both subtrees */
+    const Vec3 pivot0 = w.devices["group"].position;
+    std::optional<EditorEdit> mv = ctl.SetPosition("group",
+                                                 { 0.0f, 0.0f, 0.0f });
+    CHECK(mv.has_value(), "group: movable");
+    SceneDocument moved;
+    CHECK(Resolve(w, reg, moved), "group: resolve moved");
+    const auto wm2 = ResolveWorldMatrices(moved);
+    const Vec3 delta { -pivot0.x, -pivot0.y, -pivot0.z };
+    const Vec3 expect1 { fan1_e0.x + delta.x, fan1_e0.y + delta.y,
+                         fan1_e0.z + delta.z };
+    CHECK(NearVec(EmitterWorld(moved, wm2, "fan1/body", 0), expect1, 1e-3f),
+          "group: moving group moves children");
+
+    /* ungroup restores the parent structure and placement */
+    RevertEditorEdit(w, *mv);
+    ctl.SetSelection({ "group" });
+    std::optional<EditorEdit> ug = ctl.Ungroup();
+    CHECK(ug.has_value(), "ungroup: edit produced");
+    CHECK(w.devices.count("group") == 0
+          && w.devices["fan0"].parent.empty()
+          && w.devices["fan1"].parent.empty(),
+          "ungroup: children re-rooted (group was at root)");
+    SceneDocument un;
+    CHECK(Resolve(w, reg, un), "ungroup: resolves");
+    const auto wm3 = ResolveWorldMatrices(un);
+    CHECK(NearVec(EmitterWorld(un, wm3, "fan1/body", 0), fan1_e0, 1e-3f),
+          "ungroup: world placement preserved");
+
+    /* revert of the group edit restores the original parents */
+    RevertEditorEdit(w, *ug);
+    CHECK(w.devices["fan0"].parent == "group"
+          && w.devices.count("group") == 1,
+          "ungroup: revert restores the group");
+    RevertEditorEdit(w, *e);
+    CHECK(w.devices["fan0"].parent == "case"
+          && w.devices["fan1"].parent.empty()
+          && w.devices.count("group") == 0,
+          "group: revert restores original parents");
+}
+
+/*---------------------------------------------------------*\
+|| Post-edit resolution + compactness + edit typing.      ||
+\*---------------------------------------------------------*/
+static void TestResolutionAndCompactness()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    SceneDocument before;
+    CHECK(Resolve(w, reg, before), "resolve: before");
+    const auto wm0 = ResolveWorldMatrices(before);
+    const Vec3 fan1_e0 = EmitterWorld(before, wm0, "fan1/body", 0);
+    const Vec3 fan0_e0 = EmitterWorld(before, wm0, "fan0/body", 0);
+
+    std::optional<EditorEdit> e =
+        ctl.SetPosition("fan1", { 0.5f, 0.0f, 0.0f });
+    CHECK(e.has_value(), "resolve: numeric edit produced");
+    CHECK(e->TransformsOnly() && e->TransformIds().count("fan1") == 1,
+          "resolve: numeric edit classifies as transform-only");
+
+    SceneDocument after;
+    CHECK(Resolve(w, reg, after), "resolve: after");
+    const auto wm1 = ResolveWorldMatrices(after);
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan1/body", 0),
+                  { fan1_e0.x + 0.3f, fan1_e0.y, fan1_e0.z }),
+          "resolve: emitters land at the moved position");
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan0/body", 0), fan0_e0),
+          "resolve: sibling instance untouched");
+
+    /* structural edits are not transform-only */
+    std::optional<EditorEdit> rn = ctl.Rename("fan1", "fan_top");
+    CHECK(rn.has_value() && !rn->TransformsOnly(),
+          "resolve: rename is structural");
+
+    /* compactness: ToJson carries placements only — never
+       expanded entities, emitters or embedded definitions */
+    const nlohmann::json j = ToJson(w);
+    bool expanded = j.contains("entities") || j.contains("emitters")
+                 || j.contains("definitions") || j.contains("scene");
+    for(const auto& kv : j["devices"].items())
+    {
+        if(kv.value().contains("entities") || kv.value().contains("emitters")
+           || kv.value().contains("geometry") || kv.value().contains("zones"))
+        {
+            expanded = true;
+        }
+    }
+    CHECK(!expanded, "compact: no expanded content after edits");
+}
+
+/*---------------------------------------------------------*\
+|| Ancestor/descendant dedup: selecting a parent and its  ||
+|| child moves the subtree once, not twice.               ||
+\*---------------------------------------------------------*/
+static void TestAncestorDedup()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+
+    ctl.SetSelection({ "case", "fan0" });   /* fan0 is a child of case */
+    CHECK(ctl.BeginTransform(), "dedup: begin");
+    CHECK(ctl.GestureIds().count("case") == 1
+          && ctl.GestureIds().count("fan0") == 0,
+          "dedup: selected child rides the selected parent");
+    ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+    ctl.Cancel();
+}
+
+int main()
+{
+    TestDragOneRecord();
+    TestCancelAndNoOp();
+    TestLocked();
+    TestSnap();
+    TestRotate();
+    TestRename();
+    TestDeleteUndo();
+    TestDuplicateMirrored();
+    TestGroup();
+    TestResolutionAndCompactness();
+    TestAncestorDedup();
+
+    std::printf("%d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}

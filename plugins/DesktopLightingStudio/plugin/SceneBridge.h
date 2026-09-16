@@ -20,6 +20,7 @@
 #include "../scene/SceneTypes.h"
 #include "../config/StudioConfig.h"
 #include "../presets/PresetRegistry.h"
+#include "../editor/EditorController.h"
 #include "../output/ControllerAdapter.h"
 #include "../effects/EffectEngine.h"
 #include "../inputs/InputBus.h"
@@ -31,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 
 class OpenRGBPluginAPIInterface;
@@ -41,6 +43,7 @@ class QUndoStack;
 namespace studio
 {
 class ConfigStore;
+class SceneObjectModel;
 class ScreenSampler;
 
 class SceneBridge : public QObject
@@ -66,6 +69,9 @@ class SceneBridge : public QObject
     /* Workspace store — studio.json under the OpenRGB config dir. */
     Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
     Q_PROPERTY(QString documentPath READ documentPath CONSTANT)
+    /* Editor (M2): stable object model + multi-selection. */
+    Q_PROPERTY(QObject* objectModel READ objectModel CONSTANT)
+    Q_PROPERTY(QVariantList selectedInstances READ selectedInstances NOTIFY selectionChanged)
 
 public:
     explicit SceneBridge(OpenRGBPluginAPIInterface* api, QObject* parent = nullptr);
@@ -101,6 +107,10 @@ public:
     QString         workspaceDir() const;
     QString         documentPath() const;
     bool            hasRecovery() const;
+
+    /* Editor (M2). */
+    QObject*        objectModel() const;
+    QVariantList    selectedInstances() const;
 
     /* Emitter dots for one object: [{x,y,z,c}] — linked objects
        return the owner's emitter layout and colors. */
@@ -158,6 +168,32 @@ public slots:
     void setAudioSensitivityPct(int pct);
     void setRippleDecayPct(int pct);
 
+    /* Milestone 2 — editor gestures and instance ops. Every edit
+       lands on the authoring `workspace`, resolves into `doc`,
+       and pushes ONE undo command on commit. */
+    Q_INVOKABLE void selectInstance(const QString& id, bool additive);
+    Q_INVOKABLE void clearEditorSelection();
+    Q_INVOKABLE void beginTransformGesture();
+    /* plane: 0 free, 1 desk XZ, 2 front XY, 3 side YZ. */
+    Q_INVOKABLE void updateTransformGesture(double dx, double dy, double dz,
+                                            int plane, bool snap);
+    Q_INVOKABLE void updateRotateGesture(double degrees, bool snap);
+    Q_INVOKABLE void updateRotateGestureAxis(double ax, double ay, double az,
+                                             double degrees, bool snap);
+    Q_INVOKABLE void commitTransformGesture();
+    Q_INVOKABLE void cancelTransformGesture();
+    Q_INVOKABLE bool setInstancePosition(const QString& id,
+                                         double x, double y, double z);
+    Q_INVOKABLE bool setInstanceRotation(const QString& id,
+                                         double rx, double ry, double rz);
+    Q_INVOKABLE bool renameInstance(const QString& id, const QString& newId);
+    Q_INVOKABLE void setInstanceVisible(const QString& id, bool on);
+    Q_INVOKABLE void setInstanceLocked(const QString& id, bool on);
+    Q_INVOKABLE void groupSelected();
+    Q_INVOKABLE void ungroupSelected();
+    Q_INVOKABLE void deleteSelected();
+    Q_INVOKABLE void duplicateMirrored();
+
 signals:
     void sceneChanged();
     void emittersChanged(const QString& objectId);
@@ -183,6 +219,7 @@ private:
     friend class SceneColorCommand;
     friend class SceneEmitterCommand;
     friend class SceneBrightnessCommand;
+    friend class SceneEditCommand;
 
     /* Non-undoable core ops used by undo commands and public slots. */
     void applyObjectColor(const std::string& owner_id, SceneColor color);
@@ -220,11 +257,28 @@ private:
     void           ReloadPresets();
     void           markDirty();
 
+    /* Editor plumbing (M2). SyncWorkspace mirrors the runtime
+       overlay (colors/effect/brightness/inputs) into `workspace`
+       so controller edits never lose paint; ResolveWorkspace runs
+       the authoring doc through SceneResolver; AdoptResolved
+       swaps in the resolved scene and refreshes the model,
+       matrix layouts and key lookup; applyEdit is the undo path;
+       commitEdit resolves + adopts + pushes one undo command;
+       previewAdopt is the dirty-free gesture path. */
+    void SyncWorkspace();
+    bool ResolveWorkspace(SceneDocument& out);
+    void AdoptResolved(const SceneDocument& r, const EditorEdit& e);
+    void applyEdit(const EditorEdit& e, bool reverse);
+    void commitEdit(EditorEdit&& e);
+    void previewAdopt(const std::set<std::string>& ids);
+
     OpenRGBPluginAPIInterface*  api;
     ControllerAdapter           adapter;
     SceneDocument               doc;              /* resolved runtime scene  */
     StudioDocument              workspace;        /* compact authoring state */
     PresetRegistry              registry;         /* device-type library     */
+    EditorController            editor;           /* edits `workspace`       */
+    SceneObjectModel*           obj_model = nullptr; /* stable list model    */
     QUndoStack*                 undo_stack;
     ConfigStore*                store = nullptr;
     WorkspaceMeta               meta;             /* prefs + retained sections */

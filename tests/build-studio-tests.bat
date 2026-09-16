@@ -10,6 +10,7 @@ if not exist out mkdir out
 if not exist out\scene mkdir out\scene
 if not exist out\config mkdir out\config
 if not exist out\presets mkdir out\presets
+if not exist out\editor mkdir out\editor
 set STUDIO=%~dp0..\plugins\DesktopLightingStudio
 set JSON=%~dp0..\OpenRGB\dependencies\json
 :: Shared source list — scene core + effects + the v3 type stack
@@ -33,6 +34,10 @@ set V3_SRC=^
    "%STUDIO%\scene\SceneResolver.cpp" ^
    "%STUDIO%\config\StudioConfig.cpp" ^
    "%STUDIO%\config\ConfigMigration.cpp"
+:: Qt-free editor core — SceneObjectModel stays plugin-only (Qt).
+set EDITOR_SRC=^
+   "%STUDIO%\editor\EditorController.cpp" ^
+   "%STUDIO%\editor\TransformCommands.cpp"
 cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    studio_scene_test.cpp ^
    %SCENE_SRC% %V3_SRC% ^
@@ -53,4 +58,11 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    /Fo:out\presets\ /Fe:out\presets\studio_preset_test.exe
 if errorlevel 1 exit /b %errorlevel%
 out\presets\studio_preset_test.exe
+if errorlevel 1 exit /b %errorlevel%
+cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
+   studio_editor_test.cpp ^
+   %SCENE_SRC% %V3_SRC% %EDITOR_SRC% ^
+   /Fo:out\editor\ /Fe:out\editor\studio_editor_test.exe
+if errorlevel 1 exit /b %errorlevel%
+out\editor\studio_editor_test.exe
 exit /b %errorlevel%

@@ -29,6 +29,9 @@ HEADERS += \
     config/StudioConfig.h \
     config/ConfigStore.h \
     config/ConfigMigration.h \
+    editor/EditorController.h \
+    editor/TransformCommands.h \
+    editor/SceneObjectModel.h \
     output/ControllerAdapter.h \
     presets/DevicePreset.h \
     presets/PresetRegistry.h \
@@ -57,6 +60,9 @@ SOURCES += \
     config/StudioConfig.cpp \
     config/ConfigStore.cpp \
     config/ConfigMigration.cpp \
+    editor/EditorController.cpp \
+    editor/TransformCommands.cpp \
+    editor/SceneObjectModel.cpp \
     output/ControllerAdapter.cpp \
     presets/DevicePreset.cpp \
     presets/PresetRegistry.cpp \
