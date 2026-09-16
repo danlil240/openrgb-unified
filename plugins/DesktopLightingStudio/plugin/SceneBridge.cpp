@@ -576,8 +576,42 @@ void SceneBridge::setPaintColor(const QColor& color)
     emit paintColorChanged();
 }
 
-void SceneBridge::undo() { undo_stack->undo(); emit undoChanged(); }
-void SceneBridge::redo() { undo_stack->redo(); emit undoChanged(); }
+void SceneBridge::undo()
+{
+    /* An active gesture's snapshot predates the stack op — cancel
+       it (restores previewed transforms) before applyEdit rewrites
+       the workspace underneath it. */
+    editor.Cancel();
+    undo_stack->undo();
+    PruneSelection();
+    emit undoChanged();
+}
+
+void SceneBridge::redo()
+{
+    editor.Cancel();
+    undo_stack->redo();
+    PruneSelection();
+    emit undoChanged();
+}
+
+void SceneBridge::PruneSelection()
+{
+    /* After edits that add/remove/rename instances (undo of a group
+       or delete, doc swaps), drop selection ids the workspace no
+       longer has so selectedInstances never reports phantoms.
+       SetSelection re-filters through Exists — copy first since it
+       clears the very vector Selection() returns. */
+    const std::vector<std::string> keep = editor.Selection();
+    editor.SetSelection(keep);
+    const QString primary =
+        QString::fromStdString(editor.PrimarySelection());
+    if(selected != primary)
+    {
+        selected = primary;
+        emit selectionChanged();
+    }
+}
 
 void SceneBridge::refreshDevices()
 {
@@ -642,10 +676,22 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
        it against the registry — resolution failure never reaches
        here). */
     setPlaying(false);
+    /* Any live gesture's snapshot belongs to the outgoing document —
+       cancel it (restores preview state into the old workspace)
+       before the swap, then drop the selection: ids in it belong to
+       the old doc. */
+    editor.Cancel();
     workspace = w;
     doc       = w.scene;
     doc.name  = w.meta.name;
     meta      = w.meta;
+
+    editor.ClearSelection();
+    if(!selected.isEmpty())
+    {
+        selected.clear();
+    }
+    emit selectionChanged();
 
     audio_sens_pct   = w.inputs.sens_pct;
     ripple_decay_pct = w.inputs.decay_pct;
@@ -869,8 +915,14 @@ void SceneBridge::commitEdit(EditorEdit&& e)
     if(!ResolveWorkspace(resolved))
     {
         /* The controller already mutated `workspace` — roll the
-           edit back so document and scene stay consistent. */
+           edit back so document and scene stay consistent, then
+           re-adopt so `doc` doesn't keep a stale preview state. */
         RevertEditorEdit(workspace, e);
+        SceneDocument back;
+        if(ResolveWorkspace(back))
+        {
+            AdoptResolved(back, e);
+        }
         return;
     }
     AdoptResolved(resolved, e);
@@ -883,7 +935,13 @@ void SceneBridge::commitEdit(EditorEdit&& e)
 void SceneBridge::previewAdopt(const std::set<std::string>& ids)
 {
     /* Gesture preview: adopt the re-resolved scene and update the
-       touched rows — never markDirty, never an undo record. */
+       touched rows — never markDirty, never an undo record.
+       SyncWorkspace runs first so a runtime-overlay edit made
+       mid-gesture (paint, brightness, effect) survives the
+       re-resolve instead of being silently dropped — it only
+       touches non-devices sections, so previewed transforms are
+       never clobbered. */
+    SyncWorkspace();
     SceneDocument resolved;
     if(!ResolveWorkspace(resolved))
     {
@@ -937,6 +995,12 @@ void SceneBridge::updateTransformGesture(double dx, double dy, double dz,
     {
         return;
     }
+    /* Reject out-of-range plane values instead of silently
+       treating them as Free. */
+    if(plane < (int)EditPlane::Free || plane > (int)EditPlane::SideYZ)
+    {
+        return;
+    }
     editor.PreviewTranslate({ (float)dx, (float)dy, (float)dz },
                             (EditPlane)plane, snap);
     previewAdopt(editor.GestureIds());
@@ -965,6 +1029,14 @@ void SceneBridge::commitTransformGesture()
     {
         return;
     }
+    /* A runtime-overlay edit may have landed since the last
+       preview — sync before Commit so the resolve inside
+       commitEdit sees it. Only non-devices sections are
+       touched, so the gesture's transform diff is unaffected.
+       (commitEdit itself must NOT sync — discrete ops mutate
+       workspace first, and a sync there would clobber e.g.
+       rename-re-keyed color maps with stale doc state.) */
+    SyncWorkspace();
     std::optional<EditorEdit> e = editor.Commit();
     if(e.has_value())
     {
@@ -1020,7 +1092,10 @@ bool SceneBridge::renameInstance(const QString& id, const QString& newId)
         editor.Rename(id.toStdString(), newId.toStdString());
     if(!e.has_value())
     {
-        setStatus(QStringLiteral("rename rejected — check the new id"));
+        const std::string& why = editor.LastError();
+        setStatus(why.empty()
+            ? QStringLiteral("rename rejected — check the new id")
+            : QString::fromStdString(why));
         return false;
     }
     commitEdit(std::move(*e));
@@ -1073,6 +1148,10 @@ void SceneBridge::ungroupSelected()
         selected = QString::fromStdString(editor.PrimarySelection());
         emit selectionChanged();
     }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
+    }
 }
 
 void SceneBridge::deleteSelected()
@@ -1084,6 +1163,10 @@ void SceneBridge::deleteSelected()
         commitEdit(std::move(*e));
         selected = QString::fromStdString(editor.PrimarySelection());
         emit selectionChanged();
+    }
+    else if(!editor.LastError().empty())
+    {
+        setStatus(QString::fromStdString(editor.LastError()));
     }
 }
 
@@ -1215,6 +1298,10 @@ bool SceneBridge::loadScene()
 
 bool SceneBridge::reloadScene()
 {
+    /* Reload intent kills any live gesture — its snapshot belongs to
+       the document about to be replaced (or kept, on failure — the
+       cancel restores it either way). */
+    editor.Cancel();
     if(api == nullptr || store == nullptr)
     {
         return false;
@@ -1224,6 +1311,7 @@ bool SceneBridge::reloadScene()
 
 bool SceneBridge::restoreBackup()
 {
+    editor.Cancel();
     if(store == nullptr || !QFileInfo::exists(store->BackupPath()))
     {
         setStatus(QStringLiteral("no backup yet"));
@@ -1253,6 +1341,7 @@ bool SceneBridge::restoreBackup()
 
 bool SceneBridge::recoverAutosave()
 {
+    editor.Cancel();
     StudioDocument w;
     QString err;
     if(store == nullptr || !store->RecoverAutosave(&w, &err))
@@ -1286,6 +1375,15 @@ void SceneBridge::discardRecovery()
 void SceneBridge::resetScene()
 {
     setPlaying(false);
+    /* Same doc-swap isolation as ApplyWorkspace: cancel the gesture
+       while the old workspace is live, then drop the selection. */
+    editor.Cancel();
+    editor.ClearSelection();
+    if(!selected.isEmpty())
+    {
+        selected.clear();
+    }
+    emit selectionChanged();
     workspace = BuildDefaultWorkspace();
     SceneDocument resolved;
     doc = ResolveScene(workspace, registry, resolved, nullptr)

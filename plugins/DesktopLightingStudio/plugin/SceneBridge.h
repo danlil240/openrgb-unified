@@ -266,6 +266,7 @@ private:
        commitEdit resolves + adopts + pushes one undo command;
        previewAdopt is the dirty-free gesture path. */
     void SyncWorkspace();
+    void PruneSelection();
     bool ResolveWorkspace(SceneDocument& out);
     void AdoptResolved(const SceneDocument& r, const EditorEdit& e);
     void applyEdit(const EditorEdit& e, bool reverse);

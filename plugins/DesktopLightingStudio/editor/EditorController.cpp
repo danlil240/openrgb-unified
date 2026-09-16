@@ -21,11 +21,25 @@ bool SameVec(const Vec3& a, const Vec3& b)
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
-bool SameInstance(const DeviceInstance& a, const DeviceInstance& b)
+/* Gesture-diff comparators. Previews run positions through a rigid
+   round-trip (R^T * (R * p)) and rotations through asin/atan2, so a
+   zero-delta drag on a parented or rotated instance lands a few ULPs
+   off the authored values — exact == would turn a click without drag
+   into a phantom "transform" record. Only the Commit diff uses these;
+   the numeric-edit early-outs keep exact SameVec (typing the same
+   number back really is equal). */
+bool NearVec(const Vec3& a, const Vec3& b, float eps)
+{
+    return std::fabs(a.x - b.x) < eps
+        && std::fabs(a.y - b.y) < eps
+        && std::fabs(a.z - b.z) < eps;
+}
+
+bool NearInstance(const DeviceInstance& a, const DeviceInstance& b)
 {
     return a.type == b.type && a.parent == b.parent
-        && SameVec(a.position, b.position)
-        && SameVec(a.rotation_deg, b.rotation_deg);
+        && NearVec(a.position, b.position, 1e-6f)      /* ~1 um   */
+        && NearVec(a.rotation_deg, b.rotation_deg, 1e-4f);
 }
 
 Vec3 Add(const Vec3& a, const Vec3& b)
@@ -236,6 +250,13 @@ std::set<std::string> EditorController::Movable() const
 \*---------------------------------------------------------*/
 bool EditorController::BeginTransform()
 {
+    /* A second begin while a gesture is live cancels the old one —
+       the snapshot is restored so a mid-drag state can never become
+       the new baseline unrecorded. */
+    if(gesture.active)
+    {
+        Cancel();
+    }
     gesture = Gesture{};
     gesture.movable = Movable();
     if(gesture.movable.empty())
@@ -325,11 +346,18 @@ std::optional<EditorEdit> EditorController::Commit()
     for(const std::string& id : gesture.movable)
     {
         const DeviceInstance& before = gesture.snapshot[id];
-        const DeviceInstance& after  = ws.devices[id];
-        if(!SameInstance(before, after))
+        /* find(), never operator[]: if the document changed under the
+           gesture (doc swap), an absent id must not be resurrected
+           into the record — or inserted into ws.devices at all. */
+        const auto it = ws.devices.find(id);
+        if(it == ws.devices.end())
+        {
+            continue;
+        }
+        if(!NearInstance(before, it->second))
         {
             e.devices.before[id] = before;
-            e.devices.after[id]  = after;
+            e.devices.after[id]  = it->second;
         }
     }
     const size_t n = e.devices.after.size();
@@ -351,7 +379,13 @@ void EditorController::Cancel()
     }
     for(const std::string& id : gesture.movable)
     {
-        ws.devices[id] = gesture.snapshot[id];
+        /* Restore only ids the document still has — after a doc swap
+           the snapshot's old-doc entries must not resurrect. */
+        const auto it = ws.devices.find(id);
+        if(it != ws.devices.end())
+        {
+            it->second = gesture.snapshot[id];
+        }
     }
     gesture = Gesture{};
 }
@@ -416,10 +450,21 @@ EditorController::SetPositionWorld(const std::string& id, const Vec3& pos)
 std::optional<EditorEdit>
 EditorController::Rename(const std::string& id, const std::string& new_id)
 {
+    last_error.clear();
     if(gesture.active || !Exists(id) || new_id == id
        || !IsPresetId(new_id) || Exists(new_id))
     {
         return std::nullopt;
+    }
+    /* Re-keying a child's `parent` field is a reparent — refuse when
+       the instance has a locked child rather than rewriting one. */
+    for(const auto& kv : ws.devices)
+    {
+        if(kv.second.parent == id && IsLocked(kv.first))
+        {
+            last_error = "rename refused: locked child " + kv.first;
+            return std::nullopt;
+        }
     }
     EditorEdit e;
     e.label = "rename " + id + " -> " + new_id;
@@ -572,6 +617,7 @@ EditorController::SetLocked(const std::string& id, bool on)
 std::optional<EditorEdit>
 EditorController::Delete(const std::vector<std::string>& ids)
 {
+    last_error.clear();
     if(gesture.active)
     {
         return std::nullopt;
@@ -604,6 +650,17 @@ EditorController::Delete(const std::vector<std::string>& ids)
                 kill.insert(kv.first);
                 grew = true;
             }
+        }
+    }
+    /* Protective lock semantics: the cascade must never swallow a
+       locked descendant — the whole delete is refused, not silently
+       narrowed. */
+    for(const std::string& id : kill)
+    {
+        if(IsLocked(id))
+        {
+            last_error = "delete refused: locked descendant " + id;
+            return std::nullopt;
         }
     }
 
@@ -729,30 +786,69 @@ EditorController::Group(const std::string& base_id)
     const Vec3 pivot { sum.x / n, sum.y / n, sum.z / n };
     const std::string gid = UniqueId(base_id);
 
+    /* Nest under the common parent: when every movable member shares
+       the same non-empty parent, the group lives there too so a later
+       move of that parent still carries them. Mixed or root-level
+       parents -> the group roots at the world pivot. */
+    std::string common;
+    bool        first = true;
+    for(const std::string& id : mov)
+    {
+        const std::string& p = ws.devices[id].parent;
+        if(first)
+        {
+            common = p;
+            first  = false;
+        }
+        else if(p != common)
+        {
+            common.clear();
+            break;
+        }
+    }
+    Mat4 gpf = Mat4Identity();
+    if(!common.empty())
+    {
+        const auto pw = worlds.find(common);
+        if(pw != worlds.end())
+        {
+            gpf = pw->second;
+        }
+        else
+        {
+            common.clear();    /* dangling parent ref — root the group */
+        }
+    }
+
     EditorEdit e;
     e.label = "group " + std::to_string(mov.size())
             + (mov.size() == 1 ? " instance" : " instances");
 
-    /* The group keeps identity rotation — its local frame is the
-       world frame translated to the pivot, so a child's new local
-       transform is simply its world transform minus the pivot. */
+    /* The group keeps identity rotation in its parent frame; its
+       local position is the world pivot expressed parent-locally. */
     DeviceInstance g;
     g.type     = "group";
-    g.position = pivot;
+    g.parent   = common;
+    g.position = RigidInversePoint(gpf, pivot);
     SnapshotKey(e.devices, ws.devices, gid);
     ws.devices[gid] = g;
     CaptureKey(e.devices, ws.devices, gid);
 
+    /* Group world = parent frame * T(group local). Children are
+       re-expressed in it: pos = Gw^-1 * pw, rot = Gw^-1 * Rw. */
+    Transform gt;
+    gt.position   = g.position;
+    const Mat4 gw   = Mat4Mul(gpf, LocalMatrix(gt));
+    const Mat4 ginv = RigidInverse(gw);
+
     for(const std::string& id : mov)
     {
         SnapshotKey(e.devices, ws.devices, id);
-        DeviceInstance& d   = ws.devices[id];
-        const Mat4      w   = worlds.at(id);
-        const Vec3      wp  = Mat4Translation(w);
-        d.parent            = gid;
-        d.position          = { wp.x - pivot.x, wp.y - pivot.y,
-                                wp.z - pivot.z };
-        d.rotation_deg      = EulerDegFromMat4(RotationOnly(w));
+        DeviceInstance& d = ws.devices[id];
+        const Mat4      w = worlds.at(id);
+        d.parent        = gid;
+        d.position      = RigidInversePoint(gw, Mat4Translation(w));
+        d.rotation_deg  = EulerDegFromMat4(Mat4Mul(ginv, RotationOnly(w)));
         CaptureKey(e.devices, ws.devices, id);
     }
 
@@ -767,6 +863,7 @@ EditorController::Group(const std::string& base_id)
 \*---------------------------------------------------------*/
 std::optional<EditorEdit> EditorController::Ungroup()
 {
+    last_error.clear();
     if(gesture.active)
     {
         return std::nullopt;
@@ -784,6 +881,19 @@ std::optional<EditorEdit> EditorController::Ungroup()
     if(targets.empty())
     {
         return std::nullopt;
+    }
+    /* Reparenting a locked child would defeat the lock — refuse the
+       ungroup entirely. */
+    for(const std::string& gid : targets)
+    {
+        for(const auto& kv : ws.devices)
+        {
+            if(kv.second.parent == gid && IsLocked(kv.first))
+            {
+                last_error = "ungroup refused: locked child " + kv.first;
+                return std::nullopt;
+            }
+        }
     }
     const std::map<std::string, Mat4> worlds = InstanceWorlds();
 

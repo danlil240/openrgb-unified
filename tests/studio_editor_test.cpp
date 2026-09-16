@@ -739,6 +739,319 @@ static void TestAncestorDedup()
     ctl.Cancel();
 }
 
+/*---------------------------------------------------------*\
+||| Gesture lifecycle isolation (review I-1): a live       ||
+||| gesture never lets a stale snapshot corrupt a swapped  ||
+||| document; a second begin cancels the old one; undo-    ||
+||| style external writes mid-gesture can't crash commit.  ||
+|\*---------------------------------------------------------*/
+static void TestGestureLifecycle()
+{
+    using namespace studio;
+
+    /* instance vanishes mid-gesture -> Commit neither resurrects it
+       nor records it */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        ctl.Select("fan1");
+        CHECK(ctl.BeginTransform(), "life: begin on fan1");
+        ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+        w.devices.erase("fan1");              /* doc-swap stand-in */
+        CHECK(!ctl.Commit().has_value(),
+              "life: commit after vanish yields no record");
+        CHECK(w.devices.count("fan1") == 0,
+              "life: commit did not resurrect fan1");
+    }
+
+    /* instance vanishes mid-gesture -> Cancel doesn't re-add it */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        ctl.Select("fan1");
+        CHECK(ctl.BeginTransform(), "life2: begin");
+        ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+        w.devices.erase("fan1");
+        ctl.Cancel();
+        CHECK(w.devices.count("fan1") == 0,
+              "life2: cancel did not resurrect fan1");
+        CHECK(!ctl.GestureActive(), "life2: gesture closed");
+    }
+
+    /* whole-document swap mid-gesture (ApplyWorkspace stand-in):
+       commit produces no record for old-doc ids */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        ctl.Select("fan0");
+        CHECK(ctl.BeginTransform(), "life3: begin");
+        ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+        StudioDocument fresh;
+        fresh.meta.name = "other doc";
+        DeviceInstance solo;
+        solo.type     = "fan-120";
+        solo.position = { 1.0f, 0.0f, 0.0f };
+        fresh.devices["solo"] = solo;
+        w = fresh;                       /* ctl's ws ref stays valid */
+        CHECK(!ctl.Commit().has_value(),
+              "life3: commit after doc swap yields no record");
+        CHECK(w.devices.count("fan0") == 0
+              && w.devices.count("solo") == 1,
+              "life3: swapped doc intact");
+    }
+
+    /* second BeginTransform during a live gesture cancels the old
+       one — the previewed transform is restored, never baked into
+       the new baseline */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        ctl.Select("fan1");
+        CHECK(ctl.BeginTransform(), "life4: first begin");
+        ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+        CHECK(NearVec(w.devices["fan1"].position, { 0.3f, 0.0f, 0.0f }),
+              "life4: preview applied");
+        CHECK(ctl.BeginTransform(),
+              "life4: second begin cancels + starts fresh");
+        CHECK(NearVec(w.devices["fan1"].position, { 0.2f, 0.0f, 0.0f }),
+              "life4: old preview restored before re-snapshot");
+        CHECK(ctl.GestureActive()
+              && ctl.GestureIds().count("fan1") == 1,
+              "life4: new gesture live on fan1");
+        ctl.Cancel();
+    }
+
+    /* undo-style external write mid-gesture (bridge undo() cancels
+       first; here the revert lands, then Cancel restores the
+       gesture's own snapshot — no crash, coherent doc) */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        std::optional<EditorEdit> e1 =
+            ctl.SetPosition("fan1", { 0.5f, 0.0f, 0.0f });
+        CHECK(e1.has_value(), "life5: prior edit recorded");
+        ctl.Select("fan1");
+        CHECK(ctl.BeginTransform(), "life5: begin");
+        ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+        RevertEditorEdit(w, *e1);      /* undo lands mid-gesture */
+        ctl.Cancel();
+        CHECK(NearVec(w.devices["fan1"].position, { 0.5f, 0.0f, 0.0f }),
+              "life5: cancel restores the gesture snapshot");
+        CHECK(!ctl.Commit().has_value(),
+              "life5: nothing left to commit");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Phantom no-op records (review I-3): a zero-delta       ||
+||| preview on a PARENTED instance round-trips through the ||
+||| rotated parent frame — epsilon diff must not commit.   ||
+|\*---------------------------------------------------------*/
+static void TestParentedNoOp()
+{
+    using namespace studio;
+
+    StudioDocument   w = Fixture();
+    EditorController ctl(w);
+
+    ctl.Select("fan0");            /* child of the 30-deg-rotated case */
+    CHECK(ctl.BeginTransform(), "pnoop: begin parented");
+    ctl.PreviewTranslate({ 0.0f, 0.0f, 0.0f }, EditPlane::Free);
+    CHECK(!ctl.Commit().has_value(),
+          "pnoop: zero-delta translate on parented instance is no-op");
+
+    CHECK(ctl.BeginTransform(), "pnoop: begin rotate");
+    ctl.PreviewRotate({ 0.0f, 1.0f, 0.0f }, 0.0f);
+    CHECK(!ctl.Commit().has_value(),
+          "pnoop: zero-degree rotate on parented instance is no-op");
+
+    /* real moves still produce records — epsilon only swallows
+       round-trip noise */
+    CHECK(ctl.BeginTransform(), "pnoop: begin real move");
+    ctl.PreviewTranslate({ 0.001f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+    CHECK(ctl.Commit().has_value(),
+          "pnoop: 1 mm move on parented instance records");
+}
+
+/*---------------------------------------------------------*\
+||| Mid-gesture paint (review I-2): the bridge's preview   ||
+||| path syncs the runtime overlay into the workspace      ||
+||| BEFORE resolving — simulated here in the same order.   ||
+|\*---------------------------------------------------------*/
+static void TestMidGesturePaint()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    SceneDocument doc;
+    CHECK(Resolve(w, reg, doc), "paint: fixture resolves");
+
+    ctl.Select("fan1");
+    CHECK(ctl.BeginTransform(), "paint: begin");
+
+    /* paint lands on the runtime doc mid-gesture (bridge
+       paintEmitter path) */
+    doc.object_colors["fan1/body"] = MakeSceneColor(0x11, 0x22, 0x33);
+
+    /* the next preview's ordering contract: SyncWorkspace copies the
+       overlay into the workspace, then the controller previews,
+       then the workspace re-resolves */
+    w.object_colors = doc.object_colors;            /* SyncWorkspace */
+    ctl.PreviewTranslate({ 0.1f, 0.0f, 0.0f }, EditPlane::DeskXZ);
+    SceneDocument after;
+    CHECK(Resolve(w, reg, after), "paint: preview resolve");
+    CHECK(after.object_colors.count("fan1/body") == 1
+          && after.object_colors["fan1/body"] == MakeSceneColor(0x11, 0x22, 0x33),
+          "paint: mid-gesture paint survives the preview resolve");
+
+    /* without the sync step the stale workspace would drop it —
+       assert the hazard is real, i.e. the sync is what saves it */
+    StudioDocument stale = Fixture();
+    SceneDocument unst;
+    CHECK(Resolve(stale, reg, unst), "paint: stale resolve");
+    CHECK(unst.object_colors.count("fan1/body") == 0,
+          "paint: unsynced workspace drops the paint");
+
+    ctl.Cancel();
+}
+
+/*---------------------------------------------------------*\
+||| Protective lock semantics (review I-4): cascade and    ||
+||| reparent ops refuse when they'd touch a locked node.   ||
+|\*---------------------------------------------------------*/
+static void TestLockedCascade()
+{
+    using namespace studio;
+
+    /* delete whose cascade reaches a locked descendant -> refused */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        w.device_settings["fan2"].locked = true;   /* child of fan0 */
+        CHECK(!ctl.Delete({ "fan0" }).has_value(),
+              "lockc: delete reaching locked child refused");
+        CHECK(!ctl.LastError().empty(),
+              "lockc: refusal carries a reason");
+        CHECK(w.devices.count("fan0") == 1 && w.devices.count("fan2") == 1,
+              "lockc: nothing deleted");
+        /* unlocked descendant cascade still works */
+        w.device_settings["fan2"].locked = false;
+        CHECK(ctl.Delete({ "fan0" }).has_value(),
+              "lockc: unlocked cascade still deletes");
+    }
+
+    /* ungroup with a locked child -> refused */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        ctl.SetSelection({ "fan0", "fan1" });
+        CHECK(ctl.Group().has_value(), "locku: group created");
+        CHECK(ctl.SetLocked("fan1", true).has_value(),
+              "locku: fan1 locked inside the group");
+        CHECK(!ctl.Ungroup().has_value(),
+              "locku: ungroup with locked child refused");
+        CHECK(!ctl.LastError().empty(),
+              "locku: refusal carries a reason");
+        CHECK(w.devices.count("group") == 1
+              && w.devices["fan1"].parent == "group",
+              "locku: group intact");
+        /* unlocking restores the op */
+        CHECK(ctl.SetLocked("fan1", false).has_value(), "locku: unlock");
+        CHECK(ctl.Ungroup().has_value(),
+              "locku: ungroup proceeds once unlocked");
+    }
+
+    /* rename of a parent with a locked child -> refused */
+    {
+        StudioDocument   w = Fixture();
+        EditorController ctl(w);
+        w.device_settings["fan2"].locked = true;
+        CHECK(!ctl.Rename("fan0", "fan0r").has_value(),
+              "lockr: rename with locked child refused");
+        CHECK(!ctl.LastError().empty(),
+              "lockr: refusal carries a reason");
+        CHECK(w.devices.count("fan0") == 1
+              && w.devices["fan2"].parent == "fan0",
+              "lockr: nothing re-keyed");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Group under a common parent (review I-5): members      ||
+||| sharing a non-root parent nest the group there; an     ||
+||| unselected sibling keeps its world placement.          ||
+|\*---------------------------------------------------------*/
+static void TestGroupCommonParent()
+{
+    using namespace studio;
+
+    StudioDocument   w   = Fixture();
+    PresetRegistry   reg = TestRegistry();
+    EditorController ctl(w);
+
+    /* two children of "case": fan0 and fan2 (re-parented here) */
+    w.devices["fan2"].parent = "case";
+
+    SceneDocument before;
+    CHECK(Resolve(w, reg, before), "gcp: resolve before");
+    const auto wm0 = ResolveWorldMatrices(before);
+    const Vec3 fan0_e0 = EmitterWorld(before, wm0, "fan0/body", 0);
+    const Vec3 fan2_e0 = EmitterWorld(before, wm0, "fan2/body", 0);
+    const Vec3 fan1_e0 = EmitterWorld(before, wm0, "fan1/body", 0);
+
+    ctl.SetSelection({ "fan0", "fan2" });
+    std::optional<EditorEdit> e = ctl.Group();
+    CHECK(e.has_value(), "gcp: group produced");
+    CHECK(w.devices["group"].parent == "case",
+          "gcp: group nests under the common parent");
+    CHECK(w.devices["fan0"].parent == "group"
+          && w.devices["fan2"].parent == "group",
+          "gcp: members reparented to the group");
+
+    SceneDocument after;
+    CHECK(Resolve(w, reg, after), "gcp: resolves");
+    const auto wm1 = ResolveWorldMatrices(after);
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan0/body", 0), fan0_e0, 1e-3f),
+          "gcp: fan0 world preserved under nested group");
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan2/body", 0), fan2_e0, 1e-3f),
+          "gcp: fan2 world preserved under nested group");
+    CHECK(NearVec(EmitterWorld(after, wm1, "fan1/body", 0), fan1_e0),
+          "gcp: unselected sibling world unchanged");
+
+    /* moving the common parent carries the nested group */
+    std::optional<EditorEdit> mv =
+        ctl.SetPosition("case", { 0.4f, 0.1f, -0.2f });
+    CHECK(mv.has_value(), "gcp: common parent movable");
+    SceneDocument moved;
+    CHECK(Resolve(w, reg, moved), "gcp: resolve moved");
+    const auto wm2 = ResolveWorldMatrices(moved);
+    CHECK(!NearVec(EmitterWorld(moved, wm2, "fan0/body", 0), fan0_e0, 1e-3f),
+          "gcp: nested group rides the moved parent");
+    RevertEditorEdit(w, *mv);
+
+    /* mixed parents still root the group (unchanged semantics) */
+    StudioDocument   w2 = Fixture();
+    EditorController ctl2(w2);
+    ctl2.SetSelection({ "fan0", "fan1" });   /* case-child + root */
+    std::optional<EditorEdit> e2 = ctl2.Group();
+    CHECK(e2.has_value() && w2.devices["group"].parent.empty(),
+          "gcp: mixed parents root the group");
+
+    /* grouping fan0 keeps its unselected child fan2's world pos */
+    SceneDocument b2;
+    CHECK(Resolve(w2, reg, b2), "gcp: resolve second fixture");
+    const auto wmb = ResolveWorldMatrices(b2);
+    const Vec3 fan2_b = EmitterWorld(b2, wmb, "fan2/body", 0);
+    SceneDocument a2;
+    CHECK(Resolve(w2, reg, a2), "gcp: resolve grouped");
+    const auto wma = ResolveWorldMatrices(a2);
+    CHECK(NearVec(EmitterWorld(a2, wma, "fan2/body", 0), fan2_b, 1e-3f),
+          "gcp: unselected child keeps world placement");
+}
+
 int main()
 {
     TestDragOneRecord();
@@ -752,6 +1065,11 @@ int main()
     TestGroup();
     TestResolutionAndCompactness();
     TestAncestorDedup();
+    TestGestureLifecycle();
+    TestParentedNoOp();
+    TestMidGesturePaint();
+    TestLockedCascade();
+    TestGroupCommonParent();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

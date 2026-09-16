@@ -17,13 +17,22 @@
 ||     internals — type authoring, not placement.         ||
 ||   - Locked instances (device_settings.locked) stay     ||
 ||     selectable for display but are excluded from the   ||
-||     movable set: transform ops, grouping, reparenting  ||
-||     and deletion skip them. Rename/visible/duplicate   ||
-||     do not modify a locked source and stay allowed.    ||
+||     movable set: transform ops and grouping skip them. ||
+||     Locks are protective beyond direct edits: Delete   ||
+||     REFUSES when its descendant cascade would reach a  ||
+||     locked instance; Ungroup refuses when the group    ||
+||     holds a locked child; Rename refuses when the      ||
+||     instance has a locked child (re-keying a child's   ||
+||     parent is a reparent). LastError carries the       ||
+||     refusal reason for the UI status line.             ||
 ||   - A gesture snapshots the movable instances once at  ||
 ||     BeginTransform; previews recompute from that       ||
 ||     snapshot; Commit yields ONE record; Cancel         ||
-||     restores the snapshot with zero records.           ||
+||     restores the snapshot with zero records. A second  ||
+||     BeginTransform while a gesture is live cancels the ||
+||     old one first. Commit/Cancel only touch ids still  ||
+||     present in the document — a mid-gesture doc swap   ||
+||     can never resurrect or corrupt instances.          ||
 ||   - Hierarchy (parent) and output ownership            ||
 ||     (mirror_of) stay separate; DuplicateMirrored only  ||
 ||     ever creates a Linked copy, never a second zone    ||
@@ -69,6 +78,12 @@ public:
     bool Exists(const std::string& id) const;
     bool IsLocked(const std::string& id) const;
     bool IsVisible(const std::string& id) const;
+
+    /* Human-readable reason of the most recent refusal that set one
+       (delete reaching a locked descendant, ungroup/rename touching a
+       locked child, ...). Empty when the last op did not refuse with a
+       message. */
+    const std::string& LastError() const { return last_error; }
 
     /*------------------------------------------------*\
     || Selection — ordered instance ids, back() is the ||
@@ -123,7 +138,10 @@ public:
     std::optional<EditorEdit> DeleteSelected();
     /* New "group"-type instance at the selection's world pivot;
        children keep world placement via parent-local
-       conversion. */
+       conversion. When every member shares the same non-empty
+       parent the group nests under it (so a later move of that
+       parent carries the members); mixed or root-level parents
+       root the group. */
     std::optional<EditorEdit> Group(const std::string& base_id = "group");
     /* Dissolves selected type-"group" instances: children move to
        the group's parent with world placement preserved.
@@ -173,6 +191,7 @@ private:
     StudioDocument&         ws;
     std::vector<std::string> selection;
     Gesture                  gesture;
+    std::string              last_error;
 };
 
 } /* namespace studio */
