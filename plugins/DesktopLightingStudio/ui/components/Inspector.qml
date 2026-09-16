@@ -78,6 +78,18 @@ Rectangle {
         return out
     }
 
+    /* Old color_btn rule: enabled on a live selection whose object
+       isn't decor ("select a light device first" is the C++ fallback
+       for the rest). */
+    function canPickColor() {
+        selStamp
+        var b = br()
+        if (host() === null || !b || (b.selectedId || "") === "")
+            return false
+        var info = b.objectInfo ? b.objectInfo(b.selectedId) : {}
+        return (info.kind || "") !== "decor"
+    }
+
     /* First emitter-bearing/device row — carries the binding. */
     function bindingRow(inst) {
         var rows = rowsOf(inst)
@@ -194,8 +206,9 @@ Rectangle {
                         text: "Color…"
                         height: 24
                         /* The dialog is C++-side (QColorDialog); the
-                           seam is studioHost.uiPickColor(). */
-                        enabled: insp.host() !== null
+                           seam is studioHost.uiPickColor(). Gated on
+                           a non-decor selection like the old bar. */
+                        enabled: insp.canPickColor()
                         onClicked: insp.host().uiPickColor()
                         contentItem: Text {
                             text: colorBtn.text

@@ -14,6 +14,7 @@
 #include <QColor>
 #include <QMutex>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
 
@@ -208,6 +209,12 @@ public slots:
     Q_INVOKABLE void groupSelected();
     Q_INVOKABLE void ungroupSelected();
     Q_INVOKABLE void deleteSelected();
+    /* Instance ids a deleteSelected() would remove — the selected
+       roots plus their cascade children (spec §4: deleting a group
+       shows which children go with it). The device tree lists these
+       in its confirm prompt; deleteSelected() still performs the
+       real locked-descendant refusal. */
+    Q_INVOKABLE QStringList deletePreview() const;
     Q_INVOKABLE void duplicateMirrored();
     /* alignSelected(axis, mode): axis 0=X/1=Y/2=Z; mode 0=min,
        1=center, 2=max. distributeSelected(axis): even spacing,

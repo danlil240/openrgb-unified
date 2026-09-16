@@ -48,7 +48,10 @@ Rectangle {
     function pokeSel() { selStamp++ }
 
     property string search: ""
-    property int rowCount: 0
+    /* Rows currently matching the search — delegates maintain it;
+       gates the "no matches" empty state (the model count never
+       shrinks under filtering). */
+    property int shownCount: 0
 
     Theme { id: th }
 
@@ -69,22 +72,52 @@ Rectangle {
         return b ? b.selectedInstances.length : 0
     }
 
+    /* Spec §4: deleting a group previews the children it takes
+       with it. The bridge computes the exact kill set Delete would
+       use; only a cascade (kill > selection) earns the prompt —
+       plain deletes stay one click, undo is the backstop. */
+    function requestDelete() {
+        if (!hasBr())
+            return
+        var b = br()
+        if (typeof b.deletePreview !== "function") {
+            b.deleteSelected()          /* stub/test path */
+            return
+        }
+        var kill = b.deletePreview()
+        var sel = b.selectedInstances || []
+        if (kill.length <= sel.length) {
+            /* Empty kill set: let deleteSelected run so a locked-
+               selection refusal still surfaces on the status line. */
+            b.deleteSelected()
+            return
+        }
+        delConfirm.selSet = sel.slice()
+        delConfirm.killSet = kill
+        delConfirm.open()
+    }
+
     Connections {
         target: treeRoot.brQObj()
         function onSelectionChanged() { treeRoot.selStamp++ }
         function onSceneChanged()     { treeRoot.selStamp++ }
     }
 
-    /* Compact icon button — text glyphs keep this theme-free. */
+    /* Compact icon button — text glyphs keep this theme-free.
+       `focusable: false` opts per-row copies out of Tab order (the
+       row itself is the stop — a dozen devices would otherwise
+       double the tab chain). */
     component IconBtn: Rectangle {
         property string text: ""
         property bool   active: false
         property string tip: ""
+        property bool   focusable: true
         signal clicked()
         width: 26; height: 22; radius: th.radiusSm
         color: active ? th.accentBg
                       : (hov.containsMouse ? th.panelAlt : th.field)
-        border.color: active ? th.accent : th.borderHi
+        border.color: hov.activeFocus ? th.accent
+                    : (active ? th.accent : th.borderHi)
         Text {
             anchors.centerIn: parent
             text: parent.text
@@ -94,9 +127,13 @@ Rectangle {
         MouseArea {
             id: hov; anchors.fill: parent; hoverEnabled: true
             enabled: parent.enabled
+            activeFocusOnTab: parent.focusable
             onClicked: parent.clicked()
+            Keys.onSpacePressed:  parent.clicked()
+            Keys.onReturnPressed: parent.clicked()
         }
-        ToolTip.visible: hov.containsMouse && tip !== ""
+        ToolTip.visible: (hov.containsMouse || hov.activeFocus)
+                         && tip !== ""
         ToolTip.text: tip
         ToolTip.delay: 500
     }
@@ -135,10 +172,10 @@ Rectangle {
                 onClicked: if (treeRoot.hasBr()) treeRoot.br().duplicateMirrored()
             }
             IconBtn {
-                text: "Del"; tip: "Delete selected"
+                text: "Del"; tip: "Delete selected (groups ask first)"
                 enabled: treeRoot.selCount() >= 1
                 opacity: enabled ? 1 : 0.4
-                onClicked: if (treeRoot.hasBr()) treeRoot.br().deleteSelected()
+                onClicked: treeRoot.requestDelete()
             }
         }
 
@@ -153,6 +190,19 @@ Rectangle {
             font.pixelSize: th.fontBody
             activeFocusOnTab: true
             onTextChanged: treeRoot.search = text
+            /* Escape cancels the FIELD (clear, then drop focus) —
+               swallowing the ShortcutOverride keeps it away from
+               the scene's Escape -> clearEditorSelection. */
+            Keys.onShortcutOverride: function(e) {
+                if (e.key === Qt.Key_Escape)
+                    e.accepted = true
+            }
+            Keys.onEscapePressed: {
+                if (text !== "")
+                    text = ""
+                else
+                    focus = false
+            }
             background: Rectangle {
                 color: th.field; radius: th.radiusSm
                 border.color: searchField.activeFocus ? th.accent : th.borderHi
@@ -212,6 +262,12 @@ Rectangle {
                 property bool shown: matches()
                 height: shown ? 28 : 0
                 visible: shown
+                /* Maintain treeRoot.shownCount — ListView.count never
+                   changes under filtering, so the empty state needs
+                   a shown-row tally. */
+                Component.onCompleted:  if (shown) treeRoot.shownCount++
+                onShownChanged:         treeRoot.shownCount += shown ? 1 : -1
+                Component.onDestruction: if (shown) treeRoot.shownCount--
                 radius: th.radiusSm
                 color: sel ? th.selRow : (rowMouse.containsMouse ? th.panelAlt
                                                            : "transparent")
@@ -229,9 +285,12 @@ Rectangle {
                     id: rowMouse
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton
+                    activeFocusOnTab: true   /* rows are tab stops */
                     onClicked: function(m) {
                         row.activate(m.modifiers)
                     }
+                    Keys.onSpacePressed:  row.activate(0)
+                    Keys.onReturnPressed: row.activate(0)
                     onDoubleClicked: function(m) {
                         /* Inline rename on root rows only — ids map
                            1:1 to instance ids there. */
@@ -266,6 +325,17 @@ Rectangle {
                         text: row.rowInst
                         color: th.text; font.pixelSize: th.fontBody
                         selectByMouse: true
+                        /* Escape cancels the RENAME — swallow the
+                           ShortcutOverride so the scene's Escape ->
+                           clearEditorSelection can't fire through. */
+                        Keys.onShortcutOverride: function(e) {
+                            if (e.key === Qt.Key_Escape)
+                                e.accepted = true
+                        }
+                        Keys.onEscapePressed: {
+                            row.renaming = false
+                            renameEdit.focus = false
+                        }
                         onAccepted: {
                             if (treeRoot.hasBr() && text !== row.rowInst)
                                 treeRoot.br().renameInstance(row.rowInst, text)
@@ -299,6 +369,7 @@ Rectangle {
                         id: eyeBtn
                         text: row.rowVis ? "●" : "○"
                         tip: row.rowVis ? "Hide instance" : "Show instance"
+                        focusable: false   /* the row owns the tab stop */
                         onClicked: if (treeRoot.hasBr())
                             treeRoot.br().setInstanceVisible(row.rowInst,
                                                              !row.rowVis)
@@ -308,6 +379,7 @@ Rectangle {
                         text: "L"
                         active: row.rowLock
                         tip: row.rowLock ? "Unlock instance" : "Lock instance"
+                        focusable: false
                         onClicked: if (treeRoot.hasBr())
                             treeRoot.br().setInstanceLocked(row.rowInst,
                                                             !row.rowLock)
@@ -317,9 +389,11 @@ Rectangle {
         }
 
         /* Empty state + first-run guidance (spec §3): choose a
-           layout → match devices → arrange → choose a look. */
+           layout → match devices → arrange → choose a look. Gated
+           on shownCount — filtering collapses rows without changing
+           the model count, so a no-match search lands here too. */
         Column {
-            visible: treeList.count === 0
+            visible: treeRoot.shownCount === 0
             width: parent.width
             spacing: th.spHalf
             Text {
@@ -335,6 +409,105 @@ Rectangle {
                 text: "Getting started: choose a desk layout → " +
                       "match devices → arrange them → pick a look below."
                 color: th.textFaint; font.pixelSize: th.fontSmall
+            }
+        }
+    }
+
+    /* Spec §4 delete preview — when the selection's kill set is
+       larger than the selection itself (group cascade), list the
+       children before committing. Undo remains the backstop. */
+    Popup {
+        id: delConfirm
+        property var killSet: []
+        property var selSet:  []
+        /* killSet minus selSet = the children that ride along. */
+        property var childIds: {
+            var out = []
+            for (var i = 0; i < killSet.length; i++)
+                if (selSet.indexOf(killSet[i]) < 0)
+                    out.push(killSet[i])
+            return out
+        }
+
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        x: Math.round((treeRoot.width - width) / 2)
+        y: Math.round((treeRoot.height - implicitHeight) / 2)
+        padding: th.sp2
+        background: Rectangle {
+            color: th.panel; radius: th.radius
+            border.color: th.borderHi
+        }
+        onOpened: delYesBtn.ma.forceActiveFocus()
+
+        component DlgBtn: Rectangle {
+            property string text: ""
+            property bool   danger: false
+            /* The focusable surface — the popup primes it. */
+            property alias  ma: dma
+            signal clicked()
+            width: 64; height: 24; radius: th.radiusSm
+            color: danger ? (dma.containsMouse ? th.accentBg : th.field)
+                          : (dma.containsMouse ? th.panelAlt : th.field)
+            border.color: dma.activeFocus ? th.accent : th.borderHi
+            Text {
+                anchors.centerIn: parent
+                text: parent.text
+                color: parent.enabled ? th.text : th.textFaint
+                font.pixelSize: th.fontBody
+            }
+            MouseArea {
+                id: dma; anchors.fill: parent; hoverEnabled: true
+                activeFocusOnTab: true
+                onClicked: parent.clicked()
+                Keys.onSpacePressed:  parent.clicked()
+                Keys.onReturnPressed: parent.clicked()
+            }
+        }
+
+        contentItem: Column {
+            spacing: th.sp
+            Text {
+                text: delConfirm.selSet.length <= 1
+                      ? "Delete '" + (delConfirm.selSet[0] || "") + "' + "
+                        + delConfirm.childIds.length + " "
+                        + (delConfirm.childIds.length === 1
+                           ? "child" : "children") + "?"
+                      : "Delete " + delConfirm.selSet.length
+                        + " instances + " + delConfirm.childIds.length
+                        + " children?"
+                color: th.text; font.pixelSize: th.fontBody
+                font.bold: true
+            }
+            Text {
+                /* The kill set — ids beyond the selection itself. */
+                property int max: 8
+                width: 260
+                wrapMode: Text.WrapAnywhere
+                text: delConfirm.childIds.slice(0, max).join(", ")
+                      + (delConfirm.childIds.length > max
+                         ? "  +" + (delConfirm.childIds.length - max)
+                           + " more" : "")
+                color: th.textDim; font.pixelSize: th.fontSmall
+            }
+            Row {
+                spacing: th.sp
+                layoutDirection: Qt.RightToLeft
+                anchors.right: parent.right
+                DlgBtn {
+                    id: delYesBtn
+                    text: "Delete"; danger: true
+                    onClicked: {
+                        delConfirm.close()
+                        if (treeRoot.hasBr())
+                            treeRoot.br().deleteSelected()
+                    }
+                }
+                DlgBtn {
+                    text: "Cancel"
+                    onClicked: delConfirm.close()
+                }
             }
         }
     }

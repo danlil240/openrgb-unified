@@ -92,7 +92,8 @@ Rectangle {
         function onLiveChanged()      { ws.stamp++; liveChk.sync() }
         function onCaseGhostChanged() { ws.stamp++; ghostChk.sync() }
         function onStatusChanged()    { ws.stamp++ }
-        function onStatusMessage(t)   { ws.logLine(t) }
+        /* statusMessage is NOT logged here — StudioTab relays it
+           through AppendResult -> diagnosticsLine (one log path). */
     }
     Connections {
         target: ws.hostQObj()
@@ -207,6 +208,9 @@ Rectangle {
         id: header
         x: 0; y: 0; width: ws.width; height: ws.hdrH
         color: th.panel
+        /* Below ~900 px the left/right rows can collide — clip any
+           spill rather than overlapping paint. */
+        clip: true
         Rectangle { anchors.bottom: parent.bottom; width: parent.width
                     height: 1; color: th.border }
 
@@ -319,17 +323,25 @@ Rectangle {
 
             Item { width: th.sp; height: 1 }
 
-            /* Selection readout (the old scene-bar label). */
+            /* Selection readout (the old scene-bar label — prefers
+               the object's display label over the raw id). */
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 width: Math.min(implicitWidth, 180)
                 elide: Text.ElideRight
+                /* Below ~900 px the header clusters collide — this
+                   readout is the first thing to give way. */
+                visible: ws.width > 900
                 text: {
                     ws.stamp
                     var b = ws.br()
-                    return (b && b.selectedId !== "")
-                           ? "selected: " + b.selectedId
-                           : ""
+                    if (!b)
+                        return ""
+                    if ((b.selectedId || "") === "")
+                        return "(nothing selected)"
+                    var info = b.objectInfo ? b.objectInfo(b.selectedId)
+                                            : {}
+                    return "selected: " + (info.label || b.selectedId)
                 }
                 color: th.textDim; font.pixelSize: th.fontSmall
             }
@@ -526,12 +538,21 @@ Rectangle {
                     function refresh() {
                         model = ws.hasHost()
                               ? ws.host().diagControllers() : []
+                        refreshZones()
                     }
-                    onActivated: function(i) {
-                        zoneBox.model = ws.hasHost()
+                    /* Zones follow the CURRENT controller — on
+                       activation, on model-driven index resets, and
+                       on Refresh (empty-model currentValue is
+                       undefined -> zones clear instead of going
+                       stale). */
+                    function refreshZones() {
+                        zoneBox.model = (ws.hasHost()
+                                && ctrlBox.currentValue !== undefined)
                             ? ws.host().diagZones(ctrlBox.currentValue)
                             : []
                     }
+                    onActivated: refreshZones()
+                    onCurrentIndexChanged: refreshZones()
                     contentItem: Text {
                         text: ctrlBox.displayText
                         color: th.text; font.pixelSize: th.fontSmall
@@ -576,13 +597,25 @@ Rectangle {
                 HBtn {
                     text: "Flash 4s"; w: 70
                     enabled: ws.hasHost()
-                    onClicked: ws.host().diagFlash(ctrlBox.currentValue,
-                                                   zoneBox.currentValue)
+                    /* Empty-model currentValue is undefined — marshal
+                       nothing rather than a phantom 0 that could flash
+                       zone 0 of the wrong controller. */
+                    onClicked: {
+                        if (ctrlBox.currentValue === undefined
+                            || zoneBox.currentValue === undefined)
+                            return
+                        ws.host().diagFlash(ctrlBox.currentValue,
+                                            zoneBox.currentValue)
+                    }
                 }
                 HBtn {
                     text: "Latency"; w: 62
                     enabled: ws.hasHost()
-                    onClicked: ws.host().diagMeasure()
+                    onClicked: {
+                        if (ctrlBox.count === 0)
+                            return
+                        ws.host().diagMeasure()
+                    }
                 }
                 HBtn {
                     text: "Bindings"; w: 66

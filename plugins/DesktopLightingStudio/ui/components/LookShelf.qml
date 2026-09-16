@@ -68,8 +68,12 @@ Rectangle {
     /* Dark slider — groove + handle, explicit focus ring. */
     component CSlider: Slider {
         property int w: 110
+        property string tip: ""
         implicitWidth: w; implicitHeight: 22
         function sync() {}
+        ToolTip.visible: hovered && tip !== ""
+        ToolTip.text: tip
+        ToolTip.delay: 500
         background: Rectangle {
             x: parent.leftPadding
             y: parent.topPadding + parent.availableHeight / 2 - 2
@@ -108,6 +112,7 @@ Rectangle {
         property string text: ""
         property bool active: false
         property int w: 56
+        property string tip: ""
         signal clicked()
         width: w; height: 26; radius: th.radiusSm
         color: active ? th.accentBg
@@ -129,11 +134,15 @@ Rectangle {
             Keys.onSpacePressed:  parent.clicked()
             Keys.onReturnPressed: parent.clicked()
         }
+        ToolTip.visible: btnMa.containsMouse && tip !== ""
+        ToolTip.text: tip
+        ToolTip.delay: 500
     }
 
     component SCheck: Rectangle {
         property string text: ""
         property bool value: false
+        property string tip: ""
         signal toggled(bool on)
         function sync() {}
         width: row.width + 8; height: 26; radius: th.radiusSm
@@ -166,6 +175,9 @@ Rectangle {
             Keys.onSpacePressed:  { value = !value; toggled(value) }
             Keys.onReturnPressed: { value = !value; toggled(value) }
         }
+        ToolTip.visible: chkMa.containsMouse && tip !== ""
+        ToolTip.text: tip
+        ToolTip.delay: 500
     }
 
     Column {
@@ -229,6 +241,12 @@ Rectangle {
                         id: cardHov; anchors.fill: parent; hoverEnabled: true
                         onClicked: card.activate()
                     }
+                    /* The old cards carried the preset's description
+                       as a tooltip — restored (was dropped in 3.1). */
+                    ToolTip.visible: cardHov.containsMouse
+                                     && (card.modelData.description || "") !== ""
+                    ToolTip.text: card.modelData.description || ""
+                    ToolTip.delay: 500
                 }
             }
 
@@ -261,6 +279,7 @@ Rectangle {
             }
             SButton {
                 text: "Remix"; w: 56
+                tip: "Re-roll this preset's random choices (seeded, reproducible)"
                 enabled: {
                     shelf.fxStamp
                     return shelf.hasBr() && shelf.br().activePreset !== ""
@@ -349,6 +368,7 @@ Rectangle {
             SCheck {
                 id: audioChk
                 text: "Audio"
+                tip: "WASAPI loopback on the default output — onsets drive shockwave rings"
                 anchors.verticalCenter: parent.verticalCenter
                 onToggled: function(on) {
                     if (shelf.hasBr()) shelf.br().setAudioInput(on)
@@ -378,6 +398,7 @@ Rectangle {
             SCheck {
                 id: keyChk
                 text: "Keys"
+                tip: "Low-level keyboard hook — key presses spawn ripples at the mapped key"
                 anchors.verticalCenter: parent.verticalCenter
                 onToggled: function(on) {
                     if (shelf.hasBr()) shelf.br().setKeyInput(on)
@@ -389,6 +410,7 @@ Rectangle {
             SCheck {
                 id: screenChk
                 text: "Screen"
+                tip: "Sample the display — ambient colors wash over the setup"
                 anchors.verticalCenter: parent.verticalCenter
                 onToggled: function(on) {
                     if (shelf.hasBr()) shelf.br().setScreenInput(on)
@@ -408,8 +430,14 @@ Rectangle {
                     if (shelf.hasBr()) shelf.br().setScreenIndex(i)
                 }
                 function sync() {
-                    if (shelf.hasBr())
-                        currentIndex = shelf.br().screenIndex()
+                    if (!shelf.hasBr())
+                        return
+                    /* Saved index can exceed the display count after
+                       a monitor unplug — the old combo guarded the
+                       same assignment. */
+                    var i = shelf.br().screenIndex()
+                    if (i >= 0 && i < count)
+                        currentIndex = i
                 }
                 contentItem: Text {
                     text: screenBox.displayText
@@ -430,6 +458,7 @@ Rectangle {
             CSlider {
                 id: decaySl
                 from: 50; to: 300; w: 80
+                tip: "Ripple ring lifetime — higher decays faster"
                 anchors.verticalCenter: parent.verticalCenter
                 onMoved: {
                     decayPct.pct = Math.round(value)

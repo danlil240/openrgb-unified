@@ -10,6 +10,7 @@
 ||   the bridge slots — one undo record per commit.       ||
 \*---------------------------------------------------------*/
 import QtQuick
+import "../components" as C
 
 Rectangle {
     id: inspector
@@ -50,11 +51,15 @@ Rectangle {
     property bool   instLocked: false
     property bool   instVisible: true
 
+    /* Workspace tokens — the docked Inspector shares Theme.qml;
+       the standalone overlay keeps the same palette. */
+    C.Theme { id: th }
+
     width: 296
     height: col.implicitHeight + 16
-    color: "#e018181e"
-    radius: 6
-    border.color: "#34343e"
+    color: Qt.rgba(th.panel.r, th.panel.g, th.panel.b, 0.88)
+    radius: th.radiusSm
+    border.color: th.borderHi
 
     function reload() {
         if (!hasBr()) {
@@ -117,9 +122,12 @@ Rectangle {
         function onSceneChanged()     { inspector.reload() }
     }
     /* Granular transform updates emit only dataChanged — the timer
-       keeps the fields honest after drags/commits. */
+       keeps the fields honest after drags/commits. Runs only while
+       the panel is shown: the workspace hides the scene's overlay
+       copy (overlayInspector: false) and docks its own — polling
+       both would double instanceState traffic for nothing. */
     Timer {
-        interval: 400; running: true; repeat: true
+        interval: 400; running: inspector.visible; repeat: true
         onTriggered: inspector.reload()
     }
     Component.onCompleted: reload()
@@ -131,16 +139,23 @@ Rectangle {
         property int    w: 44
         signal clicked()
         width: w; height: 22; radius: 3
-        color: active ? "#3a5a8c" : (hov.containsMouse ? "#30303a" : "#26262e")
-        border.color: active ? "#6a9ad0" : "#3a3a44"
+        color: active ? th.accentBg
+                      : (hov.containsMouse ? th.panelAlt : th.field)
+        border.color: hov.activeFocus ? th.accent
+                    : (active ? th.accent : th.borderHi)
         Text {
             anchors.centerIn: parent
-            text: parent.text; color: "#d8d8e0"; font.pixelSize: 11
+            text: parent.text
+            color: parent.enabled ? th.text : th.textFaint
+            font.pixelSize: 11
         }
         MouseArea {
             id: hov; anchors.fill: parent; hoverEnabled: true
             enabled: parent.enabled
+            activeFocusOnTab: true
             onClicked: parent.clicked()
+            Keys.onSpacePressed:  parent.clicked()
+            Keys.onReturnPressed: parent.clicked()
         }
     }
 
@@ -173,17 +188,17 @@ Rectangle {
 
         Text {
             x: 0; anchors.verticalCenter: parent.verticalCenter
-            text: nf.label; color: "#9a9aa5"; font.pixelSize: 11
+            text: nf.label; color: th.textDim; font.pixelSize: 11
             width: 18
         }
         Rectangle {
             x: 22; width: nf.width - 78; height: 22
             anchors.verticalCenter: parent.verticalCenter
-            color: "#14141a"; radius: 3; border.color: "#3a3a44"
+            color: th.field; radius: 3; border.color: th.borderHi
             TextInput {
                 id: input
                 anchors.fill: parent; anchors.margins: 3
-                color: "#e8e8ee"; font.pixelSize: 11
+                color: th.text; font.pixelSize: 11
                 text: nf.fmt(nf.value)
                 selectByMouse: true
                 validator: DoubleValidator { locale: "C" }
@@ -231,7 +246,7 @@ Rectangle {
         }
         Text {
             x: nf.width - 52; anchors.verticalCenter: parent.verticalCenter
-            text: nf.suffix; color: "#77777f"; font.pixelSize: 10
+            text: nf.suffix; color: th.textFaint; font.pixelSize: 10
             width: 26
         }
         TBtn {
@@ -271,7 +286,7 @@ Rectangle {
         }
         Row {
             spacing: 4
-            Text { text: "View"; color: "#9a9aa5"; font.pixelSize: 11
+            Text { text: "View"; color: th.textDim; font.pixelSize: 11
                    anchors.verticalCenter: parent.verticalCenter; width: 30 }
             Repeater {
                 model: ["desk", "top", "front", "case", "free"]
@@ -284,13 +299,13 @@ Rectangle {
             }
         }
 
-        Rectangle { width: parent.width; height: 1; color: "#2c2c36" }
+        Rectangle { width: parent.width; height: 1; color: th.border }
 
         Text {
             text: inspector.hasTarget
                   ? inspector.targetId + (inspector.instLocked ? "  (locked)" : "")
                   : "no selection"
-            color: inspector.hasTarget ? "#d8d8e0" : "#77777f"
+            color: inspector.hasTarget ? th.text : th.textFaint
             font.pixelSize: 11
         }
 
@@ -331,12 +346,12 @@ Rectangle {
         RotRow { label: "rZ"; value: inspector.rotZ; axis: 2
                  onCommitted: function(v) { inspector.commitRot(2, v) } }
 
-        Rectangle { width: parent.width; height: 1; color: "#2c2c36" }
+        Rectangle { width: parent.width; height: 1; color: th.border }
 
         /* Plane + snap */
         Row {
             spacing: 4
-            Text { text: "Plane"; color: "#9a9aa5"; font.pixelSize: 11; width: 34
+            Text { text: "Plane"; color: th.textDim; font.pixelSize: 11; width: 34
                    anchors.verticalCenter: parent.verticalCenter }
             Repeater {
                 model: [
@@ -356,7 +371,7 @@ Rectangle {
             spacing: 4
             TBtn { text: "Snap"; w: 44; active: ctl && ctl.snapEnabled
                    onClicked: if (ctl) ctl.snapEnabled = !ctl.snapEnabled }
-            Text { text: "10mm / 15° (Shift)"; color: "#77777f"; font.pixelSize: 10
+            Text { text: "10mm / 15° (Shift)"; color: th.textFaint; font.pixelSize: 10
                    anchors.verticalCenter: parent.verticalCenter }
         }
 
@@ -373,7 +388,7 @@ Rectangle {
                        inspector.br().setInstanceVisible(inspector.targetId,
                                                          !inspector.instVisible) }
             Text { text: "lock = no edit · hide = visual only"
-                   color: "#77777f"; font.pixelSize: 10
+                   color: th.textFaint; font.pixelSize: 10
                    anchors.verticalCenter: parent.verticalCenter }
         }
 
@@ -381,7 +396,7 @@ Rectangle {
         Row {
             spacing: 4
             enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
-            Text { text: "Align"; color: "#9a9aa5"; font.pixelSize: 11; width: 34
+            Text { text: "Align"; color: th.textDim; font.pixelSize: 11; width: 34
                    anchors.verticalCenter: parent.verticalCenter }
             TBtn { text: "X-"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(0, 0) }
             TBtn { text: "X";  w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(0, 1) }
@@ -394,11 +409,11 @@ Rectangle {
         Row {
             spacing: 4
             enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
-            Text { text: "Dist"; color: "#9a9aa5"; font.pixelSize: 11; width: 34
+            Text { text: "Dist"; color: th.textDim; font.pixelSize: 11; width: 34
                    anchors.verticalCenter: parent.verticalCenter }
             TBtn { text: "X"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().distributeSelected(0) }
             TBtn { text: "Z"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().distributeSelected(2) }
-            Text { text: "needs 3+"; color: "#77777f"; font.pixelSize: 10
+            Text { text: "needs 3+"; color: th.textFaint; font.pixelSize: 10
                    anchors.verticalCenter: parent.verticalCenter }
         }
     }

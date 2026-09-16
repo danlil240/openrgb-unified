@@ -773,14 +773,9 @@ EditorController::SetLocked(const std::string& id, bool on)
 || references cleared. Everything needed for revert is    ||
 || stored in the record.                                  ||
 \*---------------------------------------------------------*/
-std::optional<EditorEdit>
-EditorController::Delete(const std::vector<std::string>& ids)
+std::set<std::string>
+EditorController::DeleteCascade(const std::vector<std::string>& ids) const
 {
-    last_error.clear();
-    if(gesture.active)
-    {
-        return std::nullopt;
-    }
     std::set<std::string> kill;
     for(const std::string& id : ids)
     {
@@ -789,22 +784,6 @@ EditorController::Delete(const std::vector<std::string>& ids)
         {
             kill.insert(iid);
         }
-    }
-    if(kill.empty())
-    {
-        /* Nothing survived the filter — report a locked selection
-           instead of silently no-op'ing (all-missing ids stay
-           silent: there was nothing real to delete). */
-        for(const std::string& id : ids)
-        {
-            const std::string iid = InstanceOf(id);
-            if(Exists(iid) && IsLocked(iid))
-            {
-                last_error = "delete refused: selection is locked";
-                break;
-            }
-        }
-        return std::nullopt;
     }
     /* Cascade: descendants ride along so no dangling parent is
        left behind. */
@@ -822,6 +801,34 @@ EditorController::Delete(const std::vector<std::string>& ids)
                 grew = true;
             }
         }
+    }
+    return kill;
+}
+
+std::optional<EditorEdit>
+EditorController::Delete(const std::vector<std::string>& ids)
+{
+    last_error.clear();
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    std::set<std::string> kill = DeleteCascade(ids);
+    if(kill.empty())
+    {
+        /* Nothing survived the filter — report a locked selection
+           instead of silently no-op'ing (all-missing ids stay
+           silent: there was nothing real to delete). */
+        for(const std::string& id : ids)
+        {
+            const std::string iid = InstanceOf(id);
+            if(Exists(iid) && IsLocked(iid))
+            {
+                last_error = "delete refused: selection is locked";
+                break;
+            }
+        }
+        return std::nullopt;
     }
     /* Protective lock semantics: the cascade must never swallow a
        locked descendant — the whole delete is refused, not silently

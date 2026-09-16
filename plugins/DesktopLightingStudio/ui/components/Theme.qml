@@ -31,7 +31,6 @@ QtObject {
     readonly property color warn:      "#c8a037"
     readonly property color ok:        "#58b058"
     readonly property color bad:       "#e06060"
-    readonly property color live:      "#ff6060"
     readonly property color selRow:    "#26303c"
 
     /* --- spacing rhythm (8 px) & corners (8–12 px) --- */
@@ -53,7 +52,6 @@ QtObject {
     readonly property bool reducedMotion:
         (typeof bridge !== "undefined") ? bridge.reducedMotion() : false
     readonly property int dur:     reducedMotion ? 0 : 150
-    readonly property int durFast: reducedMotion ? 0 : 120
 
     /* Status-chip palette is paired with text labels — never
        color alone (spec §3). */

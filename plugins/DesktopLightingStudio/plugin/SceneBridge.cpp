@@ -1220,6 +1220,20 @@ void SceneBridge::deleteSelected()
     }
 }
 
+QStringList SceneBridge::deletePreview() const
+{
+    /* Same kill set DeleteSelected() computes — read-only, so the
+       tree's confirm prompt can list the children before commit. */
+    QStringList out;
+    const std::set<std::string> kill =
+        editor.DeleteCascade(editor.Selection());
+    for(const std::string& id : kill)
+    {
+        out << QString::fromStdString(id);
+    }
+    return out;
+}
+
 void SceneBridge::duplicateMirrored()
 {
     SyncWorkspace();

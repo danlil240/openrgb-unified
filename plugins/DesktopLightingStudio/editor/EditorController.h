@@ -136,6 +136,12 @@ public:
        dangling mirror_of references. Locked ids are skipped. */
     std::optional<EditorEdit> Delete(const std::vector<std::string>& ids);
     std::optional<EditorEdit> DeleteSelected();
+    /* Pure read of Delete's kill set: the ids' root instances
+       (existing + unlocked) plus every descendant that would ride
+       along. The UI lists this before confirming (spec §4); the
+       real Delete still performs its own locked-descendant
+       refusal. */
+    std::set<std::string> DeleteCascade(const std::vector<std::string>& ids) const;
     /* New "group"-type instance at the selection's world pivot;
        children keep world placement via parent-local
        conversion. When every member shares the same non-empty
