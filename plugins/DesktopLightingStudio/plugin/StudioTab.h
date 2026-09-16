@@ -1,26 +1,25 @@
 /*---------------------------------------------------------*\
-|| StudioTab.h                                               |
-||                                                           |
-||   Studio tab widget — hosts a QQuickWidget running the   |
-||   desk scene (Stage 1) plus device-inspection controls   |
-||   kept from the Stage 0 probe for calibration.           |
-||                                                           |
-||   SPDX-License-Identifier: GPL-2.0-or-later               |
-\*---------------------------------------------------------*/
+||| StudioTab.h                                               |
+|||                                                           |
+|||   Studio tab widget — hosts a QQuickWidget running the   |
+|||   unified QML workspace (ui/StudioWorkspace.qml) and     |
+|||   exposes itself to it as the `studioHost` context       |
+|||   property: file dialogs / confirm prompts stay in C++   |
+|||   (QFileDialog/QMessageBox), and the diagnostics drawer  |
+|||   drives the same serialized probe worker as before.     |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
+|\*---------------------------------------------------------*/
 
 #pragma once
 
 #include <QWidget>
+#include <QStringList>
+#include <QVariantList>
 #include <vector>
 
-class QButtonGroup;
-class QCheckBox;
-class QComboBox;
 class QLabel;
-class QPlainTextEdit;
-class QPushButton;
 class QQuickWidget;
-class QSlider;
 class OpenRGBPluginAPIInterface;
 class RGBControllerInterface;
 
@@ -34,16 +33,44 @@ public:
     explicit StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent = nullptr);
 
     /* Called by the plugin on device-list changes — re-resolves
-       scene bindings and refreshes the inspection bar. */
+       scene bindings and refreshes the inspection list. */
     void        OnDevicesChanged();
+
+    /*-----------------------------------------------------*\
+    | QML workspace seam (`studioHost` context property).  |
+    | Every entry delegates to the existing prompt/worker  |
+    | paths — nothing here touches hardware directly on    |
+    | the GUI thread.                                      |
+    \*-----------------------------------------------------*/
+    Q_INVOKABLE void        uiPickColor();
+    Q_INVOKABLE void        uiSave();
+    Q_INVOKABLE void        uiSaveCopyAs();
+    Q_INVOKABLE void        uiReload();
+    Q_INVOKABLE void        uiRestoreBackup();
+    Q_INVOKABLE void        uiReset();
+    Q_INVOKABLE void        uiOpenWorkspaceFolder();
+    Q_INVOKABLE QStringList uiScreenNames() const;
+
+    /* Diagnostics drawer — controller/zone pickers + the probe
+       buttons. diagFlash/diagMeasure run on serialized workers
+       under bridge->pausePushes(), exactly like the old bar. */
+    Q_INVOKABLE QVariantList diagControllers() const;
+    Q_INVOKABLE QVariantList diagZones(int controller) const;
+    Q_INVOKABLE void         diagRefresh();
+    Q_INVOKABLE void         diagFlash(int controller, int zone);
+    Q_INVOKABLE void         diagMeasure();
+
+signals:
+    /* Lines for the QML diagnostics log (replaces results_box). */
+    void diagnosticsLine(const QString& line);
+    /* Controller list changed — the drawer re-queries. */
+    void diagnosticsControllersChanged();
 
 private slots:
     void        AppendResult(const QString& line);
 
 private:
     void        RefreshControllers();
-    void        FlashSelectedZone();
-    void        MeasureWriteLatency();
     void        PickColor();
     /* Workspace file actions — minimal wrappers; the store/bridge
        owns the semantics. */
@@ -58,33 +85,7 @@ private:
 
     studio::SceneBridge*    bridge          = nullptr;
     QQuickWidget*           quick_widget    = nullptr;
-    QComboBox*              controller_combo = nullptr;
-    QComboBox*              zone_combo      = nullptr;
-    QPlainTextEdit*         results_box     = nullptr;
-    QLabel*                 status_label    = nullptr;
-    QLabel*                 selection_label = nullptr;
-    QPushButton*            color_btn       = nullptr;
-    QSlider*                brightness_slider = nullptr;
-    QCheckBox*              live_check      = nullptr;
-    QLabel*                 dirty_label     = nullptr;
-
-    /* Stage 2 — scene cards + playback strip */
-    QButtonGroup*           preset_group    = nullptr;
-    QPushButton*            play_btn        = nullptr;
-    QPushButton*            stop_btn        = nullptr;
-    QPushButton*            remix_btn       = nullptr;
-    QSlider*                speed_slider    = nullptr;
-    QSlider*                intensity_slider = nullptr;
-    QLabel*                 speed_label     = nullptr;
-    QLabel*                 intensity_label = nullptr;
-
-    /* Stage 3 — input sources row */
-    QCheckBox*              audio_check     = nullptr;
-    QCheckBox*              key_check       = nullptr;
-    QCheckBox*              screen_check    = nullptr;
-    QComboBox*              screen_combo    = nullptr;
-    QSlider*                sens_slider     = nullptr;
-    QSlider*                decay_slider    = nullptr;
-    QLabel*                 sens_label      = nullptr;
-    QLabel*                 decay_label     = nullptr;
+    /* Slim strip shown ONLY on QML load failure — with the shell
+       living in QML, an engine error would otherwise be silent. */
+    QLabel*                 error_label     = nullptr;
 };

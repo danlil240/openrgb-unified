@@ -101,9 +101,15 @@ public:
     bool            audioInput()  const { return audio_on; }
     bool            keyInput()    const { return key_on; }
     bool            screenInput() const { return screen_on; }
-    int             screenIndex() const { return screen_index; }
-    int             audioSensitivityPct() const { return audio_sens_pct; }
-    int             rippleDecayPct() const { return ripple_decay_pct; }
+    /* Q_INVOKABLE so the QML workspace shell (LookShelf inputs row)
+       can seed its controls — the setters below are already slots. */
+    Q_INVOKABLE int screenIndex() const { return screen_index; }
+    Q_INVOKABLE int audioSensitivityPct() const { return audio_sens_pct; }
+    Q_INVOKABLE int rippleDecayPct() const { return ripple_decay_pct; }
+
+    /* Workspace ui prefs (meta.ui) — the shell's Theme reads the
+       reduced-motion flag through this. */
+    Q_INVOKABLE bool reducedMotion() const { return meta.ui.reduced_motion; }
 
     /* Workspace persistence (config/ConfigStore). */
     bool            dirty() const;

@@ -17,6 +17,23 @@ Rectangle {
 
     property var ctl: null
     property var cam: null
+    /* Test seam — same pattern as SelectionController: the plugin
+       supplies `bridge` as a context property; qmltestrunner
+       injects a stub via bridgeOverride (the docked workspace
+       Inspector forwards its own). */
+    property var bridgeOverride: null
+    function br() {
+        if (bridgeOverride !== null)
+            return bridgeOverride
+        try { return bridge } catch (e) { return null }
+    }
+    function hasBr() { return br() !== null }
+    /* Connections targets must be real QObjects — qmltestrunner
+       stubs are plain JS values (no objectName property). */
+    function brQObj() {
+        var b = br()
+        return (b !== null && b.objectName !== undefined) ? b : null
+    }
     /* True while any numeric field holds focus — shortcuts that
        aren't text (W/E/F/Home, undo) must not fire then. */
     readonly property bool textFocus: activeField !== null
@@ -40,13 +57,13 @@ Rectangle {
     border.color: "#34343e"
 
     function reload() {
-        if (typeof bridge === "undefined") {
+        if (!hasBr()) {
             targetId = ""; hasTarget = false
             return
         }
-        var ids = bridge.selectedInstances
+        var ids = br().selectedInstances
         targetId = ids.length ? ids[ids.length - 1] : ""
-        var st = targetId ? bridge.instanceState(targetId) : {}
+        var st = targetId ? br().instanceState(targetId) : {}
         hasTarget = targetId !== "" && st.id !== undefined
         if (!hasTarget)
             return
@@ -57,44 +74,44 @@ Rectangle {
     }
 
     function commitPos(axis, mm) {
-        var st = bridge.instanceState(targetId)
+        var st = br().instanceState(targetId)
         if (st.id === undefined)
             return
         var x = st.x, y = st.y, z = st.z
         if (axis === 0)      x = mm / 1000.0
         else if (axis === 1) y = mm / 1000.0
         else                 z = mm / 1000.0
-        bridge.setInstancePosition(targetId, x, y, z)
+        br().setInstancePosition(targetId, x, y, z)
         reload()
     }
 
     function commitRot(axis, deg) {
-        var st = bridge.instanceState(targetId)
+        var st = br().instanceState(targetId)
         if (st.id === undefined)
             return
         var rx = st.rx, ry = st.ry, rz = st.rz
         if (axis === 0)      rx = deg
         else if (axis === 1) ry = deg
         else                 rz = deg
-        bridge.setInstanceRotation(targetId, rx, ry, rz)
+        br().setInstanceRotation(targetId, rx, ry, rz)
         reload()
     }
 
     function stepRot(axis, ddeg) {
-        var st = bridge.instanceState(targetId)
+        var st = br().instanceState(targetId)
         if (st.id === undefined)
             return
         var rx = st.rx, ry = st.ry, rz = st.rz
         if (axis === 0)      rx += ddeg
         else if (axis === 1) ry += ddeg
         else                 rz += ddeg
-        bridge.setInstanceRotation(targetId, rx, ry, rz)
+        br().setInstanceRotation(targetId, rx, ry, rz)
         reload()
     }
     function stepYaw(ddeg) { stepRot(1, ddeg) }
 
     Connections {
-        target: (typeof bridge !== "undefined") ? bridge : null
+        target: inspector.brQObj()
         function onSelectionChanged() { inspector.reload() }
         function onUndoChanged()      { inspector.reload() }
         function onSceneChanged()     { inspector.reload() }
@@ -242,13 +259,15 @@ Rectangle {
                    onClicked: if (ctl) ctl.setTool(2) }
             Item { width: 8; height: 1 }
             TBtn { text: "Undo"; w: 44
-                   opacity: (typeof bridge !== "undefined" && bridge.canUndo) ? 1 : 0.4
-                   onClicked: if (typeof bridge !== "undefined"
-                                  && !bridge.gestureActive()) bridge.undo() }
+                   opacity: (inspector.hasBr() && inspector.br().canUndo) ? 1 : 0.4
+                   onClicked: if (inspector.hasBr()
+                                  && !inspector.br().gestureActive())
+                                  inspector.br().undo() }
             TBtn { text: "Redo"; w: 44
-                   opacity: (typeof bridge !== "undefined" && bridge.canRedo) ? 1 : 0.4
-                   onClicked: if (typeof bridge !== "undefined"
-                                  && !bridge.gestureActive()) bridge.redo() }
+                   opacity: (inspector.hasBr() && inspector.br().canRedo) ? 1 : 0.4
+                   onClicked: if (inspector.hasBr()
+                                  && !inspector.br().gestureActive())
+                                  inspector.br().redo() }
         }
         Row {
             spacing: 4
@@ -346,11 +365,13 @@ Rectangle {
             spacing: 4
             enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
             TBtn { text: "Locked"; w: 52; active: inspector.instLocked
-                   onClicked: if (inspector.hasTarget && typeof bridge !== "undefined")
-                       bridge.setInstanceLocked(inspector.targetId, !inspector.instLocked) }
+                   onClicked: if (inspector.hasTarget && inspector.hasBr())
+                       inspector.br().setInstanceLocked(inspector.targetId,
+                                                        !inspector.instLocked) }
             TBtn { text: "Hidden"; w: 52; active: !inspector.instVisible
-                   onClicked: if (inspector.hasTarget && typeof bridge !== "undefined")
-                       bridge.setInstanceVisible(inspector.targetId, !inspector.instVisible) }
+                   onClicked: if (inspector.hasTarget && inspector.hasBr())
+                       inspector.br().setInstanceVisible(inspector.targetId,
+                                                         !inspector.instVisible) }
             Text { text: "lock = no edit · hide = visual only"
                    color: "#77777f"; font.pixelSize: 10
                    anchors.verticalCenter: parent.verticalCenter }
@@ -362,21 +383,21 @@ Rectangle {
             enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
             Text { text: "Align"; color: "#9a9aa5"; font.pixelSize: 11; width: 34
                    anchors.verticalCenter: parent.verticalCenter }
-            TBtn { text: "X-"; w: 28; onClicked: bridge.alignSelected(0, 0) }
-            TBtn { text: "X";  w: 28; onClicked: bridge.alignSelected(0, 1) }
-            TBtn { text: "X+"; w: 28; onClicked: bridge.alignSelected(0, 2) }
-            TBtn { text: "Z-"; w: 28; onClicked: bridge.alignSelected(2, 0) }
-            TBtn { text: "Z";  w: 28; onClicked: bridge.alignSelected(2, 1) }
-            TBtn { text: "Z+"; w: 28; onClicked: bridge.alignSelected(2, 2) }
-            TBtn { text: "Y";  w: 28; onClicked: bridge.alignSelected(1, 1) }
+            TBtn { text: "X-"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(0, 0) }
+            TBtn { text: "X";  w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(0, 1) }
+            TBtn { text: "X+"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(0, 2) }
+            TBtn { text: "Z-"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(2, 0) }
+            TBtn { text: "Z";  w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(2, 1) }
+            TBtn { text: "Z+"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(2, 2) }
+            TBtn { text: "Y";  w: 28; onClicked: if (inspector.hasBr()) inspector.br().alignSelected(1, 1) }
         }
         Row {
             spacing: 4
             enabled: inspector.hasTarget; opacity: enabled ? 1 : 0.4
             Text { text: "Dist"; color: "#9a9aa5"; font.pixelSize: 11; width: 34
                    anchors.verticalCenter: parent.verticalCenter }
-            TBtn { text: "X"; w: 28; onClicked: bridge.distributeSelected(0) }
-            TBtn { text: "Z"; w: 28; onClicked: bridge.distributeSelected(2) }
+            TBtn { text: "X"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().distributeSelected(0) }
+            TBtn { text: "Z"; w: 28; onClicked: if (inspector.hasBr()) inspector.br().distributeSelected(2) }
             Text { text: "needs 3+"; color: "#77777f"; font.pixelSize: 10
                    anchors.verticalCenter: parent.verticalCenter }
         }

@@ -1,45 +1,40 @@
 /*---------------------------------------------------------*\
-|| StudioTab.cpp                                             |
-||                                                           |
-||   Studio tab widget — hosts a QQuickWidget running the   |
-||   desk scene (Stage 1) plus device-inspection controls   |
-||   kept from the Stage 0 probe for calibration.           |
-||                                                           |
-||   SPDX-License-Identifier: GPL-2.0-or-later               |
-\*---------------------------------------------------------*/
+||| StudioTab.cpp                                             |
+|||                                                           |
+|||   Studio tab widget — hosts a QQuickWidget running the   |
+|||   unified workspace shell (ui/StudioWorkspace.qml, with  |
+|||   ui/StudioScene.qml as its embedded viewport). The old  |
+|||   C++ control bars migrated into QML; what stays here:   |
+|||   the QQuickWidget host, the probe worker, and the       |
+|||   `studioHost` invokable seam for file dialogs /         |
+|||   confirmations (QFileDialog/QMessageBox) plus the       |
+|||   serialized diagnostics probes.                         |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
+|\*---------------------------------------------------------*/
 
 #include "StudioTab.h"
 #include "SceneBridge.h"
 #include "../inputs/ScreenSampler.h"
 
-#include <QAbstractButton>
-#include <QAction>
-#include <QButtonGroup>
-#include <QCheckBox>
 #include <QColorDialog>
-#include <QComboBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QHBoxLayout>
 #include <QLabel>
-#include <QMenu>
 #include <QMessageBox>
-#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlError>
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
-#include <QSignalBlocker>
-#include <QSlider>
 #include <QThread>
-#include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
+#include <QVariantMap>
 
 #include <chrono>
 #include <thread>
@@ -53,9 +48,9 @@
 #endif
 
 /*---------------------------------------------------------*\
-|| Directory containing this plugin DLL. Packaged QML        |
-|| modules are deployed beside it in a "qml" subfolder.      |
-\*---------------------------------------------------------*/
+||| Directory containing this plugin DLL. Packaged QML        |
+||| modules are deployed beside it in a "qml" subfolder.      |
+|\*---------------------------------------------------------*/
 static QString PluginDirectory()
 {
 #ifdef Q_OS_WIN
@@ -104,12 +99,16 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     layout->setSpacing(0);
 
     /*-----------------------------------------------------*\
-    | 3D desk viewport                                      |
+    | Workspace viewport — the QML shell owns all chrome.   |
     \*-----------------------------------------------------*/
     quick_widget = new QQuickWidget(this);
     quick_widget->setResizeMode(QQuickWidget::SizeRootObjectToView);
     quick_widget->setMinimumHeight(320);
     quick_widget->rootContext()->setContextProperty("bridge", bridge);
+    /* Second context object: file dialogs / confirm prompts and
+       the diagnostics probes need native code — the QML shell
+       calls these as `studioHost.*`. */
+    quick_widget->rootContext()->setContextProperty("studioHost", this);
 
     const QString plugin_dir = PluginDirectory();
     if(!plugin_dir.isEmpty())
@@ -117,10 +116,33 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         quick_widget->engine()->addImportPath(plugin_dir + "/qml");
     }
 
-    /* Prefer the loose QML file beside the plugin (editable without a
-       rebuild); fall back to the embedded copy. */
-    const QString file_scene = plugin_dir + "/ui/StudioScene.qml";
-    if(QFileInfo::exists(file_scene))
+    /* Slim error strip — visible ONLY when the QML root fails to
+       load or the scene graph dies; with all chrome in QML an
+       engine error would otherwise leave a silent blank tab. */
+    error_label = new QLabel(this);
+    error_label->setStyleSheet(
+        "QLabel { background: #2a1418; color: #e0a0a0; padding: 4px 8px; }");
+    error_label->setWordWrap(true);
+    error_label->setVisible(false);
+
+    layout->addWidget(quick_widget, 1);
+    layout->addWidget(error_label);
+
+    /* Prefer the loose QML beside the plugin (editable without a
+       rebuild); fall back to the embedded copy, then to the bare
+       scene if the workspace files aren't deployed. */
+    const QString file_workspace = plugin_dir + "/ui/StudioWorkspace.qml";
+    const QString file_scene     = plugin_dir + "/ui/StudioScene.qml";
+    if(QFileInfo::exists(file_workspace))
+    {
+        quick_widget->setSource(QUrl::fromLocalFile(file_workspace));
+    }
+    else if(QFileInfo::exists(QStringLiteral(":/studio/StudioWorkspace.qml")))
+    {
+        quick_widget->setSource(
+            QUrl(QStringLiteral("qrc:/studio/StudioWorkspace.qml")));
+    }
+    else if(QFileInfo::exists(file_scene))
     {
         quick_widget->setSource(QUrl::fromLocalFile(file_scene));
     }
@@ -130,440 +152,17 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     }
 
     /*-----------------------------------------------------*\
-    | Scene control row                                     |
+    | Workspace prompts — detection lives in the store; the |
+    | tab only asks which side wins.                        |
     \*-----------------------------------------------------*/
-    QWidget*     scene_bar  = new QWidget(this);
-    QHBoxLayout* scene_row  = new QHBoxLayout(scene_bar);
-    scene_row->setContentsMargins(8, 4, 8, 4);
-
-    selection_label = new QLabel(QStringLiteral("(nothing selected)"), scene_bar);
-    selection_label->setMinimumWidth(220);
-
-    color_btn = new QPushButton(QStringLiteral("Color…"), scene_bar);
-    color_btn->setEnabled(false);
-
-    brightness_slider = new QSlider(Qt::Horizontal, scene_bar);
-    brightness_slider->setRange(0, 100);
-    brightness_slider->setValue(100);
-    brightness_slider->setMaximumWidth(120);
-
-    live_check = new QCheckBox(QStringLiteral("Live output"), scene_bar);
-    QCheckBox* ghost_check = new QCheckBox(QStringLiteral("Ghost case"), scene_bar);
-
-    /* Workspace file menu — studio.json under the OpenRGB config dir
-       is authoritative; these actions are thin wrappers over the
-       bridge/store. */
-    QToolButton* file_button = new QToolButton(scene_bar);
-    file_button->setText(QStringLiteral("File"));
-    file_button->setPopupMode(QToolButton::InstantPopup);
-    QMenu* file_menu = new QMenu(file_button);
-    QAction* save_copy_action =
-        file_menu->addAction(QStringLiteral("Save Copy As…"));
-    QAction* reload_action =
-        file_menu->addAction(QStringLiteral("Reload studio.json"));
-    file_menu->addSeparator();
-    QAction* open_folder_action =
-        file_menu->addAction(QStringLiteral("Open Config Folder"));
-    QAction* restore_backup_action =
-        file_menu->addAction(QStringLiteral("Restore Backup"));
-    file_button->setMenu(file_menu);
-
-    dirty_label = new QLabel(QStringLiteral("● unsaved changes"), scene_bar);
-    dirty_label->setStyleSheet(QStringLiteral("color: #c8a037;"));
-    dirty_label->setVisible(false);
-
-    QPushButton* undo_btn = new QPushButton(QStringLiteral("Undo"), scene_bar);
-    QPushButton* redo_btn = new QPushButton(QStringLiteral("Redo"), scene_bar);
-    QPushButton* save_btn = new QPushButton(QStringLiteral("Save"), scene_bar);
-    QPushButton* load_btn = new QPushButton(QStringLiteral("Load"), scene_bar);
-    QPushButton* reset_btn = new QPushButton(QStringLiteral("Reset"), scene_bar);
-
-    scene_row->addWidget(file_button);
-    scene_row->addWidget(selection_label);
-    scene_row->addWidget(color_btn);
-    scene_row->addWidget(new QLabel(QStringLiteral("Brightness"), scene_bar));
-    scene_row->addWidget(brightness_slider);
-    scene_row->addWidget(live_check);
-    scene_row->addWidget(ghost_check);
-    scene_row->addStretch(1);
-    scene_row->addWidget(dirty_label);
-    scene_row->addWidget(undo_btn);
-    scene_row->addWidget(redo_btn);
-    scene_row->addWidget(save_btn);
-    scene_row->addWidget(load_btn);
-    scene_row->addWidget(reset_btn);
-
-    /*-----------------------------------------------------*\
-    | Scene strip (Stage 2) — preset cards + playback        |
-    \*-----------------------------------------------------*/
-    QWidget*     fx_bar = new QWidget(this);
-    QHBoxLayout* fx_row = new QHBoxLayout(fx_bar);
-    fx_row->setContentsMargins(8, 4, 8, 4);
-
-    fx_row->addWidget(new QLabel(QStringLiteral("Scene"), fx_bar));
-
-    preset_group = new QButtonGroup(fx_bar);
-    preset_group->setExclusive(true);
-    const QVariantList presets = bridge->presetList();
-    for(int i = 0; i < presets.size(); i++)
-    {
-        const QVariantMap p = presets[i].toMap();
-        QPushButton* card = new QPushButton(p["name"].toString(), fx_bar);
-        card->setCheckable(true);
-        card->setToolTip(p["description"].toString());
-        card->setProperty("preset_id", p["id"]);
-        preset_group->addButton(card, i);
-        fx_row->addWidget(card);
-    }
-
-    play_btn  = new QPushButton(QStringLiteral("Play"), fx_bar);
-    stop_btn  = new QPushButton(QStringLiteral("Stop"), fx_bar);
-    remix_btn = new QPushButton(QStringLiteral("Remix"), fx_bar);
-    remix_btn->setToolTip(QStringLiteral("Re-roll this preset's random choices (seeded, reproducible)"));
-
-    fx_row->addWidget(play_btn);
-    fx_row->addWidget(stop_btn);
-    fx_row->addWidget(remix_btn);
-    fx_row->addStretch(1);
-
-    fx_row->addWidget(new QLabel(QStringLiteral("Speed"), fx_bar));
-    speed_slider = new QSlider(Qt::Horizontal, fx_bar);
-    speed_slider->setRange(10, 400);
-    speed_slider->setValue(100);
-    speed_slider->setMaximumWidth(110);
-    speed_label = new QLabel(QStringLiteral("100%"), fx_bar);
-    speed_label->setMinimumWidth(40);
-    fx_row->addWidget(speed_slider);
-    fx_row->addWidget(speed_label);
-
-    fx_row->addWidget(new QLabel(QStringLiteral("Intensity"), fx_bar));
-    intensity_slider = new QSlider(Qt::Horizontal, fx_bar);
-    intensity_slider->setRange(0, 100);
-    intensity_slider->setValue(100);
-    intensity_slider->setMaximumWidth(110);
-    intensity_label = new QLabel(QStringLiteral("100%"), fx_bar);
-    intensity_label->setMinimumWidth(40);
-    fx_row->addWidget(intensity_slider);
-    fx_row->addWidget(intensity_label);
-
-    /*-----------------------------------------------------*\
-    | Inputs row (Stage 3) — reactive signal sources         |
-    \*-----------------------------------------------------*/
-    QWidget*     inputs_bar = new QWidget(this);
-    QHBoxLayout* inputs_row = new QHBoxLayout(inputs_bar);
-    inputs_row->setContentsMargins(8, 4, 8, 4);
-
-    inputs_row->addWidget(new QLabel(QStringLiteral("Inputs"), inputs_bar));
-
-    audio_check = new QCheckBox(QStringLiteral("Audio"), inputs_bar);
-    audio_check->setToolTip(QStringLiteral(
-        "WASAPI loopback on the default output — onsets drive shockwave rings"));
-    inputs_row->addWidget(audio_check);
-
-    inputs_row->addWidget(new QLabel(QStringLiteral("Sens"), inputs_bar));
-    sens_slider = new QSlider(Qt::Horizontal, inputs_bar);
-    sens_slider->setRange(25, 200);
-    sens_slider->setValue(bridge->audioSensitivityPct());
-    sens_slider->setMaximumWidth(90);
-    sens_label = new QLabel(QStringLiteral("%1%").arg(bridge->audioSensitivityPct()), inputs_bar);
-    sens_label->setMinimumWidth(38);
-    inputs_row->addWidget(sens_slider);
-    inputs_row->addWidget(sens_label);
-
-    key_check = new QCheckBox(QStringLiteral("Keys"), inputs_bar);
-    key_check->setToolTip(QStringLiteral(
-        "Low-level keyboard hook — key presses spawn ripples at the mapped key"));
-    inputs_row->addWidget(key_check);
-
-    screen_check = new QCheckBox(QStringLiteral("Screen"), inputs_bar);
-    screen_check->setToolTip(QStringLiteral(
-        "Sample the display — ambient colors wash over the setup"));
-    inputs_row->addWidget(screen_check);
-
-    screen_combo = new QComboBox(inputs_bar);
-    screen_combo->setMinimumWidth(140);
-    inputs_row->addWidget(screen_combo);
-
-    inputs_row->addStretch(1);
-    inputs_row->addWidget(new QLabel(QStringLiteral("Decay"), inputs_bar));
-    decay_slider = new QSlider(Qt::Horizontal, inputs_bar);
-    decay_slider->setRange(50, 300);
-    decay_slider->setValue(bridge->rippleDecayPct());
-    decay_slider->setMaximumWidth(90);
-    decay_slider->setToolTip(QStringLiteral("Ripple ring lifetime — higher decays faster"));
-    decay_label = new QLabel(QStringLiteral("%1%").arg(bridge->rippleDecayPct()), inputs_bar);
-    decay_label->setMinimumWidth(38);
-    inputs_row->addWidget(decay_slider);
-    inputs_row->addWidget(decay_label);
-
-    /*-----------------------------------------------------*\
-    | Device-inspection bar (Stage 0 measurements)          |
-    \*-----------------------------------------------------*/
-    QWidget*        bar     = new QWidget(this);
-    QHBoxLayout*    bar_row = new QHBoxLayout(bar);
-    bar_row->setContentsMargins(8, 4, 8, 4);
-
-    controller_combo  = new QComboBox(bar);
-    zone_combo        = new QComboBox(bar);
-    QPushButton* refresh_btn = new QPushButton(QStringLiteral("Refresh"), bar);
-    QPushButton* flash_btn   = new QPushButton(QStringLiteral("Flash zone 4s"), bar);
-    QPushButton* measure_btn = new QPushButton(QStringLiteral("Measure write latency"), bar);
-    QPushButton* bindings_btn = new QPushButton(QStringLiteral("Bindings"), bar);
-
-    controller_combo->setMinimumWidth(260);
-    zone_combo->setMinimumWidth(180);
-
-    bar_row->addWidget(controller_combo);
-    bar_row->addWidget(zone_combo);
-    bar_row->addWidget(refresh_btn);
-    bar_row->addWidget(flash_btn);
-    bar_row->addWidget(measure_btn);
-    bar_row->addWidget(bindings_btn);
-    bar_row->addStretch(1);
-
-    results_box = new QPlainTextEdit(this);
-    results_box->setReadOnly(true);
-    results_box->setMaximumHeight(130);
-    results_box->setStyleSheet("QPlainTextEdit { background: #141418; color: #b8b8c2; font-family: Consolas, monospace; }");
-
-    status_label = new QLabel(this);
-    status_label->setStyleSheet("QLabel { background: #18181c; color: #9a9aa5; padding: 4px 8px; }");
-
-    layout->addWidget(quick_widget, 1);
-    layout->addWidget(scene_bar);
-    layout->addWidget(fx_bar);
-    layout->addWidget(inputs_bar);
-    layout->addWidget(bar);
-    layout->addWidget(results_box);
-    layout->addWidget(status_label);
-
-    /*-----------------------------------------------------*\
-    | Scene wiring                                          |
-    \*-----------------------------------------------------*/
-    connect(color_btn, &QPushButton::clicked, this, [this]() { PickColor(); });
-
-    connect(brightness_slider, &QSlider::valueChanged,
-            bridge, &studio::SceneBridge::setBrightnessPct);
-    connect(live_check, &QCheckBox::toggled,
-            bridge, &studio::SceneBridge::setLive);
-    connect(ghost_check, &QCheckBox::toggled,
-            bridge, &studio::SceneBridge::setCaseGhost);
-    connect(undo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::undo);
-    connect(redo_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::redo);
-    connect(save_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::saveScene);
-    connect(load_btn, &QPushButton::clicked, this, [this]() { PromptReload(); });
-    connect(reset_btn, &QPushButton::clicked, this, [this]()
-    {
-        if(ConfirmLoseDirty(QStringLiteral("reset to the default desk")))
-        {
-            bridge->resetScene();
-        }
-    });
-
-    /* File menu — workspace actions. */
-    connect(save_copy_action, &QAction::triggered, this,
-            [this]() { PromptSaveCopy(); });
-    connect(reload_action, &QAction::triggered, this,
-            [this]() { PromptReload(); });
-    connect(open_folder_action, &QAction::triggered, this, [this]()
-    {
-        QString dir = bridge->workspaceDir();
-        if(dir.isEmpty())
-        {
-            AppendResult(QStringLiteral("workspace unavailable"));
-            return;
-        }
-        QDir().mkpath(dir);
-        QDesktopServices::openUrl(
-            QUrl::fromLocalFile(QFileInfo(dir).absoluteFilePath()));
-    });
-    connect(restore_backup_action, &QAction::triggered, this, [this]()
-    {
-        if(ConfirmLoseDirty(QStringLiteral("restore the backup")))
-        {
-            bridge->restoreBackup();
-        }
-    });
-
-    connect(bridge, &studio::SceneBridge::dirtyChanged, this,
-            [this]() { dirty_label->setVisible(bridge->dirty()); });
     connect(bridge, &studio::SceneBridge::externalChangeDetected, this,
             [this](bool dirty) { PromptExternalChange(dirty); });
     connect(bridge, &studio::SceneBridge::recoveryAvailable, this,
             [this]() { PromptRecovery(); });
 
-    /*-----------------------------------------------------*\
-    | Scene strip wiring                                    |
-    \*-----------------------------------------------------*/
-    connect(preset_group, &QButtonGroup::idClicked, this, [this](int id)
-    {
-        const QVariantList presets = bridge->presetList();
-        if(id >= 0 && id < presets.size())
-        {
-            bridge->playPreset(presets[id].toMap()["id"].toString());
-        }
-    });
-
-    connect(play_btn, &QPushButton::clicked, this, [this]()
-    {
-        if(bridge->playing())
-        {
-            bridge->setPlaying(false);
-        }
-        else if(bridge->activePreset().isEmpty())
-        {
-            const QVariantList presets = bridge->presetList();
-            if(!presets.isEmpty())
-            {
-                bridge->playPreset(presets.first().toMap()["id"].toString());
-            }
-        }
-        else
-        {
-            bridge->setPlaying(true);
-        }
-    });
-
-    connect(stop_btn,  &QPushButton::clicked, bridge, &studio::SceneBridge::stopEffect);
-    connect(remix_btn, &QPushButton::clicked, bridge, &studio::SceneBridge::remix);
-
-    connect(speed_slider, &QSlider::valueChanged,
-            bridge, &studio::SceneBridge::setEffectSpeedPct);
-    connect(intensity_slider, &QSlider::valueChanged,
-            bridge, &studio::SceneBridge::setEffectIntensityPct);
-
-    auto sync_fx = [this]()
-    {
-        const QString active = bridge->activePreset();
-        const bool    is_playing = bridge->playing();
-        for(QAbstractButton* card : preset_group->buttons())
-        {
-            card->setChecked(is_playing && card->property("preset_id").toString() == active);
-        }
-        play_btn->setText(is_playing ? QStringLiteral("Pause") : QStringLiteral("Play"));
-        remix_btn->setEnabled(!active.isEmpty());
-
-        /* Sliders: block signals so programmatic sync can't re-enter. */
-        QSignalBlocker block_speed(speed_slider);
-        QSignalBlocker block_intensity(intensity_slider);
-        speed_slider->setValue(bridge->effectSpeedPct());
-        intensity_slider->setValue(bridge->effectIntensityPct());
-        speed_label->setText(QStringLiteral("%1%").arg(bridge->effectSpeedPct()));
-        intensity_label->setText(QStringLiteral("%1%").arg(bridge->effectIntensityPct()));
-    };
-
-    connect(bridge, &studio::SceneBridge::playingChanged,      this, sync_fx);
-    connect(bridge, &studio::SceneBridge::presetChanged,       this, sync_fx);
-    connect(bridge, &studio::SceneBridge::effectParamsChanged, this, sync_fx);
-    sync_fx();
-
-    /*-----------------------------------------------------*\
-    | Inputs row wiring                                     |
-    \*-----------------------------------------------------*/
-    screen_combo->addItems(studio::ScreenSampler::DisplayNames());
-    screen_combo->setCurrentIndex(bridge->screenIndex());
-
-    connect(audio_check, &QCheckBox::toggled,
-            bridge, &studio::SceneBridge::setAudioInput);
-    connect(key_check, &QCheckBox::toggled,
-            bridge, &studio::SceneBridge::setKeyInput);
-    connect(screen_check, &QCheckBox::toggled,
-            bridge, &studio::SceneBridge::setScreenInput);
-    connect(screen_combo, &QComboBox::currentIndexChanged,
-            bridge, &studio::SceneBridge::setScreenIndex);
-    connect(sens_slider, &QSlider::valueChanged,
-            bridge, &studio::SceneBridge::setAudioSensitivityPct);
-    connect(decay_slider, &QSlider::valueChanged,
-            bridge, &studio::SceneBridge::setRippleDecayPct);
-
-    auto sync_inputs = [this]()
-    {
-        QSignalBlocker b_audio(audio_check);
-        QSignalBlocker b_key(key_check);
-        QSignalBlocker b_screen(screen_check);
-        QSignalBlocker b_combo(screen_combo);
-        QSignalBlocker b_sens(sens_slider);
-        QSignalBlocker b_decay(decay_slider);
-        audio_check->setChecked(bridge->audioInput());
-        key_check->setChecked(bridge->keyInput());
-        screen_check->setChecked(bridge->screenInput());
-        if(bridge->screenIndex() < screen_combo->count())
-        {
-            screen_combo->setCurrentIndex(bridge->screenIndex());
-        }
-        sens_slider->setValue(bridge->audioSensitivityPct());
-        decay_slider->setValue(bridge->rippleDecayPct());
-        sens_label->setText(QStringLiteral("%1%").arg(bridge->audioSensitivityPct()));
-        decay_label->setText(QStringLiteral("%1%").arg(bridge->rippleDecayPct()));
-    };
-    connect(bridge, &studio::SceneBridge::inputsChanged, this, sync_inputs);
-    sync_inputs();
-
-    connect(bridge, &studio::SceneBridge::selectionChanged, this, [this]()
-    {
-        const QVariantMap info = bridge->objectInfo(bridge->selectedId());
-        if(info.isEmpty())
-        {
-            selection_label->setText(QStringLiteral("(nothing selected)"));
-            color_btn->setEnabled(false);
-            return;
-        }
-        const bool writable = info.value("writable").toBool();
-        QString note;
-        if(!info.value("bound").toBool())
-        {
-            note = QStringLiteral(" — ") + info.value("reason").toString();
-        }
-        else if(!writable)
-        {
-            note = QStringLiteral(" — unverified, writes off");
-        }
-        selection_label->setText(info.value("label").toString() + note);
-        color_btn->setEnabled(info.value("kind").toString() != "decor");
-    });
-
+    /* Status/hint lines route to the QML diagnostics log. */
     connect(bridge, &studio::SceneBridge::statusMessage,
             this, [this](const QString& line) { AppendResult(line); });
-
-    connect(bridge, &studio::SceneBridge::statusChanged, this, [this]()
-    {
-        status_label->setText(bridge->statusText());
-    });
-
-    /*-----------------------------------------------------*\
-    | Device-inspection wiring                              |
-    \*-----------------------------------------------------*/
-    connect(refresh_btn, &QPushButton::clicked, this, [this]()
-    {
-        RefreshControllers();
-        bridge->refreshDevices();
-    });
-
-    connect(controller_combo, &QComboBox::currentIndexChanged, this, [this](int)
-    {
-        zone_combo->clear();
-        const int idx = controller_combo->currentData().toInt();
-        if(idx < 0 || idx >= (int)controllers.size())
-        {
-            return;
-        }
-        RGBControllerInterface* ctrl = controllers[idx];
-        for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
-        {
-            zone_combo->addItem(QStringLiteral("%0: %1 (%2 LEDs)")
-                                .arg(z)
-                                .arg(QString::fromStdString(ctrl->GetZoneName(z)))
-                                .arg(ctrl->GetZoneLEDsCount(z)),
-                                (int)z);
-        }
-    });
-
-    connect(flash_btn, &QPushButton::clicked, this, [this]() { FlashSelectedZone(); });
-    connect(measure_btn, &QPushButton::clicked, this, [this]() { MeasureWriteLatency(); });
-    connect(bindings_btn, &QPushButton::clicked, this, [this]()
-    {
-        AppendResult(bridge->bindingReport());
-    });
 
     /*-----------------------------------------------------*\
     | QML status reporting                                  |
@@ -574,8 +173,9 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
         {
             QSGRendererInterface* rhi = quick_widget->quickWindow()->rendererInterface();
             const char* api_name = rhi ? GraphicsApiName(rhi->graphicsApi()) : "Unknown";
-            status_label->setText(QStringLiteral("Studio ready - RHI backend: %1 - drag to orbit, scroll to zoom, click a part")
-                                  .arg(QString::fromLatin1(api_name)));
+            error_label->setVisible(false);
+            AppendResult(QStringLiteral("Studio ready - RHI backend: %1")
+                         .arg(QString::fromLatin1(api_name)));
         }
         else if(status == QQuickWidget::Error)
         {
@@ -584,7 +184,8 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
             {
                 lines << error.toString();
             }
-            status_label->setText("QML load failed: " + lines.join(" | "));
+            error_label->setText("QML load failed: " + lines.join(" | "));
+            error_label->setVisible(true);
         }
     };
 
@@ -611,81 +212,135 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
 
 void StudioTab::OnDevicesChanged()
 {
-    /* Only re-resolve bindings — repopulating the inspection bar on
-       every resource signal would wipe the results box. */
+    /* Only re-resolve bindings — repopulating the inspection list on
+       every resource signal would wipe the diagnostics log. */
     bridge->refreshDevices();
 }
 
-void StudioTab::PickColor()
+/*---------------------------------------------------------*\
+||| studioHost seam — workspace file/paint actions.         ||
+|\*---------------------------------------------------------*/
+void StudioTab::uiPickColor()
 {
-    const QColor color = QColorDialog::getColor(Qt::white, this,
-                                                QStringLiteral("Object color"));
-    if(color.isValid())
+    PickColor();
+}
+
+void StudioTab::uiSave()
+{
+    bridge->saveScene();
+}
+
+void StudioTab::uiSaveCopyAs()
+{
+    PromptSaveCopy();
+}
+
+void StudioTab::uiReload()
+{
+    PromptReload();
+}
+
+void StudioTab::uiRestoreBackup()
+{
+    if(ConfirmLoseDirty(QStringLiteral("restore the backup")))
     {
-        bridge->setPaintColor(color);
-        bridge->setSelectedColor(color);
+        bridge->restoreBackup();
     }
 }
 
-void StudioTab::RefreshControllers()
+void StudioTab::uiReset()
 {
-    controllers.clear();
-    controller_combo->clear();
-    zone_combo->clear();
-    results_box->clear();
-
-    if(api == nullptr)
+    if(ConfirmLoseDirty(QStringLiteral("reset to the default desk")))
     {
-        AppendResult(QStringLiteral("plugin API not available"));
+        bridge->resetScene();
+    }
+}
+
+void StudioTab::uiOpenWorkspaceFolder()
+{
+    QString dir = bridge->workspaceDir();
+    if(dir.isEmpty())
+    {
+        AppendResult(QStringLiteral("workspace unavailable"));
         return;
     }
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(
+        QUrl::fromLocalFile(QFileInfo(dir).absoluteFilePath()));
+}
 
-    controllers = api->GetRGBControllers();
-
-    for(size_t i = 0; i < controllers.size(); i++)
-    {
-        RGBControllerInterface* ctrl = controllers[i];
-        controller_combo->addItem(QStringLiteral("[%0] %1 - %2")
-                                  .arg(i)
-                                  .arg(QString::fromStdString(ctrl->GetName()))
-                                  .arg(QString::fromStdString(api->DeviceTypeToString(ctrl->GetDeviceType()))),
-                                  (int)i);
-
-        AppendResult(QStringLiteral("[%0] %1 | type=%2 | zones=%3 | leds=%4 | serial=%5 | loc=%6")
-                     .arg(i)
-                     .arg(QString::fromStdString(ctrl->GetName()))
-                     .arg(QString::fromStdString(api->DeviceTypeToString(ctrl->GetDeviceType())))
-                     .arg(ctrl->GetZoneCount())
-                     .arg(ctrl->GetLEDCount())
-                     .arg(QString::fromStdString(ctrl->GetSerial()))
-                     .arg(QString::fromStdString(ctrl->GetLocation())));
-    }
-
-    if(controllers.empty())
-    {
-        AppendResult(QStringLiteral("no controllers detected - run OpenRGB elevated for full detection"));
-    }
+QStringList StudioTab::uiScreenNames() const
+{
+    return studio::ScreenSampler::DisplayNames();
 }
 
 /*---------------------------------------------------------*\
-|| Flash a low-brightness identification pattern on the      |
-|| selected zone (red/black alternating, ~4 s).              |
-\*---------------------------------------------------------*/
-void StudioTab::FlashSelectedZone()
+||| studioHost seam — diagnostics drawer.                    |
+|||                                                          |
+|||   Controller/zone lists are snapshots the QML combos      |
+|||   display; the probe buttons run the same serialized      |
+|||   worker path the old hardware bar used.                  |
+|\*---------------------------------------------------------*/
+QVariantList StudioTab::diagControllers() const
 {
-    const int ci = controller_combo->currentData().toInt();
-    const int zi = zone_combo->currentData().toInt();
-    if(ci < 0 || zi < 0 || ci >= (int)controllers.size())
+    QVariantList out;
+    for(size_t i = 0; i < controllers.size(); i++)
+    {
+        RGBControllerInterface* ctrl = controllers[i];
+        QVariantMap m;
+        m["index"] = (int)i;
+        m["label"] = QStringLiteral("[%0] %1 - %2")
+                     .arg(i)
+                     .arg(QString::fromStdString(ctrl->GetName()))
+                     .arg(QString::fromStdString(api->DeviceTypeToString(ctrl->GetDeviceType())));
+        out.push_back(m);
+    }
+    return out;
+}
+
+QVariantList StudioTab::diagZones(int controller) const
+{
+    QVariantList out;
+    if(controller < 0 || controller >= (int)controllers.size())
+    {
+        return out;
+    }
+    RGBControllerInterface* ctrl = controllers[controller];
+    for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+    {
+        QVariantMap m;
+        m["index"] = (int)z;
+        m["label"] = QStringLiteral("%0: %1 (%2 LEDs)")
+                     .arg(z)
+                     .arg(QString::fromStdString(ctrl->GetZoneName(z)))
+                     .arg(ctrl->GetZoneLEDsCount(z));
+        out.push_back(m);
+    }
+    return out;
+}
+
+void StudioTab::diagRefresh()
+{
+    RefreshControllers();
+    bridge->refreshDevices();
+}
+
+void StudioTab::diagFlash(int controller, int zone)
+{
+    if(controller < 0 || zone < 0 || controller >= (int)controllers.size())
     {
         return;
     }
+    RGBControllerInterface* ctrl = controllers[controller];
+    if(zone >= (int)ctrl->GetZoneCount())
+    {
+        return;
+    }
+    const int zone_idx = zone;
 
-    RGBControllerInterface* ctrl = controllers[ci];
-    const int zone_idx = zi;
-
-    status_label->setText(QStringLiteral("flashing %1 / %2 ...")
-                          .arg(QString::fromStdString(ctrl->GetName()))
-                          .arg(QString::fromStdString(ctrl->GetZoneName(zone_idx))));
+    AppendResult(QStringLiteral("flashing %1 / %2 ...")
+                 .arg(QString::fromStdString(ctrl->GetName()))
+                 .arg(QString::fromStdString(ctrl->GetZoneName(zone_idx))));
 
     std::thread([this, ctrl, zone_idx]()
     {
@@ -705,28 +360,28 @@ void StudioTab::FlashSelectedZone()
             }
         }
         bridge->resumePushes();
-        QMetaObject::invokeMethod(status_label, "setText", Qt::QueuedConnection,
+        QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
                                   Q_ARG(QString, QStringLiteral("flash done")));
     }).detach();
 }
 
 /*---------------------------------------------------------*\
-|| Measure per-zone UpdateZoneLEDs() wall time on a worker   |
-|| thread; reports avg/max ms and implied max update rate.   |
-|| Zones not already in a per-LED color mode are switched    |
-|| into one for the measurement (mirroring EnsurePerLedMode) |
-|| and the previous mode is restored afterwards. Zones with |
-|| no per-LED mode at all are reported with the active mode. |
-\*---------------------------------------------------------*/
-void StudioTab::MeasureWriteLatency()
+||| Measure per-zone UpdateZoneLEDs() wall time on a worker   |
+||| thread; reports avg/max ms and implied max update rate.   |
+||| Zones not already in a per-LED color mode are switched    |
+||| into one for the measurement (mirroring EnsurePerLedMode) |
+||| and the previous mode is restored afterwards. Zones with  |
+||| no per-LED mode at all are reported with the active mode. |
+|\*---------------------------------------------------------*/
+void StudioTab::diagMeasure()
 {
     if(api == nullptr || controllers.empty())
     {
+        AppendResult(QStringLiteral("no controllers detected - run OpenRGB elevated for full detection"));
         return;
     }
 
-    status_label->setText(QStringLiteral("measuring write latency..."));
-    results_box->clear();
+    AppendResult(QStringLiteral("measuring write latency..."));
 
     auto snapshot = controllers;
     QThread* worker = QThread::create([this, snapshot]()
@@ -914,25 +569,72 @@ void StudioTab::MeasureWriteLatency()
             }
         }
         bridge->resumePushes();
-        QMetaObject::invokeMethod(status_label, "setText", Qt::QueuedConnection,
+        QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
                                   Q_ARG(QString, QStringLiteral("measurement complete")));
     });
     connect(worker, &QThread::finished, worker, &QThread::deleteLater);
     worker->start();
 }
 
+void StudioTab::PickColor()
+{
+    const QColor color = QColorDialog::getColor(
+        bridge->paintColor(), this, QStringLiteral("Object color"));
+    if(color.isValid())
+    {
+        bridge->setPaintColor(color);
+        bridge->setSelectedColor(color);
+    }
+}
+
+void StudioTab::RefreshControllers()
+{
+    controllers.clear();
+
+    if(api == nullptr)
+    {
+        AppendResult(QStringLiteral("plugin API not available"));
+        emit diagnosticsControllersChanged();
+        return;
+    }
+
+    controllers = api->GetRGBControllers();
+
+    for(size_t i = 0; i < controllers.size(); i++)
+    {
+        RGBControllerInterface* ctrl = controllers[i];
+        AppendResult(QStringLiteral("[%0] %1 | type=%2 | zones=%3 | leds=%4 | serial=%5 | loc=%6")
+                     .arg(i)
+                     .arg(QString::fromStdString(ctrl->GetName()))
+                     .arg(QString::fromStdString(api->DeviceTypeToString(ctrl->GetDeviceType())))
+                     .arg(ctrl->GetZoneCount())
+                     .arg(ctrl->GetLEDCount())
+                     .arg(QString::fromStdString(ctrl->GetSerial()))
+                     .arg(QString::fromStdString(ctrl->GetLocation())));
+    }
+
+    if(controllers.empty())
+    {
+        AppendResult(QStringLiteral("no controllers detected - run OpenRGB elevated for full detection"));
+    }
+    emit diagnosticsControllersChanged();
+}
+
 void StudioTab::AppendResult(const QString& line)
 {
-    results_box->appendPlainText(line);
+    /* Was the C++ results box — now the QML diagnostics log;
+       qInfo keeps the lines reachable even if QML is down. */
+    emit diagnosticsLine(line);
+    qInfo("DesktopLightingStudio: %s", qPrintable(line));
 }
 
 /*---------------------------------------------------------*\
-| Workspace file actions.                                   |
-|                                                           |
-| The dialogs are the thin edge of the conflict model:      |
-| the store detects, the bridge applies, this tab only      |
-| asks the user which side wins.                            |
-\*---------------------------------------------------------*/
+|| Workspace file actions.                                   |
+||                                                           |
+|| The dialogs are the thin edge of the conflict model:      |
+|| the store detects, the bridge applies, this tab only      |
+|| asks the user which side wins.                            |
+|\*---------------------------------------------------------*/
 bool StudioTab::ConfirmLoseDirty(const QString& action)
 {
     if(!bridge->dirty())

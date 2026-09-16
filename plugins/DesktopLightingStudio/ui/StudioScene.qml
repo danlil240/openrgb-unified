@@ -30,6 +30,21 @@ Rectangle {
     color: "#101014"
     focus: true
 
+    /* Workspace-shell seams (Studio Next task 3.1). Loaded inside
+       StudioWorkspace.qml the scene is the viewport: the shell
+       docks its own inspector, so the floating overlay hides and
+       `focusPeer` points at the docked panel — its text fields
+       must gate shortcuts exactly like the overlay's do. Defaults
+       keep this file standalone: tests/editor_qml loads it bare. */
+    property bool overlayInspector: true
+    property var focusPeer: null
+    readonly property var editorCtl: selCtl
+    readonly property var editorCam: camCtl
+    function editingText() {
+        return inspector.textFocus
+               || (focusPeer && focusPeer.textFocus)
+    }
+
     // Diagnostic state readable from the probe / debug overlays.
     property string dbg: ""
     property real camYaw: cameraOrigin.eulerRotation.y
@@ -121,7 +136,7 @@ Rectangle {
         /* Escape priority: live gesture > text focus > selection. */
         if (selCtl.cancel())
             return
-        if (inspector.textFocus) {
+        if (root.editingText()) {
             forceActiveFocus()
             return
         }
@@ -495,6 +510,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 10
+        visible: root.overlayInspector
         ctl: selCtl
         cam: camCtl
     }
@@ -548,23 +564,23 @@ Rectangle {
         }
     }
 
-    Shortcut { sequence: "W";    enabled: !inspector.textFocus
+    Shortcut { sequence: "W";    enabled: !root.editingText()
                onActivated: selCtl.setTool(0) }
-    Shortcut { sequence: "E";    enabled: !inspector.textFocus
+    Shortcut { sequence: "E";    enabled: !root.editingText()
                onActivated: selCtl.setTool(1) }
-    Shortcut { sequence: "P";    enabled: !inspector.textFocus
+    Shortcut { sequence: "P";    enabled: !root.editingText()
                onActivated: selCtl.setTool(2) }
     /* Frame commands emit poseFinished under a live gesture's camera
        snapshot — gate them on the press window the same way. */
-    Shortcut { sequence: "F";    enabled: !inspector.textFocus
+    Shortcut { sequence: "F";    enabled: !root.editingText()
                onActivated: if (!root.gestureBusy()) selCtl.frameSelection() }
-    Shortcut { sequence: "Home"; enabled: !inspector.textFocus
+    Shortcut { sequence: "Home"; enabled: !root.editingText()
                onActivated: if (!root.gestureBusy()) selCtl.frameAll() }
-    Shortcut { sequence: "Ctrl+Z"; enabled: !inspector.textFocus
+    Shortcut { sequence: "Ctrl+Z"; enabled: !root.editingText()
                onActivated: root.undoOrRedo(false) }
-    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !inspector.textFocus
+    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !root.editingText()
                onActivated: root.undoOrRedo(true) }
-    Shortcut { sequence: "Ctrl+Y"; enabled: !inspector.textFocus
+    Shortcut { sequence: "Ctrl+Y"; enabled: !root.editingText()
                onActivated: root.undoOrRedo(true) }
     Shortcut { sequence: "Escape"
                onActivated: root.escapeAll() }

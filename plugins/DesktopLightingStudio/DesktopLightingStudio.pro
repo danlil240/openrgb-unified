@@ -89,6 +89,11 @@ RESOURCES += \
 DISTFILES += \
     plugin/metadata.json \
     ui/StudioScene.qml \
+    ui/StudioWorkspace.qml \
+    ui/components/Theme.qml \
+    ui/components/DeviceTree.qml \
+    ui/components/Inspector.qml \
+    ui/components/LookShelf.qml \
     ui/editor/CameraController.qml \
     ui/editor/SelectionController.qml \
     ui/editor/TransformGizmo.qml \
