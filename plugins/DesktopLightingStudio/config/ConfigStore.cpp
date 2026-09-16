@@ -96,6 +96,8 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
                  schema_dir + "/studio.schema.json");
     sync_bundled(QStringLiteral(":/studio/device.schema.json"),
                  schema_dir + "/device.schema.json");
+    sync_bundled(QStringLiteral(":/studio/effect.schema.json"),
+                 schema_dir + "/effect.schema.json");
 
     /* Ship the packaged device types. Missing files only — a type
        the user edited is never overwritten; one the user deleted
@@ -114,6 +116,24 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
         if(!QFileInfo::exists(dst))
         {
             QFile::copy(bundled.filePath(name), dst);
+        }
+    }
+
+    /* Ship the packaged effect looks under presets/effects/ —
+       same contract: missing files only, a look the user edited
+       is never overwritten, one they deleted is re-installed. */
+    const QString effect_dir = EffectPresetDir();
+    if(!QFileInfo::exists(effect_dir))
+    {
+        d.mkpath("presets/effects");
+    }
+    const QDir bundled_fx(QStringLiteral(":/studio/presets/effects"));
+    for(const QString& name : bundled_fx.entryList(QDir::Files))
+    {
+        const QString dst = effect_dir + "/" + name;
+        if(!QFileInfo::exists(dst))
+        {
+            QFile::copy(bundled_fx.filePath(name), dst);
         }
     }
     return true;

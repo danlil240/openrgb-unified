@@ -1,0 +1,873 @@
+/*---------------------------------------------------------*\
+||| effect_json_test.cpp                                    |
+|||                                                           |
+|||   Task 5.1 — the JSON effect-look migration. Verifies  |
+|||   the nine presets/effects/*.effect.json documents     |
+|||   reproduce the pre-migration C++ builders EXACTLY:    |
+|||   resolved layer stacks + evaluated frames are         |
+|||   compared against tests/fixtures/effects/<id>.fixture.|
+|||   json (captured from BuildPreset BEFORE the           |
+|||   representation changed — the parity oracle).         |
+|||                                                           |
+|||   Also covers: document round-trips, the remix-spec    |
+|||   grammar (including out-of-document-order misuse),    |
+|||   the EffectRegistry file-over-default layering, and   |
+|||   the persisted inline effects.layers workspace        |
+|||   stack.                                               |
+|||                                                           |
+|||   No Qt, no hardware — plain cl build.                 |
+|||                                                           |
+|||   SPDX-License-Identifier: GPL-2.0-or-later               |
+\*---------------------------------------------------------*/
+
+#include "effects/EffectTypes.h"
+#include "effects/EffectEngine.h"
+#include "effects/EffectJson.h"
+#include "effects/Presets.h"
+#include "presets/EffectRegistry.h"
+#include "scene/DefaultDesk.h"
+#include "scene/SceneJson.h"
+#include "config/StudioConfig.h"
+
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace studio;
+using nlohmann::json;
+
+static int failures = 0;
+static int checks   = 0;
+
+#define CHECK(cond, name)                                              \
+    do {                                                               \
+        ++checks;                                                      \
+        if(!(cond)) { ++failures; std::printf("FAIL: %s\n", name); }   \
+    } while(0)
+
+static bool Near(float a, float b, float eps = 1e-6f)
+{
+    return std::fabs(a - b) < eps;
+}
+
+/*---------------------------------------------------------*\
+||| Paths — fixtures + packaged effect files resolve       |
+||| relative to the test cwd (tests/) with env overrides   |
+||| for unusual layouts. NEVER touch %APPDATA%.            |
+\*---------------------------------------------------------*/
+static std::string FixtureDir()
+{
+    if(const char* env = std::getenv("DLS_FIXTURE_DIR"))
+    {
+        if(*env != '\0') { return env; }
+    }
+    return "fixtures/effects";
+}
+
+static std::string PackagedDir()
+{
+    if(const char* env = std::getenv("DLS_EFFECT_DIR"))
+    {
+        if(*env != '\0') { return env; }
+    }
+    return "../plugins/DesktopLightingStudio/presets/effects";
+}
+
+static std::string FixtureDirAlt() { return "tests/fixtures/effects"; }
+
+static std::string PackagedDirAlt()
+{
+    return "plugins/DesktopLightingStudio/presets/effects";
+}
+
+static bool LoadJsonFile(const std::string& path, json& out)
+{
+    std::ifstream f(path, std::ios::binary);
+    if(!f.is_open())
+    {
+        return false;
+    }
+    std::stringstream ss;
+    ss << f.rdbuf();
+    out = json::parse(ss.str(), nullptr, false);
+    return !out.is_discarded();
+}
+
+/* Resolve the fixture dir across the two cwds the suites run
+   under (tests/ and repo root). */
+static std::string FindFixtureDir()
+{
+    std::error_code ec;
+    if(std::filesystem::is_directory(FixtureDir(), ec))
+    {
+        return FixtureDir();
+    }
+    if(std::filesystem::is_directory(FixtureDirAlt(), ec))
+    {
+        return FixtureDirAlt();
+    }
+    return FixtureDir();
+}
+
+static std::string FindPackagedDir()
+{
+    std::error_code ec;
+    if(std::filesystem::is_directory(PackagedDir(), ec))
+    {
+        return PackagedDir();
+    }
+    if(std::filesystem::is_directory(PackagedDirAlt(), ec))
+    {
+        return PackagedDirAlt();
+    }
+    return PackagedDir();
+}
+
+/*---------------------------------------------------------*\
+||| Canonical frame dump — same shape + FNV-1a 64 hash as |
+||| the fixture generator.                                 |
+\*---------------------------------------------------------*/
+static json FramesJson(const FrameColors& frame)
+{
+    json j = json::object();
+    for(const auto& kv : frame)
+    {
+        json arr = json::array();
+        for(SceneColor c : kv.second)
+        {
+            arr.push_back(SceneColorHex(c));
+        }
+        j[kv.first] = arr;
+    }
+    return j;
+}
+
+static std::string HashFrame(const FrameColors& frame)
+{
+    const std::string  s = FramesJson(frame).dump();
+    unsigned long long h = 1469598103934665603ull;
+    for(unsigned char c : s)
+    {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx", h);
+    return buf;
+}
+
+static InputState InputFromJson(const json& j)
+{
+    InputState in;
+    in.audio_level = (float)j.value("audio_level", 0.0);
+    for(const json& je : j.value("events", json::array()))
+    {
+        InputEvent e;
+        e.t        = je.value("t", 0.0);
+        e.source   = je.value("source", std::string());
+        e.has_pos  = je.value("has_pos", false);
+        e.strength = (float)je.value("strength", 1.0);
+        e.code     = je.value("code", 0);
+        const json& p = je.value("pos", json::array());
+        if(p.is_array() && p.size() == 3)
+        {
+            e.pos = { (float)p[0].get<double>(),
+                      (float)p[1].get<double>(),
+                      (float)p[2].get<double>() };
+        }
+        in.events.push_back(e);
+    }
+    in.screen_cols = j.value("screen_cols", 0);
+    in.screen_rows = j.value("screen_rows", 0);
+    for(const json& jc : j.value("screen_cells", json::array()))
+    {
+        if(jc.is_array() && jc.size() >= 3)
+        {
+            in.screen_cells.push_back({
+                (float)jc[0].get<double>(), (float)jc[1].get<double>(),
+                (float)jc[2].get<double>(),
+                jc.size() > 3 ? (float)jc[3].get<double>() : 1.0f });
+        }
+    }
+    return in;
+}
+
+/*---------------------------------------------------------*\
+||| Parity — resolved stacks + evaluated frames against   |
+||| the pre-change fixture oracle.                         |
+\*---------------------------------------------------------*/
+static void TestFixtureParity()
+{
+    static const char* const ids[] = {
+        "aurora", "reactor", "comet", "chrome", "portal",
+        "embers", "shockwave", "keyripple", "ambient",
+    };
+    const std::string dir = FindFixtureDir();
+    const SceneDocument doc = BuildDefaultDesk();
+    EffectEngine engine;
+    int cases_total = 0;
+
+    for(const char* id : ids)
+    {
+        json fx;
+        const std::string path = dir + "/" + id + ".fixture.json";
+        CHECK(LoadJsonFile(path, fx), (std::string("fixture loads: ") + id).c_str());
+        if(fx.is_discarded() || fx.empty())
+        {
+            continue;
+        }
+        CHECK(fx.value("preset", std::string()) == id,
+              (std::string("fixture preset id: ") + id).c_str());
+
+        /* Resolved stacks — every captured seed. */
+        const json stacks = fx.value("stacks", json::object());
+        int stack_cases = 0;
+        for(auto it = stacks.begin(); it != stacks.end(); ++it)
+        {
+            const unsigned int seed =
+                (unsigned int)std::stoul(it.key());
+            const std::vector<EffectLayer> built = BuildPreset(id, seed);
+            const json got = EffectLayersToJson(built);
+            if(got != it.value())
+            {
+                ++failures;
+                std::printf("FAIL: stack parity %s seed %s\n",
+                            id, it.key().c_str());
+                ++checks;
+                /* Localize the first differing layer. */
+                for(size_t i = 0; i < got.size()
+                                 && i < it.value().size(); i++)
+                {
+                    if(got[i] != it.value()[i])
+                    {
+                        std::printf("  layer %d:\n    want %s\n"
+                                    "    got  %s\n", (int)i,
+                                    it.value()[i].dump().c_str(),
+                                    got[i].dump().c_str());
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                ++checks;
+            }
+            ++stack_cases;
+        }
+        CHECK(stack_cases == 4,
+              (std::string("four seed stacks: ") + id).c_str());
+
+        /* Frame cases — rebuilt through the JSON path, evaluated
+           against the same scene + input. */
+        for(const json& c : fx.value("cases", json::array()))
+        {
+            const unsigned int seed = c.value("seed", 0u);
+            const double t          = c.value("t", 0.0);
+            engine.SetLayers(BuildPreset(id, seed));
+            FrameColors frame;
+            if(c.contains("input") && c["input"].is_object())
+            {
+                const InputState in = InputFromJson(c["input"]);
+                engine.Evaluate(doc, t, frame, &in);
+            }
+            else
+            {
+                engine.Evaluate(doc, t, frame);
+            }
+            ++cases_total;
+            const std::string want_hash = c.value("frame_hash", std::string());
+            const std::string got_hash  = HashFrame(frame);
+            if(got_hash != want_hash)
+            {
+                ++failures;
+                std::printf("FAIL: frame hash %s seed %u t %.2f\n"
+                            "    want %s got %s\n",
+                            id, seed, t, want_hash.c_str(),
+                            got_hash.c_str());
+                /* Spot-check: first differing emitter color. */
+                const json want = c.value("frames", json::object());
+                const json got  = FramesJson(frame);
+                for(auto it = want.begin(); it != want.end(); ++it)
+                {
+                    const json gw = got.value(it.key(), json::array());
+                    if(gw != it.value())
+                    {
+                        for(size_t i = 0; i < it.value().size()
+                                         && i < gw.size(); i++)
+                        {
+                            if(gw[i] != it.value()[i])
+                            {
+                                std::printf("    %s[%d] want %s"
+                                            " got %s\n",
+                                            it.key().c_str(), (int)i,
+                                            it.value()[i].dump().c_str(),
+                                            gw[i].dump().c_str());
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            ++checks;
+        }
+    }
+    std::printf("parity: %d frame cases checked\n", cases_total);
+    CHECK(cases_total == 144, "144 fixture cases");
+}
+
+/*---------------------------------------------------------*\
+||| Document round-trip + the packaged file set.           |
+\*---------------------------------------------------------*/
+static void TestPackagedDocs()
+{
+    const std::string dir = FindPackagedDir();
+    static const char* const ids[] = {
+        "aurora", "reactor", "comet", "chrome", "portal",
+        "embers", "shockwave", "keyripple", "ambient",
+    };
+    for(const char* id : ids)
+    {
+        const std::string path = dir + "/" + id + ".effect.json";
+        EffectDocument d;
+        std::vector<std::string> errs;
+        CHECK(EffectDocumentFromJsonFile(path, d, &errs),
+              (std::string("packaged parses: ") + id).c_str());
+        CHECK(d.id == id, (std::string("id == filename: ") + id).c_str());
+        /* parse -> serialize -> parse is stable. */
+        const nlohmann::ordered_json j = EffectDocumentToJson(d);
+        EffectDocument d2;
+        CHECK(EffectDocumentFromJson(j, d2, &errs),
+              (std::string("round-trip parses: ") + id).c_str());
+        CHECK(d2.id == d.id && d2.name == d.name
+              && d2.description == d.description && d2.needs == d.needs
+              && d2.layers == d.layers,
+              (std::string("round-trip stable: ") + id).c_str());
+        /* Every seed resolves a non-empty stack. */
+        std::vector<EffectLayer> layers;
+        CHECK(ResolveEffectLayers(d, 7, layers, &errs) && !layers.empty(),
+              (std::string("packaged resolves: ") + id).c_str());
+    }
+
+    /* Registry-backed listing reproduces the shipped metadata. */
+    CHECK(PresetList().size() == 9, "nine looks registered");
+    const PresetInfo* p = FindPreset("shockwave");
+    CHECK(p != nullptr && p->needs == "audio" && p->name == "Bass shockwave",
+          "shockwave metadata from JSON");
+}
+
+/*---------------------------------------------------------*\
+||| Validation — the error matrix.                         |
+\*---------------------------------------------------------*/
+static nlohmann::ordered_json MinimalDoc()
+{
+    nlohmann::ordered_json j;
+    j["schema_version"] = 1;
+    j["id"]             = "test";
+    j["layers"]         = nlohmann::ordered_json::array();
+    nlohmann::ordered_json l;
+    l["primitive"] = "static";
+    nlohmann::ordered_json stop;
+    stop["pos"] = 0.0; stop["color"] = "#102030";
+    l["palette"] = nlohmann::ordered_json::array({ stop });
+    j["layers"].push_back(l);
+    return j;
+}
+
+static void TestValidation()
+{
+    EffectDocument d;
+    std::vector<std::string> errs;
+
+    /* malformed JSON file */
+    {
+        const std::string dir =
+            (std::filesystem::temp_directory_path()
+             / "dls_fx_malformed").string();
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::string path = dir + "/bad.effect.json";
+        {
+            std::ofstream f(path, std::ios::binary | std::ios::trunc);
+            f << "{ not json ]";
+        }
+        CHECK(!EffectDocumentFromJsonFile(path, d, &errs),
+              "malformed JSON rejected");
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    /* wrong schema version */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["schema_version"] = 2;
+        CHECK(!EffectDocumentFromJson(j, d, &errs)
+              && !errs.empty(),
+              "schema_version != 1 rejected");
+    }
+
+    /* id charset */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["id"] = "bad id!";
+        CHECK(!EffectDocumentFromJson(j, d, &errs), "bad id rejected");
+    }
+
+    /* unknown primitive */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["primitive"] = "fireworks";
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "unknown primitive rejected");
+    }
+
+    /* non-finite scalar (constructed — JSON text can't spell it) */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["speed"] =
+            std::numeric_limits<double>::infinity();
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "non-finite speed rejected");
+    }
+
+    /* out-of-range opacity */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["opacity"] = 1.5;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "opacity > 1 rejected");
+    }
+
+    /* scale must be > 0 */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["scale"] = 0.0;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "scale 0 rejected");
+        j["layers"][0]["scale"] = {{"remix", {-1.0, 0.5}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix range crossing 0 on scale rejected");
+    }
+
+    /* remix range exceeding a bounded field */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["opacity"] = {{"remix", {0.0, 2.0}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix range beyond opacity rejected");
+    }
+
+    /* spec on a field that can't draw — wrong shape, wrong place */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["targets"] = {{"remix", {0, 1}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix on targets rejected");
+        j["layers"][0].erase("targets");
+        j["layers"][0]["palette"][0]["color"] = {{"remix", {0, 1}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix on palette color rejected");
+        j = MinimalDoc();
+        j["layers"][0]["origin"] = {{"remix_yaw",
+                                     {0, 0, 0, -1, 1}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix_yaw on origin rejected");
+        j = MinimalDoc();
+        j["layers"][0]["speed"] = {{"remix", {0, 1}},
+                                   {"remix01", true}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "two spec keys on one field rejected");
+        j = MinimalDoc();
+        j["layers"][0]["seed"] = {{"remix", {0, 1}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix (float) on seed rejected");
+        j = MinimalDoc();
+        j["layers"][0]["bogus"] = 1;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "unknown layer key rejected");
+    }
+
+    /* palette errors */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["palette"] = nlohmann::ordered_json::array();
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "empty palette rejected");
+        j = MinimalDoc();
+        nlohmann::ordered_json s0, s1;
+        s0["pos"] = 0.6; s0["color"] = "#FFFFFF";
+        s1["pos"] = 0.4; s1["color"] = "#000000";
+        j["layers"][0]["palette"] =
+            nlohmann::ordered_json::array({ s0, s1 });
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "unsorted palette rejected");
+    }
+
+    /* resolved-layer context refuses remix specs */
+    {
+        nlohmann::ordered_json l;
+        l["primitive"] = "wave";
+        l["speed"]     = {{"remix", {0.1, 0.2}}};
+        json jarr = json::array({ json(l) });
+        std::vector<EffectLayer> out;
+        CHECK(!EffectLayersFromJson(jarr, out, &errs),
+              "remix spec in resolved stack rejected");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Draw order — the spec stream consumes in document      |
+||| order; parity fixtures pin the sequence end-to-end.    |
+||| These check the mechanics directly.                    |
+\*---------------------------------------------------------*/
+static void TestDrawOrder()
+{
+    /* Same document, same seed -> identical resolve. */
+    nlohmann::ordered_json j = MinimalDoc();
+    {
+        nlohmann::ordered_json l;
+        l["primitive"] = "wave";
+        l["speed"]     = {{"remix", {0.1, 0.2}}};
+        l["phase"]     = {{"remix01", true}};
+        nlohmann::ordered_json s0;
+        s0["pos"] = 0.0; s0["color"] = "#FF0000";
+        l["palette"] = nlohmann::ordered_json::array({ s0 });
+        j["layers"].push_back(l);
+    }
+    EffectDocument d;
+    std::vector<std::string> errs;
+    CHECK(EffectDocumentFromJson(j, d, &errs), "remix doc parses");
+
+    std::vector<EffectLayer> a, b;
+    CHECK(ResolveEffectLayers(d, 99, a, &errs), "resolve a");
+    CHECK(ResolveEffectLayers(d, 99, b, &errs), "resolve b");
+    CHECK(a.size() == b.size() && a.size() == 2, "two layers");
+    if(a.size() == 2 && b.size() == 2)
+    {
+        CHECK(Near(a[1].speed, b[1].speed) && Near(a[1].phase, b[1].phase),
+              "same seed same draws");
+        /* The drawn speed lands inside the declared range. */
+        CHECK(a[1].speed >= 0.1f - 1e-7f && a[1].speed <= 0.2f + 1e-7f,
+              "remix range respected");
+    }
+    std::vector<EffectLayer> c;
+    ResolveEffectLayers(d, 100, c, nullptr);
+    if(c.size() == 2 && a.size() == 2)
+    {
+        CHECK(!Near(c[1].speed, a[1].speed) || !Near(c[1].phase, a[1].phase),
+              "new seed varies draws");
+    }
+
+    /* Document order, not field declaration order: a layer whose
+       spec keys arrive (speed, phase) draws Range then Next01 —
+       moving the spec to a different key changes the stream. */
+    nlohmann::ordered_json j2 = MinimalDoc();
+    {
+        nlohmann::ordered_json l;
+        l["primitive"] = "wave";
+        l["phase"]     = {{"remix01", true}};
+        l["speed"]     = {{"remix", {0.1, 0.2}}};
+        nlohmann::ordered_json s0;
+        s0["pos"] = 0.0; s0["color"] = "#FF0000";
+        l["palette"] = nlohmann::ordered_json::array({ s0 });
+        j2["layers"].push_back(l);
+    }
+    EffectDocument d2;
+    CHECK(EffectDocumentFromJson(j2, d2, &errs), "reordered doc parses");
+    std::vector<EffectLayer> r;
+    CHECK(ResolveEffectLayers(d2, 99, r, &errs), "resolve reordered");
+    if(r.size() == 2 && a.size() == 2)
+    {
+        /* phase drew FIRST here (remix01 then remix) vs. speed
+           first above — the streams differ, so values differ. */
+        CHECK(!Near(r[1].speed, a[1].speed) || !Near(r[1].phase, a[1].phase),
+              "field order drives draw order");
+    }
+
+    /* remix_u32 full range = Next() verbatim. */
+    {
+        nlohmann::ordered_json l;
+        l["primitive"] = "noise";
+        l["seed"]      = {{"remix_u32", {0, 4294967295}}};
+        nlohmann::ordered_json arr = nlohmann::ordered_json::array({ l });
+        std::vector<EffectLayer> out;
+        CHECK(ResolveEffectLayers(arr, 5, out, &errs) && out.size() == 1,
+              "remix_u32 resolves");
+        RemixRng probe(5);
+        CHECK(out[0].seed == probe.Next(), "remix_u32 == Next()");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| Registry — file-over-default, bad sibling exclusion,   |
+||| missing-file fallback, personal looks. Temp dirs only. |
+\*---------------------------------------------------------*/
+static void TestRegistry()
+{
+    std::error_code ec;
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "dls_fx_registry";
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    /* Defaults first — file layer wins over them. */
+    EffectRegistry reg;
+    {
+        EffectDocument d;
+        d.id = "mylook"; d.name = "Default Mylook";
+        nlohmann::ordered_json l;
+        l["primitive"] = "static";
+        nlohmann::ordered_json s0;
+        s0["pos"] = 0.0; s0["color"] = "#112233";
+        l["palette"] = nlohmann::ordered_json::array({ s0 });
+        d.layers.push_back(l);
+        reg.SetDefaults({ d });
+    }
+    CHECK(reg.Find("mylook") != nullptr
+          && reg.Find("mylook")->name == "Default Mylook",
+          "default resolves before files");
+
+    /* A good file overriding the default + a bad sibling. */
+    {
+        const std::string good = (dir / "mylook.effect.json").string();
+        const std::string bad  = (dir / "other.effect.json").string();
+        const std::string pers = (dir / "neon.effect.json").string();
+        {
+            std::ofstream f(good, std::ios::binary | std::ios::trunc);
+            f << "{\n"
+                 "  \"schema_version\": 1,\n"
+                 "  \"id\": \"mylook\",\n"
+                 "  \"name\": \"File Mylook\",\n"
+                 "  \"layers\": [ { \"primitive\": \"static\",\n"
+                 "    \"palette\": [ { \"pos\": 0.0,\n"
+                 "      \"color\": \"#445566\" } ] } ]\n"
+                 "}\n";
+        }
+        {
+            std::ofstream f(bad, std::ios::binary | std::ios::trunc);
+            f << "{ \"schema_version\": 1, \"id\": \"WRONG\","
+                 "  \"layers\": [] }";   /* id != filename */
+        }
+        {
+            std::ofstream f(pers, std::ios::binary | std::ios::trunc);
+            f << "{\n"
+                 "  \"schema_version\": 1,\n"
+                 "  \"id\": \"neon\",\n"
+                 "  \"name\": \"Neon Personal\",\n"
+                 "  \"layers\": [ { \"primitive\": \"gradient\",\n"
+                 "    \"direction\": [1.0, 0.0, 0.0],\n"
+                 "    \"palette\": [ { \"pos\": 0.0, \"color\": \"#FF00FF\" },\n"
+                 "      { \"pos\": 0.5, \"color\": \"#00FFFF\" } ] } ]\n"
+                 "}\n";
+        }
+        std::vector<std::string> errs;
+        CHECK(!reg.LoadDirectory(dir.string(), &errs),
+              "bad sibling reported");
+        CHECK(reg.Find("mylook") != nullptr
+              && reg.Find("mylook")->name == "File Mylook",
+              "file overrides default");
+        CHECK(reg.Find("other") == nullptr,
+              "id != filename file excluded");
+        CHECK(reg.Find("neon") != nullptr
+              && reg.Find("neon")->name == "Neon Personal",
+              "personal look loads");
+        CHECK(!reg.FileErrors().empty(), "per-file errors recorded");
+        /* The excluded file's error names it. */
+        bool names_other = false;
+        for(const auto& kv : reg.FileErrors())
+        {
+            if(kv.first.find("other") != std::string::npos)
+            {
+                names_other = true;
+            }
+        }
+        CHECK(names_other, "error names the bad file");
+
+        /* Build resolves through the file layer. */
+        std::vector<EffectLayer> layers;
+        CHECK(reg.Build("neon", 3, layers, &errs) && layers.size() == 1
+              && layers[0].primitive == "gradient",
+              "personal look builds");
+    }
+
+    /* Missing-file fallback: the default still answers when the
+       file layer never saw the id. */
+    {
+        EffectRegistry reg2;
+        EffectDocument d;
+        d.id = "base"; d.name = "Base";
+        nlohmann::ordered_json l;
+        l["primitive"] = "static";
+        nlohmann::ordered_json s0;
+        s0["pos"] = 0.0; s0["color"] = "#101010";
+        l["palette"] = nlohmann::ordered_json::array({ s0 });
+        d.layers.push_back(l);
+        reg2.SetDefaults({ d });
+        const std::filesystem::path empty =
+            std::filesystem::temp_directory_path() / "dls_fx_empty";
+        std::filesystem::create_directories(empty, ec);
+        CHECK(reg2.LoadDirectory(empty.string(), nullptr),
+              "empty dir loads clean");
+        std::vector<EffectLayer> layers;
+        CHECK(reg2.Build("base", 0, layers, nullptr)
+              && layers.size() == 1,
+              "missing file falls back to default");
+        /* A nonexistent dir is not an error either. */
+        CHECK(reg2.LoadDirectory(
+                  (empty / "no_such_dir").string(), nullptr),
+              "missing dir is not an error");
+    }
+
+    /* LoadFile: id != filename rejected, registry unchanged. */
+    {
+        EffectRegistry reg3;
+        const std::filesystem::path d3 =
+            std::filesystem::temp_directory_path() / "dls_fx_one";
+        std::filesystem::create_directories(d3, ec);
+        const std::string p = (d3 / "named.effect.json").string();
+        {
+            std::ofstream f(p, std::ios::binary | std::ios::trunc);
+            f << "{ \"schema_version\": 1, \"id\": \"other\","
+                 "  \"layers\": [] }";
+        }
+        std::vector<std::string> errs;
+        CHECK(!reg3.LoadFile(p, &errs), "LoadFile id mismatch rejected");
+        CHECK(reg3.Ids().empty(), "failed LoadFile changes nothing");
+    }
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+/*---------------------------------------------------------*\
+||| Workspace effects.layers — typed authored stack.       |
+\*---------------------------------------------------------*/
+static void TestWorkspaceLayers()
+{
+    /* Authored stack + preset provenance round-trips. */
+    StudioDocument w;
+    w.effect.preset    = "aurora";       /* provenance            */
+    w.effect.seed      = 77;
+    w.effect.playing   = true;
+    EffectLayer l;
+    l.primitive = "wave";
+    l.space     = CoordSpace::Local;
+    l.blend     = BlendMode::Screen;
+    l.opacity   = 0.4f;
+    l.speed     = 0.25f;
+    l.scale     = 0.5f;
+    l.density   = 1.7f;
+    l.direction = { 0.0f, 0.0f, 1.0f };
+    l.targets   = { "keyboard_body" };
+    l.seed      = 0xDEADBEEFu;
+    l.enabled   = false;
+    l.palette   = MakePalette({ MakeSceneColor(255, 0, 0),
+                                MakeSceneColor(0, 0, 255) });
+    w.effect.layers.push_back(l);
+
+    const json j = ToJson(w);
+    CHECK(j["effects"]["layers"].is_array()
+          && j["effects"]["layers"].size() == 1,
+          "inline stack serializes");
+    CHECK(j["effects"]["layers"][0]["primitive"] == "wave"
+          && j["effects"]["layers"][0]["enabled"] == false
+          && j["effects"]["layers"][0]["seed"] == 0xDEADBEEFu,
+          "layer fields serialize");
+
+    StudioDocument back;
+    std::vector<std::string> errs;
+    CHECK(FromJson(j, back, &errs), "workspace with layers parses");
+    CHECK(back.effect.preset == "aurora"
+          && back.effect.layers.size() == 1,
+          "layers + preset provenance round-trip");
+    if(back.effect.layers.size() == 1)
+    {
+        const EffectLayer& g = back.effect.layers[0];
+        CHECK(g.primitive == "wave" && g.blend == BlendMode::Screen
+              && g.space == CoordSpace::Local
+              && Near(g.opacity, 0.4f) && Near(g.speed, 0.25f)
+              && Near(g.density, 1.7f) && g.seed == 0xDEADBEEFu
+              && g.enabled == false
+              && g.targets.size() == 1 && g.targets[0] == "keyboard_body"
+              && g.palette.stops.size() == 2,
+              "layer fields round-trip");
+    }
+
+    /* Preset-only documents still work: layers serializes as []
+       and resolves to an empty stack. */
+    StudioDocument w2;
+    w2.effect.preset = "comet";
+    const json j2 = ToJson(w2);
+    CHECK(j2["effects"]["layers"].is_array()
+          && j2["effects"]["layers"].empty(),
+          "preset-only serializes empty layers");
+    StudioDocument back2;
+    CHECK(FromJson(j2, back2, &errs)
+          && back2.effect.preset == "comet"
+          && back2.effect.layers.empty(),
+          "preset-only workspace resolves");
+
+    /* A malformed authored layer rejects the document, not a
+       silent drop. */
+    json j3 = j;
+    j3["effects"]["layers"][0]["primitive"] = "nope";
+    StudioDocument back3;
+    errs.clear();
+    CHECK(!FromJson(j3, back3, &errs) && !errs.empty(),
+          "bad inline layer rejected");
+}
+
+/*---------------------------------------------------------*\
+||| Runtime seam — the expanded scene document carries the |
+||| stack; the v2 scene format round-trips it.             |
+\*---------------------------------------------------------*/
+static void TestSceneDocLayers()
+{
+    SceneDocument doc = BuildDefaultDesk();
+    EffectLayer l;
+    l.primitive = "pulse";
+    l.origin    = { 0.4f, 0.2f, -0.1f };
+    l.palette   = MakePalette({ MakeSceneColor(0, 255, 128) });
+    doc.effect.layers.push_back(l);
+    doc.effect.preset = "portal";   /* provenance */
+
+    SceneDocument back;
+    std::vector<std::string> errs;
+    CHECK(FromJson(ToJson(doc), back, &errs),
+          "scene doc with layers parses");
+    CHECK(back.effect.layers.size() == 1
+          && back.effect.layers[0].primitive == "pulse"
+          && back.effect.preset == "portal",
+          "scene doc layers + preset round-trip");
+
+    /* The engine honors enabled=false. */
+    EffectEngine engine;
+    std::vector<EffectLayer> one = { l };
+    engine.SetLayers(one);
+    FrameColors f1;
+    engine.Evaluate(doc, 1.0, f1);
+    one[0].enabled = false;
+    engine.SetLayers(one);
+    FrameColors f2;
+    engine.Evaluate(doc, 1.0, f2);
+    CHECK(!f1.empty() && f2.empty(), "enabled=false composites nothing");
+}
+
+int main()
+{
+    std::printf("== effect_json_test ==\n");
+    TestFixtureParity();
+    TestPackagedDocs();
+    TestValidation();
+    TestDrawOrder();
+    TestRegistry();
+    TestWorkspaceLayers();
+    TestSceneDocLayers();
+    std::printf("%d checks, %d failures\n", checks, failures);
+    return failures == 0 ? 0 : 1;
+}

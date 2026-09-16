@@ -45,12 +45,14 @@ public:
     QString AutosavePath()  const { return dir + "/studio.autosave.json"; }
     QString LegacyBackupPath() const { return dir + "/legacy-settings.backup.json"; }
     QString MigrationMarkerPath() const { return dir + "/migration.done"; }
-    QString PresetDir()     const { return dir + "/presets/devices"; }
+    QString PresetDir()       const { return dir + "/presets/devices"; }
+    QString EffectPresetDir() const { return dir + "/presets/effects"; }
 
     /* Creates the workspace dir (+ schemas/ with copies of the
-       bundled studio/device schemas and presets/devices/ with the
-       bundled *.device.json type files) if needed. Existing files
-       are never overwritten — user edits survive. */
+       bundled studio/device/effect schemas, presets/devices/ with
+       the bundled *.device.json type files, and presets/effects/
+       with the bundled *.effect.json look files) if needed.
+       Existing files are never overwritten — user edits survive. */
     bool EnsureWorkspaceDir(QString* error = nullptr);
 
     bool DocumentExists() const;

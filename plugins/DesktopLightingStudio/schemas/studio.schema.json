@@ -193,7 +193,8 @@
         "playing": { "type": "boolean" },
         "layers": {
           "type": "array",
-          "description": "Reserved for JSON effect layer definitions; retained verbatim on save/load."
+          "description": "The user's authored inline effect layer stack — resolved literals only (no remix specs; those live in presets/effects/*.effect.json look documents). When non-empty it wins over \"preset\" at runtime; \"preset\" keeps provenance. Layer shape: see effect.schema.json#/definitions/layer.",
+          "items": { "type": "object" }
         }
       }
     },

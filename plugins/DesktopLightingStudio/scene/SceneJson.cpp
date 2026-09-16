@@ -5,6 +5,7 @@
 \*---------------------------------------------------------*/
 
 #include "SceneJson.h"
+#include "../effects/EffectJson.h"
 #include "SceneGraph.h"
 #include "JsonFields.h"
 
@@ -184,6 +185,9 @@ nlohmann::json ToJson(const SceneDocument& doc)
         {"speed",     doc.effect.speed},
         {"intensity", doc.effect.intensity},
         {"playing",   doc.effect.playing},
+        /* The authored inline layer stack travels with the expanded
+           document so the v2 -> v3 migration doesn't drop it. */
+        {"layers",    EffectLayersToJson(doc.effect.layers)},
     };
 
     return j;
@@ -442,6 +446,11 @@ bool FromJson(const nlohmann::json& j, SceneDocument& doc,
             out.effect.speed     = (float)FieldNum(effect, "speed", 1.0, "effect", errs);
             out.effect.intensity = (float)FieldNum(effect, "intensity", 1.0, "effect", errs);
             out.effect.playing   = FieldBool(effect, "playing", false, "effect", errs);
+            if(effect.contains("layers"))
+            {
+                EffectLayersFromJson(effect["layers"], out.effect.layers,
+                                     &errs, "effect.layers");
+            }
         }
     }
 

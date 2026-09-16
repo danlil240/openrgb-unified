@@ -24,6 +24,16 @@
         <file alias="materials/StudioEnvironment.qml">materials/StudioEnvironment.qml</file>
         <file alias="studio.schema.json">../schemas/studio.schema.json</file>
         <file alias="device.schema.json">../schemas/device.schema.json</file>
+        <file alias="effect.schema.json">../schemas/effect.schema.json</file>
+        <file alias="presets/effects/aurora.effect.json">../presets/effects/aurora.effect.json</file>
+        <file alias="presets/effects/reactor.effect.json">../presets/effects/reactor.effect.json</file>
+        <file alias="presets/effects/comet.effect.json">../presets/effects/comet.effect.json</file>
+        <file alias="presets/effects/chrome.effect.json">../presets/effects/chrome.effect.json</file>
+        <file alias="presets/effects/portal.effect.json">../presets/effects/portal.effect.json</file>
+        <file alias="presets/effects/embers.effect.json">../presets/effects/embers.effect.json</file>
+        <file alias="presets/effects/shockwave.effect.json">../presets/effects/shockwave.effect.json</file>
+        <file alias="presets/effects/keyripple.effect.json">../presets/effects/keyripple.effect.json</file>
+        <file alias="presets/effects/ambient.effect.json">../presets/effects/ambient.effect.json</file>
         <file alias="presets/devices/desk.device.json">../presets/devices/desk.device.json</file>
         <file alias="presets/devices/monitor.device.json">../presets/devices/monitor.device.json</file>
         <file alias="presets/devices/pc-case.device.json">../presets/devices/pc-case.device.json</file>

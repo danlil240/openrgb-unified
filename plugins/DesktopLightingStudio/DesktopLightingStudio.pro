@@ -36,6 +36,7 @@ HEADERS += \
     output/ControllerAdapter.h \
     presets/DevicePreset.h \
     presets/PresetRegistry.h \
+    presets/EffectRegistry.h \
     presets/PresetBundle.h \
     scene/SceneTypes.h \
     scene/SceneGraph.h \
@@ -47,6 +48,7 @@ HEADERS += \
     scene/DefaultDesk.h \
     effects/EffectTypes.h \
     effects/EffectEngine.h \
+    effects/EffectJson.h \
     effects/Presets.h \
     inputs/InputBus.h \
     inputs/OnsetDetect.h \
@@ -69,6 +71,7 @@ SOURCES += \
     output/ControllerAdapter.cpp \
     presets/DevicePreset.cpp \
     presets/PresetRegistry.cpp \
+    presets/EffectRegistry.cpp \
     presets/PresetBundle.cpp \
     scene/SceneTypes.cpp \
     scene/SceneGraph.cpp \
@@ -79,6 +82,7 @@ SOURCES += \
     scene/DefaultDesk.cpp \
     effects/EffectTypes.cpp \
     effects/EffectEngine.cpp \
+    effects/EffectJson.cpp \
     effects/Presets.cpp \
     inputs/InputBus.cpp \
     inputs/OnsetDetect.cpp \

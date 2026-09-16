@@ -187,6 +187,9 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
        authoritative defaults underneath whatever the workspace
        presets dir holds (file types are loaded on each Reload). */
     LoadPresetDefaults();
+    /* Look library: same layering for presets/effects/*.effect.json
+       (defaults from the bundled qrc; file layer lands on Reload). */
+    LoadEffectDefaults();
 
     /* Start on the default compact workspace resolved through the
        registry — resolution cannot fail on the bundled types, but
@@ -835,6 +838,68 @@ void SceneBridge::LoadPresetDefaults()
     }
 }
 
+void SceneBridge::LoadEffectDefaults()
+{
+    /* The bundled presets/effects/*.effect.json files are the
+       authoritative look library — enumerate the qrc, parse +
+       validate each, and layer them under the file layer. Only
+       when NOTHING readable ships does the one minimal built-in
+       look stand in (see Presets.cpp's fallback). */
+    std::vector<EffectDocument> packaged;
+    QStringList                 bad;
+    QDirIterator it(QStringLiteral(":/studio/presets/effects"),
+                    { QStringLiteral("*.effect.json") }, QDir::Files);
+    while(it.hasNext())
+    {
+        const QString res = it.next();
+        QFile f(res);
+        if(!f.open(QIODevice::ReadOnly))
+        {
+            bad << res;
+            continue;
+        }
+        const QByteArray bytes = f.readAll();
+        const nlohmann::ordered_json j = nlohmann::ordered_json::parse(
+            bytes.constBegin(), bytes.constEnd(), nullptr, false);
+        EffectDocument d;
+        std::vector<std::string> errs;
+        const QString base =
+            QFileInfo(res).fileName().section('.', 0, 0);
+        if(j.is_discarded()
+           || !EffectDocumentFromJson(j, d, &errs)
+           || d.id != base.toStdString())
+        {
+            bad << res;
+            qWarning() << "packaged effect" << res << "rejected:"
+                       << (errs.empty()
+                               ? QStringLiteral("invalid")
+                               : QString::fromStdString(errs.front()));
+            continue;
+        }
+        packaged.push_back(d);
+    }
+    if(packaged.empty())
+    {
+        /* Keep whatever the lazy probe already installed (source-
+           tree files in a dev tree, else the single fallback look). */
+        using_fallback_effects =
+            EffectLooks().Ids().size() == 1
+            && EffectLooks().Find("fallback") != nullptr;
+        setStatus(QStringLiteral(
+            "packaged effect looks unreadable — minimal fallback"));
+        return;
+    }
+    EffectLooks().SetDefaults(std::move(packaged));
+    using_fallback_effects = false;
+    if(!bad.isEmpty())
+    {
+        setStatus(QStringLiteral("effects: %1 packaged file(s) invalid"
+                                 " (%2)")
+                      .arg(bad.size())
+                      .arg(bad.first()));
+    }
+}
+
 void SceneBridge::ReloadPresets()
 {
     /* Packaged defaults underneath the file layer — a missing or
@@ -843,16 +908,25 @@ void SceneBridge::ReloadPresets()
        errors but never block the rest of the library. */
     LoadPresetDefaults();
     registry.ClearFiles();
+    /* Same layering for effect looks: bundled defaults under the
+       workspace's presets/effects/ files. */
+    LoadEffectDefaults();
+    EffectLooks().ClearFiles();
     if(store != nullptr)
     {
         std::vector<std::string> errs;
         registry.LoadDirectory(store->PresetDir().toStdString(), &errs);
+        EffectLooks().LoadDirectory(store->EffectPresetDir().toStdString(),
+                                    &errs);
         if(!errs.empty())
         {
             emit statusMessage(QStringLiteral("presets: %1")
                 .arg(QString::fromStdString(errs.front())));
         }
     }
+    /* Re-resolved stacks may differ — refresh a preset-driven
+       effect (an untouched inline stack keeps user edits). */
+    rebuildEffect();
     /* The library panel's rows come from List() — re-snapshot so a
        reload (Reload button, landed variant file) shows it. */
     if(preset_model != nullptr)
@@ -860,6 +934,7 @@ void SceneBridge::ReloadPresets()
         preset_model->Reload();
     }
     emit presetLibraryChanged();
+    emit presetChanged();
 }
 
 bool SceneBridge::LoadWorkspace()
@@ -2848,9 +2923,21 @@ QVariantList SceneBridge::presetList() const
 void SceneBridge::rebuildEffect()
 {
     std::vector<EffectLayer> layers;
-    if(!doc.effect.preset.empty())
+    /* The authored inline stack wins when present — `preset` keeps
+       provenance (which look the stack was remixed from). An empty
+       stack resolves the named look through the registry. Global
+       speed/intensity and the ripple-decay slider apply to the
+       engine COPY — the authored stack persists unscaled. */
+    if(!doc.effect.layers.empty())
+    {
+        layers = doc.effect.layers;
+    }
+    else if(!doc.effect.preset.empty())
     {
         layers = BuildPreset(doc.effect.preset, doc.effect.seed);
+    }
+    if(!layers.empty())
+    {
         ApplyGlobalParams(layers, doc.effect.speed, doc.effect.intensity);
         /* User-adjustable ripple decay — scales the age decay on
            ripple layers (Stage 3 reactive presets). */
@@ -2915,6 +3002,13 @@ void SceneBridge::playPreset(const QString& presetId)
         markDirty();
         emit presetChanged();
     }
+    /* Selecting a preset (re-selecting included) clears the authored
+       inline stack — the named look is the whole point of the pick. */
+    if(!doc.effect.layers.empty())
+    {
+        doc.effect.layers.clear();
+        markDirty();
+    }
     /* A reactive preset auto-enables its input source — the toggle
        stays visible and can be switched off. */
     const PresetInfo* info = FindPreset(id);
@@ -2968,6 +3062,7 @@ void SceneBridge::stopEffect()
 {
     setPlaying(false);
     doc.effect.preset.clear();
+    doc.effect.layers.clear();   /* "no effect" clears the stack too */
     markDirty();
     frame.clear();
     engine.SetLayers({});
@@ -3011,6 +3106,23 @@ void SceneBridge::setEffectIntensityPct(int pct)
     markDirty();
     rebuildEffect();
     emit effectParamsChanged();
+}
+
+void SceneBridge::applyEffectLayers(
+    const std::vector<EffectLayer>& layers)
+{
+    /* Whole-stack replacement — the 5.2 layer editor's commit seam.
+       Callers hand over VALIDATED resolved literals (EffectJson's
+       grammar); the stack wins over `preset` at rebuild while the
+       preset id stays as provenance. */
+    doc.effect.layers = layers;
+    markDirty();
+    rebuildEffect();
+    if(!layers.empty())
+    {
+        setPlaying(true);
+    }
+    emit presetChanged();
 }
 
 void SceneBridge::tick()
@@ -3103,7 +3215,9 @@ void SceneBridge::schedulePush()
     {
         return;
     }
-    if(!frame.empty() && !doc.effect.preset.empty())
+    /* Frame pushes ride the lanes whenever the engine holds a stack
+       — an inline layer stack counts even without a named preset. */
+    if(!frame.empty() && !engine.Empty())
     {
         scheduleLane(0);
         scheduleLane(1);

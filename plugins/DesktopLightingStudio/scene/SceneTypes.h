@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <vector>
@@ -120,17 +121,125 @@ struct DeviceBinding
 };
 
 /*---------------------------------------------------------*\
+||| Effect layer model — declared here (not in            |
+||| effects/EffectTypes.h) because the persisted inline   |
+||| layer stack lives on EffectState below, and           |
+||| EffectTypes.h already depends on this header. The     |
+||| definitions still live in effects/EffectTypes.cpp.    |
+|||                                                         |
+|||   ColorF — 0..1 float working space for compositing. |
+|||   SceneColor (packed 0x00BBGGRR) converts at the      |
+|||   edges.                                              |
+\*---------------------------------------------------------*/
+struct ColorF
+{
+    float r = 0.0f;
+    float g = 0.0f;
+    float b = 0.0f;
+    float a = 1.0f;         /* coverage: how much this result owns the pixel */
+};
+
+ColorF     ToColorF(SceneColor c);
+SceneColor ToSceneColor(const ColorF& c);
+
+enum class BlendMode
+{
+    Replace,    /* lerp toward the layer color by coverage            */
+    Add,        /* dst + src * coverage                               */
+    Screen,     /* 1 - (1-dst)(1-src*coverage) — soft additive light  */
+};
+
+enum class CoordSpace
+{
+    World,      /* shared desk frame — effects cross devices          */
+    Local,      /* object-local frame — per-fan/per-keyboard fields   */
+};
+
+/*---------------------------------------------------------*\
+|||| Palette — interpolated color stops. Sample(u) wraps;|
+|||| the last stop blends back into the first so cyclic  |
+|||| effects (spin, wave) stay seamless.                 |
+\*---------------------------------------------------------*/
+struct PaletteStop
+{
+    float     pos = 0.0f;   /* 0..1 */
+    ColorF    color;
+};
+
+struct Palette
+{
+    std::vector<PaletteStop> stops;
+    ColorF Sample(float u) const;   /* u wraps via frac */
+};
+
+Palette MakePalette(std::initializer_list<SceneColor> colors); /* even stops */
+Palette MakePalette(std::initializer_list<PaletteStop> stops);
+
+/*---------------------------------------------------------*\
+|||| EffectLayer — one field + how it composites.         |
+||||                                                         |
+||||   primitive — "static" | "gradient" | "wave" | "pulse" ||
+||||               "comet" | "noise" | "spin" | "ripple" |  |
+||||               "screenfield" | "level"                  |
+||||   space     — World (shared desk) or Local (per object)||
+||||   speed     — primitive motion rate (m/s, rev/s, ...)  |
+||||   scale     — wavelength / ring spacing / noise freq / ||
+||||               spoke count / comet tail length / ripple ||
+||||               band half-width / screenfield width (m)  |
+||||   phase     — 0..1 starting offset                     |
+||||   density   — band sharpness / noise contrast / ripple ||
+||||               decay rate (1/s)                         |
+||||   origin    — pulse/comet/spin center (world or local);|
+||||               ripple spawn for position-less events;   ||
+||||               screenfield screen center                |
+||||   direction — wave/gradient axis; noise wind           |
+||||   path      — comet waypoints (polyline, closed auto)  |
+||||   targets   — object ids, geometry tags, emitter       |
+||||               groups; empty = every device object      |
+||||   source    — which input events feed a ripple         |
+||||               ("audio" | "key" | "" = all)             |
+||||   seed      — per-layer deterministic variation        |
+||||   enabled   — false = the layer composites nothing;    |
+||||               persisted on/off switch for the layer    |
+||||               stack editor (task 5.2)                  |
+\*---------------------------------------------------------*/
+struct EffectLayer
+{
+    std::string              primitive = "static";
+    CoordSpace               space     = CoordSpace::World;
+    BlendMode                blend     = BlendMode::Replace;
+    float                    opacity   = 1.0f;
+    float                    speed     = 1.0f;
+    float                    scale     = 0.5f;
+    float                    phase     = 0.0f;
+    float                    density   = 1.0f;
+    Vec3                     origin;
+    Vec3                     direction { 1.0f, 0.0f, 0.0f };
+    std::vector<Vec3>        path;
+    Palette                  palette;
+    std::vector<std::string> targets;
+    std::string              source;         /* "audio" | "key" | "" = all */
+    unsigned int             seed    = 0;
+    bool                     enabled = true;
+};
+
+/*---------------------------------------------------------*\
 ||| EffectState — which preset drives the scene and how.   |
 ||| Persisted with the document so a saved scene is also   |
 ||| the startup scene.                                      |
 \*---------------------------------------------------------*/
 struct EffectState
 {
-    std::string  preset;                    /* "" = none             */
-    unsigned int seed = 0;                  /* remix seed            */
-    float        speed = 1.0f;              /* global rate           */
-    float        intensity = 1.0f;
-    bool         playing = false;
+    std::string              preset;                    /* "" = none             */
+    unsigned int             seed = 0;                  /* remix seed            */
+    float                    speed = 1.0f;              /* global rate           */
+    float                    intensity = 1.0f;
+    bool                     playing = false;
+    /* The user's edited inline layer stack (resolved literals only).
+       Empty = resolve `preset` through the effect-look registry.
+       Serialized as workspace effects.layers; never a dump of the
+       engine's resolved output. */
+    std::vector<EffectLayer> layers;
 };
 
 /* One evaluated frame: owner object id -> per-emitter colors.

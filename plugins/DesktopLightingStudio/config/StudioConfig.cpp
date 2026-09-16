@@ -9,6 +9,7 @@
 #include "../scene/JsonFields.h"
 #include "../presets/DevicePreset.h"
 #include "../effects/Presets.h"
+#include "../effects/EffectJson.h"
 
 #include <set>
 #include <vector>
@@ -141,10 +142,11 @@ nlohmann::json ToJson(const StudioDocument& doc)
         {"speed",     doc.effect.speed},
         {"intensity", doc.effect.intensity},
         {"playing",   doc.effect.playing},
-        /* Reserved for JSON layer definitions (milestone 5);
-           retained verbatim like extensions. */
-        {"layers",    doc.meta.layers.is_array() ? doc.meta.layers
-                                                 : nlohmann::json::array()},
+        /* The user's authored inline layer stack — resolved
+           literals only (the validated EffectLayer grammar).
+           Empty = the named preset resolves through the
+           effect-look registry at runtime. */
+        {"layers",    EffectLayersToJson(doc.effect.layers)},
     };
 
     nlohmann::json devices = nlohmann::json::object();
@@ -581,14 +583,12 @@ bool FromJson(const nlohmann::json& j, StudioDocument& doc,
                                        "effects", errs);
         if(s->contains("layers"))
         {
-            if(!s->at("layers").is_array())
-            {
-                AddErr(errs, "effects.layers", "expected array");
-            }
-            else
-            {
-                out.meta.layers = s->at("layers");
-            }
+            /* Typed + validated: the authored inline stack is real
+               layer data (resolved literals — a remix spec here is
+               an error). An empty array is meaningful: it says "no
+               inline stack, resolve the named preset". */
+            EffectLayersFromJson(s->at("layers"), out.effect.layers,
+                                 &errs, "effects.layers");
         }
     }
 

@@ -20,7 +20,10 @@
 |||     colors  — {objects, emitters} keyed by stable      |
 |||               instance/entity paths                    |
 |||     effects — preset/seed/speed/intensity/playing      |
-|||               + layers (reserved, retained verbatim)   |
+|||               + layers (the user's authored inline     |
+|||               layer stack - typed, validated,        |
+|||               resolved literals only; empty = the    |
+|||               named preset resolves via the registry)|
 |||     extensions — third-party data, retained verbatim   |
 |||                                                           |
 |||   Type definitions live in external files              |
@@ -126,10 +129,6 @@ struct WorkspaceMeta
     bool           live_on_startup = false;
     /* Third-party extension data, retained verbatim. */
     nlohmann::json extensions;
-    /* effects.layers — JSON effect layer definitions reserved for
-       milestone 5; an array retained verbatim so hand-authored
-       layers survive a save untouched. */
-    nlohmann::json layers = nlohmann::json::array();
 };
 
 /*---------------------------------------------------------*\

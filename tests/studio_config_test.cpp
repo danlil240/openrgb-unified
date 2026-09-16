@@ -769,21 +769,51 @@ static void TestEffectsSection()
               "effects: text 5000000000 seed rejected");
     }
 
-    /* effects.layers is reserved — retained verbatim like
-       extensions, never dropped. */
+    /* effects.layers is the user's authored inline layer stack —
+       typed + validated resolved literals (milestone 5), no
+       longer retained verbatim. */
     {
         json j = good;
         j["effects"]["layers"] = json::array({
             {{"primitive", "wave"}, {"speed", 2.0},
-             {"custom", {{"x", 1}, {"y", "two"}}}},
+             {"palette", json::array({
+                 {{"pos", 0.0}, {"color", "#FF0000"}},
+                 {{"pos", 0.5}, {"color", "#00FF00"}}})}},
         });
         StudioDocument doc;
         errors.clear();
         CHECK(FromJson(j, doc, &errors) && errors.empty()
-              && doc.meta.layers == j["effects"]["layers"],
-              "effects: layers retained verbatim");
-        CHECK(ToJson(doc)["effects"]["layers"] == j["effects"]["layers"],
+              && doc.effect.layers.size() == 1
+              && doc.effect.layers[0].primitive == "wave"
+              && doc.effect.layers[0].palette.stops.size() == 2,
+              "effects: layers parse typed");
+        const json out_layers = ToJson(doc)["effects"]["layers"];
+        CHECK(out_layers.size() == 1
+              && out_layers[0]["primitive"] == "wave"
+              && out_layers[0]["speed"] == 2.0
+              && out_layers[0]["palette"].size() == 2,
               "effects: layers survive re-serialization");
+    }
+    {
+        /* Unknown layer keys and remix specs are errors now —
+           the resolved stack is typed, not an extension point. */
+        json j = good;
+        j["effects"]["layers"] = json::array({
+            {{"primitive", "wave"}, {"custom", {{"x", 1}}}},
+        });
+        StudioDocument doc;
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "layers"),
+              "effects: unknown layer key rejected");
+
+        j = good;
+        j["effects"]["layers"] = json::array({
+            {{"primitive", "wave"},
+             {"speed", {{"remix", {0.1, 0.2}}}}},
+        });
+        errors.clear();
+        CHECK(!FromJson(j, doc, &errors) && HasError(errors, "layers"),
+              "effects: remix spec in layers rejected");
     }
     {
         json j = good;

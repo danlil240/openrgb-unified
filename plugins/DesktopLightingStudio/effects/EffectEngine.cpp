@@ -53,7 +53,7 @@ void EffectEngine::Evaluate(const SceneDocument& doc, double t,
             ColorF acc = ToColorF(EmitterColor(doc, obj.id, (int)i));
             for(const EffectLayer& layer : layers)
             {
-                if(!LayerMatches(layer, obj, e))
+                if(!layer.enabled || !LayerMatches(layer, obj, e))
                 {
                     continue;
                 }

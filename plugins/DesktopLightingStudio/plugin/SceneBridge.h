@@ -191,6 +191,18 @@ public slots:
     void remix();
     void setEffectSpeedPct(int pct);
     void setEffectIntensityPct(int pct);
+    /* Milestone 5 — the persisted inline layer stack. When
+       doc.effect.layers is non-empty it wins over `preset` at
+       rebuild (preset keeps provenance); selecting a preset or
+       stopping the effect clears it. applyEffectLayers replaces
+       the stack wholesale — callers pass validated resolved
+       literals (effects/EffectJson.h grammar); the 5.2 layer
+       editor commits through here. */
+    void applyEffectLayers(const std::vector<EffectLayer>& layers);
+    const std::vector<EffectLayer>& effectLayers() const
+    {
+        return doc.effect.layers;
+    }
 
     /* Stage 3 — reactive input sources */
     void setAudioInput(bool on);
@@ -415,6 +427,13 @@ private:
        re-reads defaults + the workspace's presets/devices/ files
        so a Reload picks up edited type files. */
     void           LoadPresetDefaults();
+    /* LoadEffectDefaults refreshes the packaged effect-look
+       defaults from bundled qrc presets/effects/*.effect.json
+       (the authoritative look library); the single minimal
+       built-in look is the fallback when nothing readable
+       ships. ReloadPresets re-reads both defaults layers plus
+       the workspace's presets/devices/ + presets/effects/ files. */
+    void           LoadEffectDefaults();
     void           ReloadPresets();
     void           markDirty();
 
@@ -452,6 +471,10 @@ private:
        default-workspace builder then swaps to the resolvable
        recovery desk. */
     bool                        using_fallback_types = false;
+    /* True when LoadEffectDefaults found no readable packaged
+       *.effect.json — the registry's single built-in look stands
+       in (see Presets.cpp's fallback doc). */
+    bool                        using_fallback_effects = false;
     EditorController            editor;           /* edits `workspace`       */
     SceneObjectModel*           obj_model = nullptr; /* stable list model    */
     PresetListModel*            preset_model = nullptr; /* type library rows  */

@@ -13,9 +13,22 @@
 #pragma once
 
 #include "EffectTypes.h"
+#include "../presets/EffectRegistry.h"
 
 namespace studio
 {
+
+/* The process-wide effect-look registry. The Qt bridge fills the
+   defaults layer from bundled qrc resources and loads the
+   workspace's presets/effects/ over it; the Qt-free side lazily
+   probes the source-tree packaged dir so tests resolve the same
+   looks. */
+EffectRegistry& EffectLooks();
+
+/* Invalidate the lazy packaged-file probe (tests pointing the
+   registry at a fixture dir before first use don't need this —
+   it only matters after an explicit reset). */
+void            ResetEffectLooks();
 
 struct PresetInfo
 {
@@ -26,11 +39,19 @@ struct PresetInfo
                                 /* "key" | "screen" | "" = none       */
 };
 
-/* Fixed preset order for the scene-card strip. */
+/* Preset strip listing — the nine shipped looks in fixed card
+   order (metadata from the registry: a file override supplies
+   the file's name/description/needs), then any file-only looks
+   sorted by id. Rebuilt on each call; the pointer a FindPreset
+   returns is valid until the next call. */
 const std::vector<PresetInfo>& PresetList();
 const PresetInfo*              FindPreset(const std::string& id);
 
-/* Build a preset's layers. Unknown id -> empty list. */
+/* Resolve a look's layers via the registry (remix draws consume
+   the seed's stream in document order). Unknown id -> empty list;
+   when NOTHING is readable (no packaged files, no file layer) the
+   one minimal built-in fallback look answers any id so the desk
+   still lights. */
 std::vector<EffectLayer> BuildPreset(const std::string& id, unsigned int seed);
 
 /* Global user controls applied to a built layer list. */

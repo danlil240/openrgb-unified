@@ -14,6 +14,7 @@ if not exist out\scene mkdir out\scene
 if not exist out\config mkdir out\config
 if not exist out\presets mkdir out\presets
 if not exist out\editor mkdir out\editor
+if not exist out\effects mkdir out\effects
 set STUDIO=%~dp0..\plugins\DesktopLightingStudio
 set JSON=%~dp0..\OpenRGB\dependencies\json
 :: Shared source list — scene core + effects + the v3 type stack
@@ -27,6 +28,7 @@ set SCENE_SRC=^
    "%STUDIO%\scene\DefaultDesk.cpp" ^
    "%STUDIO%\effects\EffectTypes.cpp" ^
    "%STUDIO%\effects\EffectEngine.cpp" ^
+   "%STUDIO%\effects\EffectJson.cpp" ^
    "%STUDIO%\effects\Presets.cpp" ^
    "%STUDIO%\inputs\InputBus.cpp" ^
    "%STUDIO%\inputs\OnsetDetect.cpp" ^
@@ -34,6 +36,7 @@ set SCENE_SRC=^
 set V3_SRC=^
    "%STUDIO%\presets\DevicePreset.cpp" ^
    "%STUDIO%\presets\PresetRegistry.cpp" ^
+   "%STUDIO%\presets\EffectRegistry.cpp" ^
    "%STUDIO%\presets\PresetBundle.cpp" ^
    "%STUDIO%\scene\SceneResolver.cpp" ^
    "%STUDIO%\config\StudioConfig.cpp" ^
@@ -69,6 +72,13 @@ cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
    /Fo:out\editor\ /Fe:out\editor\studio_editor_test.exe
 if errorlevel 1 exit /b %errorlevel%
 call :run out\editor\studio_editor_test.exe
+if errorlevel 1 exit /b %errorlevel%
+cl /nologo /EHsc /std:c++17 /I"%STUDIO%" /I"%JSON%" ^
+   effect_json_test.cpp ^
+   %SCENE_SRC% %V3_SRC% ^
+   /Fo:out\effects\ /Fe:out\effects\effect_json_test.exe
+if errorlevel 1 exit /b %errorlevel%
+call :run out\effects\effect_json_test.exe
 exit /b %errorlevel%
 
 :: Run a test exe; on a Device Guard per-path block, copy onto the
