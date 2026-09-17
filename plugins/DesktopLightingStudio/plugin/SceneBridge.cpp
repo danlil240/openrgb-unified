@@ -599,17 +599,30 @@ bool SceneBridge::pausePushes()
        the probe already took: probe_active (the dtor's drain loop
        spins on it), probe_serial (every later probe deadlocks), or
        live_output (live stuck off). The guard stays armed until the
-       probe is fully registered and unwinds in reverse order — lane
+       probe is fully registered, so the counted exits (the early
+       `return false`s) let the dtor unwind in reverse order — lane
        locks, live flag, serial lock, count — mirroring
-       resumePushes(); the counted exits just disarm via return. */
+       resumePushes(). owns_locks gates that unwind: until this probe
+       takes probe_serial the members can hold a SIBLING in-flight
+       probe's locks (overlapping probes serialize on probe_serial —
+       see SceneBridge.h), so a pre-serial exit must release nothing
+       but its own count. */
     struct PauseGuard {
         SceneBridge* b;
         bool armed          = true;
         bool live_exchanged = false;
+        bool owns_locks     = false;
         ~PauseGuard()
         {
             if(!armed)
             {
+                return;
+            }
+            if(!owns_locks)
+            {
+                /* Exited before acquiring probe_serial — the members
+                   may be a sibling probe's; touch only the count. */
+                b->probe_active.fetch_sub(1);
                 return;
             }
             /* Move off the members before resetting — the same
@@ -639,6 +652,9 @@ bool SceneBridge::pausePushes()
         return false;
     }
     probe_serial_lock = std::make_unique<std::unique_lock<QMutex>>(probe_serial);
+    /* From here the members are this probe's — a sibling can only be
+       queued behind us, never holding them. */
+    pause.owns_locks = true;
     if(shutting_down.load())
     {
         return false;
