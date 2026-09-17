@@ -17,7 +17,7 @@ jobs:
         with:
           version: '6.8.3'
           arch: ${{ matrix.qt_arch }}
-          modules: 'qtquick3d'
+          modules: 'qtquick3d qtshadertools'
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
       - name: Linux deps
@@ -35,7 +35,7 @@ jobs:
         working-directory: plugins/DesktopLightingStudio
         run: |
           qmake DesktopLightingStudio.pro
-          jom
+          nmake
       - name: Unit tests (unix)
         if: runner.os != 'Windows'
         run: bash tests/build-studio-tests.sh
