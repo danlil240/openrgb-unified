@@ -22,15 +22,18 @@ DesktopLightingStudio/
   presets/
     devices/*.device.json      device-type definitions
     effects/*.effect.json      lighting-look definitions
-    layouts/                   reserved
-  assets/                      preset-referenced assets
+    layouts/                   reserved — nothing writes it today
+  assets/                      bundle-referenced assets (appears on import)
   schemas/                     copies of the JSON schemas, for editors
 ```
 
-On first launch Studio creates this tree and materializes the bundled
-content from inside the plugin: the three schemas, 13 device types,
-and 9 looks. Files it creates are writable and *yours* — re-runs never
-overwrite your edits.
+On first launch Studio creates the workspace dir, `schemas/`,
+`presets/devices/`, and `presets/effects/`, and materializes the
+bundled content from inside the plugin: the three schemas, 13 device
+types, and 9 looks. (`assets/` appears when you import a bundle that
+carries assets; `presets/layouts/` is reserved in the spec — no code
+writes it yet.) Files it creates are writable and *yours* — re-runs
+never overwrite your edits.
 
 ## studio.json — the workspace (schema_version 3)
 
@@ -127,7 +130,8 @@ built-in one.
 - **zones** — emitter generators on an entity: `id`, `entity`,
   `led_count`, and `layout`:
   - `ring`: `radius_m`, `start_angle_deg`, `face_y_m`, `reverse`.
-  - `strip`: `spacing_m`, `origin`, `face_y_m`, `reverse`.
+  - `strip`: `spacing_m`, `origin`. (`face_y_m` and `reverse` are
+    ring-only — the parser reads them only in the ring branch.)
   - `matrix`: `rows`, `cols`, `pitch_x_m`, `pitch_z_m`, `origin`,
     `empty` (unmapped-cell sentinel), `map` (row-major index map).
     `"dynamic": true` rebuilds emitters from the *bound hardware
@@ -141,7 +145,9 @@ built-in one.
   `{controller_name, vendor, zone_name}` describing compatible
   hardware. Informational only: it never contains serials and never
   grants `verified`. Unknown keys are rejected as typos.
-- `size_m`/`x`/`y`/`z` accept `[x,y,z]` (preferred) or `{x,y,z}`.
+- `x`/`y`/`z`/`rx`/`ry`/`rz` are plain scalar numbers. Only `size_m`,
+  `origin`, and `points` entries take vec3 forms — `[x,y,z]`
+  (preferred) or `{x,y,z}`.
 
 Expanded objects get ids like `fan_front_top/diffuser` — that's the
 path `colors` and `device_settings` use. Changing a type file changes
@@ -184,6 +190,19 @@ your file shadows a packaged default. The nine bundled looks are
         { "pos": 0.65, "color": "#081838" },
         { "pos": 0.85, "color": "#005A6E" }
       ]
+    },
+    {
+      "primitive": "noise",
+      "blend": "screen",
+      "scale": 7.0,
+      "direction": [0.12, 0.05, 0.08],
+      "speed": 1.0,
+      "density": 0.86,
+      "seed": { "remix_u32": [0, 4294967295] },
+      "opacity": 0.5,
+      "palette": [
+        { "pos": 0.0, "color": "#EBF5FF" }
+      ]
     }
   ]
 }
@@ -217,10 +236,13 @@ Layer fields — all optional; defaults in parentheses:
 
 ### Remix specs — deterministic variation from the seed
 
-Any numeric layer field may be a literal *or* one spec object with
-exactly one key. Each spec consumes exactly one draw from the seed's
-random stream, in document order (layers array order, then field
-order within each layer object):
+Scalar numeric fields (`opacity`, `speed`, `scale`, `phase`,
+`density`), `origin`/`direction` vector elements, and palette stop
+`pos` may each be a literal *or* one spec object with exactly one
+key. `path` waypoint numbers are literals only, and `seed` takes a
+u32 literal or `{"remix_u32":[lo,hi]}`. Each spec consumes exactly
+one draw from the seed's random stream, in document order (layers
+array order, then field order within each layer object):
 
 | Shape | Draw |
 | --- | --- |
@@ -240,7 +262,8 @@ Same seed → same resolved look, every time. Change `effects.seed`
 `studio.json → effects.layers` is the *resolved* stack: literals
 only — a remix spec there is a validation error. When `layers` is
 non-empty it wins over `preset` at runtime; `preset` keeps the
-provenance so the UI can say "aurora (customized)". Editing a look in
+provenance so the UI can distinguish "look: aurora" from
+"inline (customized)". Editing a look in
 the UI writes literals into `effects.layers`; **Save as look…**
 bakes the stack into a `*.effect.json` look document; **Reset to
 preset** clears the inline stack so the named look resolves again.
@@ -312,7 +335,8 @@ preset** clears the inline stack so the named look resolves again.
 ## Sharing — export/import bundles
 
 **File → Export Bundle…** writes a directory: `studio.json`
-(sanitized — serials and locations stripped by default), one copy of
+(always sanitized — serials and locations are stripped, with no
+opt-out), one copy of
 each referenced device type, transitive dependencies, and `assets/`.
 
 **File → Import Bundle…** inspects first: each incoming type is

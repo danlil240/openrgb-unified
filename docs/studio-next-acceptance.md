@@ -30,7 +30,7 @@ deployed** — no validation step touches the running host).
 | `tests/studio_transform_test` | 4 checks, 0 failures (Qt integration fixture, run at M1) |
 | `tests/studio_perf` | PERF OK — numbers below |
 | `plugins/DesktopLightingStudio/verify-package.bat` | PACKAGE OK — 74/74 manifest entries present in `out\` |
-| `tests/build-only.bat` | BUILD OK (not deployed) |
+| `plugins/DesktopLightingStudio/build-only.bat` | BUILD OK (not deployed) |
 
 SAC/WDAC caveat: this machine's Smart App Control policy
 (VerifiedAndReputable, CodeIntegrity event 3077) denies freshly linked
@@ -125,7 +125,8 @@ explicitly requires an *observed* session. See L1 for the procedure.
 > "Target p95 frame time ≤16.7 ms on the current desktop at a
 > 1920 × 1080 viewport, Balanced quality, with a reproducible
 > 30-device/1,000-emitter fixture. Measure drag response separately,
-> targeting ≤50 ms."
+> targeting ≤50 ms. These are proposed targets, not current
+> measurements."
 
 **Verdict: PASS for engine cost; LIMITATION for render-loop FPS.**
 
@@ -313,7 +314,7 @@ Procedure: on a machine where SAC permits local dev binaries (or
 after the org policy evaluates the hashes):
 
 ```bat
-tests\studio_lifecycle_test\build.bat    :: 11 test functions
+tests\studio_lifecycle_test\build.bat    :: 12 test slots
 tests\editor_qml\build.bat               :: C++ harness slots
 ```
 
