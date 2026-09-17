@@ -66,6 +66,8 @@ HEADERS += \
     inputs/InputBus.h \
     inputs/OnsetDetect.h \
     inputs/KeyMap.h \
+    inputs/VkDefs.h \
+    inputs/KeyTranslate.h \
     inputs/AudioLoopback.h \
     inputs/KeyHook.h \
     inputs/ScreenSampler.h
@@ -101,6 +103,7 @@ SOURCES += \
     inputs/InputBus.cpp \
     inputs/OnsetDetect.cpp \
     inputs/KeyMap.cpp \
+    inputs/KeyTranslate.cpp \
     inputs/AudioLoopback.cpp \
     inputs/KeyHook.cpp \
     inputs/ScreenSampler.cpp
