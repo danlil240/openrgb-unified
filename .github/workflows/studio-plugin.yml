@@ -46,8 +46,8 @@ jobs:
         # build-studio-tests.sh drives GCC-style flags; use the runner's
         # bundled MSYS2 g++ rather than cl for the Qt-free suites.
         run: |
-          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          export PATH="/c/msys64/mingw64/bin:$PATH"
+          export CXX="$(command -v g++ || command -v clang++)"
+          echo "using $CXX"
           bash tests/build-studio-tests.sh
-        env:
-          CXX: g++
         shell: bash

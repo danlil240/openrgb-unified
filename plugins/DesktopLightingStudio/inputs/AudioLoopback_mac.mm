@@ -14,6 +14,7 @@
 #include "AudioLoopback.h"
 
 #include <CoreAudio/CoreAudio.h>
+#import <CoreAudio/CATapDescription.h>
 #include <Foundation/Foundation.h>
 #include <dispatch/dispatch.h>
 
