@@ -41,7 +41,9 @@ EDITOR_SRC=(
    "$STUDIO/editor/TransformCommands.cpp"
 )
 
-CXXFLAGS=(-std=c++17 -I"$STUDIO" -I"$JSON")
+# Static C++ runtime: on Windows hosts the produced exe would otherwise
+# need libstdc++-6.dll/libgcc from the compiler's bin dir on PATH.
+CXXFLAGS=(-std=c++17 -static-libstdc++ -static-libgcc -I"$STUDIO" -I"$JSON")
 
 "$CXX" "${CXXFLAGS[@]}" studio_scene_test.cpp \
    "${SCENE_SRC[@]}" "${V3_SRC[@]}" \
