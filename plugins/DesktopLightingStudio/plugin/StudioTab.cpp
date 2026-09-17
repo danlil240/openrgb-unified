@@ -54,6 +54,8 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#elif defined(Q_OS_UNIX)
+#include <dlfcn.h>
 #endif
 
 /*---------------------------------------------------------*\
@@ -73,6 +75,13 @@ static QString PluginDirectory()
         {
             return QFileInfo(QString::fromWCharArray(path)).absolutePath();
         }
+    }
+#elif defined(Q_OS_UNIX)
+    Dl_info info;
+    if(dladdr(reinterpret_cast<const void*>(&PluginDirectory), &info)
+       && info.dli_fname != nullptr)
+    {
+        return QFileInfo(QString::fromUtf8(info.dli_fname)).absolutePath();
     }
 #endif
     return QString();

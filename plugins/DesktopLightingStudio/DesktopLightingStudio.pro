@@ -10,6 +10,18 @@ QT          += core gui widgets quick quickwidgets quick3d
 # WASAPI loopback + LL key hook + GDI screen grab (Stage 3 inputs)
 win32:LIBS  += -lole32 -luser32 -lgdi32
 
+# Linux: PulseAudio monitor capture + dladdr self-path resolution
+unix:!macx {
+    LIBS    += -lpulse -ldl
+}
+
+# macOS: CGEventTap keys + CoreAudio process tap + screen-capture preflight
+macx {
+    LIBS    += -framework ApplicationServices -framework CoreAudio \
+               -framework CoreFoundation -framework CoreGraphics
+    QMAKE_MACOSX_DEPLOYMENT_TARGET = 12.0
+}
+
 TEMPLATE     = lib
 CONFIG      += plugin c++17 release
 CONFIG      -= debug debug_and_release
