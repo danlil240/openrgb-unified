@@ -3384,6 +3384,7 @@ void SceneBridge::beginEffectGesture()
 
 void SceneBridge::commitEffectGesture(const QString& label)
 {
+    const bool was_active = editor.LayerGestureActive();
     std::optional<EditorEdit> e = editor.CommitLayerGesture(
         label.toStdString());
     if(e.has_value())
@@ -3393,6 +3394,18 @@ void SceneBridge::commitEffectGesture(const QString& label)
         {
             setPlaying(true);
         }
+        return;
+    }
+    if(was_active)
+    {
+        /* No-record commit — the controller restored the begin
+           snapshot (a materialize-only gesture, or a scrub that
+           returned to its start value). Mirror the restored state
+           back into doc exactly like cancelEffectGesture does:
+           without this, doc.effect keeps the previewed/materialized
+           stack and a later autosave persists it with no recorded
+           edit. */
+        PreviewEffectSync();
     }
 }
 
@@ -3612,15 +3625,33 @@ void SceneBridge::removeEffectLayerStop(int index, int stop)
                                          (size_t)stop));
 }
 
-void SceneBridge::moveEffectLayerStop(int index, int stop, double pos)
+int SceneBridge::moveEffectLayerStop(int index, int stop, double pos)
 {
     if(index < 0 || stop < 0)
     {
-        return;
+        return stop;
     }
     SyncWorkspace();
     ApplyEffectOp(editor.MoveLayerStop((size_t)index, (size_t)stop,
                                        (float)pos));
+    /* The op re-sorted the palette — hand the dragged stop's NEW
+       index back so a scrub keeps hold of the same stop across
+       the sort (positions are unique, so the pos we just wrote —
+       or a refused move — identifies it exactly). A refused write
+       leaves no stop at `pos` → the incoming index stands. */
+    if(index < (int)workspace.effect.layers.size())
+    {
+        const std::vector<PaletteStop>& stops =
+            workspace.effect.layers[index].palette.stops;
+        for(size_t k = 0; k < stops.size(); k++)
+        {
+            if(stops[k].pos == (float)pos)
+            {
+                return (int)k;
+            }
+        }
+    }
+    return stop;
 }
 
 void SceneBridge::setEffectLayerStopColor(int index, int stop,
@@ -3699,6 +3730,26 @@ QVariantMap SceneBridge::saveLookAs(const QString& id,
             "bad look id '%1' — expected [A-Za-z0-9_-]").arg(id) };
         return out;
     }
+    if(editor.LayerGestureActive() || editor.GestureActive())
+    {
+        /* Adopting the saved look is refused mid-gesture — refuse
+           the whole save up front so ok:true never reports a
+           half-done adopt. */
+        out["errors"] = QStringList{ QStringLiteral(
+            "finish the current edit first") };
+        return out;
+    }
+    /* Same overwrite gate as the preset editor's save-as
+       ("type id already exists"): an existing id — workspace file
+       or shipped default — is refused. The user picks a fresh id;
+       WriteEffectFile must never silently overwrite a look. */
+    if(EffectLooks().Contains(lid))
+    {
+        out["errors"] = QStringList{ QStringLiteral(
+            "look id '%1' already exists — pick a new id")
+                .arg(id) };
+        return out;
+    }
     if(store == nullptr)
     {
         out["errors"] = QStringList{ QStringLiteral(
@@ -3772,7 +3823,7 @@ QVariantMap SceneBridge::saveLookAs(const QString& id,
     /* Adopt as one undoable edit: preset <- saved id, inline stack
        cleared (the file is now the definition). */
     SyncWorkspace();
-    ApplyEffectOp(editor.SetLayers({}, lid));
+    ApplyEffectOp(editor.SetLayers({}, lid, "save as look"));
     out["ok"]   = true;
     out["id"]   = QString::fromStdString(lid);
     out["path"] = store->EffectPresetDir() + "/"

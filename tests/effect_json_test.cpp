@@ -1012,8 +1012,12 @@ static void TestPersonalLookFile()
     EffectRegistry reg;
     CHECK(reg.LoadDirectory(dir.string(), &errs),
           "registry picks up the personal look");
+    /* Keep the List() result alive — a range-for over the
+       temporary would leave `info` dangling after the loop. */
+    const std::vector<EffectRegistry::EffectInfo> infos =
+        reg.List();
     const EffectRegistry::EffectInfo* info = nullptr;
-    for(const EffectRegistry::EffectInfo& i : reg.List())
+    for(const EffectRegistry::EffectInfo& i : infos)
     {
         if(i.id == "mylook")
         {

@@ -1811,10 +1811,13 @@ EditorController::CommitLayerGesture(const std::string& label)
     const EffectDelta begin  = layer_gesture.begin;
     const EffectDelta base   = layer_gesture.base;
     layer_gesture            = LayerGesture{};
-    if(EffectDeltaEqual(after, base))
+    if(EffectDeltaEqual(after, base)
+       || EffectDeltaEqual(after, begin))
     {
-        /* The gesture produced no net change — restore the
-           pre-gesture snapshot (undoes a materialize-only begin). */
+        /* No net change against EITHER baseline — restore the
+           pre-gesture snapshot (undoes a materialize-only begin,
+           or a scrub that wandered back to its start value) and
+           push no record. */
         RestoreEffect(begin);
         return std::nullopt;
     }
@@ -1878,10 +1881,14 @@ EditorController::AddLayer(const std::string& primitive)
         return std::nullopt;
     }
     const EffectDelta before = SnapEffect();
-    if(!EnsureLayers())
-    {
-        return std::nullopt;
-    }
+    /* Best-effort materialize: a preset that fails to resolve
+       (deleted file, unknown id, no resolver) must NOT dead-end
+       "+ add layer" — the new layer simply starts a fresh inline
+       stack and the dead id stays as provenance (the reload path
+       already reports the loss). Per-layer ops still refuse a
+       failed materialize — there is nothing to index into. */
+    EnsureLayers();
+    last_error.clear();
     if(ws.effect.layers.size() >= EFFECT_MAX_LAYERS)
     {
         last_error = "layer count exceeds cap "
@@ -1922,7 +1929,8 @@ EditorController::RemoveLayer(size_t i)
 
 std::optional<EditorEdit>
 EditorController::SetLayers(const std::vector<EffectLayer>& stack,
-                            const std::string& new_preset)
+                            const std::string& new_preset,
+                            const char* label)
 {
     if(gesture.active || layer_gesture.active)
     {
@@ -1938,9 +1946,10 @@ EditorController::SetLayers(const std::vector<EffectLayer>& stack,
     const EffectDelta before = SnapEffect();
     ws.effect.layers = stack;
     ws.effect.preset = new_preset;
-    return FinishEffectEdit(before, stack.empty()
-                          ? "reset effect to preset"
-                          : "replace effect layers");
+    return FinishEffectEdit(before,
+            label != nullptr ? label
+            : stack.empty() ? "reset effect to preset"
+                            : "replace effect layers");
 }
 
 /*---------------------------------------------------------*\

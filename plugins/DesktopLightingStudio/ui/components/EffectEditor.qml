@@ -99,6 +99,12 @@ Rectangle {
         visible = false
         isOpen = false
     }
+
+    /* Escape closes the panel when it (not a field) holds focus —
+       the 4.3 DevicePresetEditor idiom: fields eat their own
+       Escape first, and closing disarms any armed pick mode. */
+    Keys.onEscapePressed: fxed.close()
+    onVisibleChanged: if (visible) forceActiveFocus()
     function clampSel() {
         var n = layers.rows().length
         if (selLayer >= n)
@@ -183,15 +189,19 @@ Rectangle {
             return
         }
         /* "end" — re-apply the release point (a click may deliver
-           no drag events), then fold the gesture into one record. */
-        if (mode === "path") {
-            var l2 = insp.layerMap()
-            var n2 = (l2 && l2.path) ? l2.path.length : 0
-            if (n2 > 0)
-                b.setEffectLayerPathPoint(selLayer, n2 - 1,
-                                          pt.x, pt.y, pt.z)
-        } else {
-            b.setEffectLayerOrigin(selLayer, pt.x, pt.y, pt.z)
+           no drag events), then fold the gesture into one record.
+           pt is null when the release had no plane hit — skip the
+           apply but still close the gesture so it can't leak. */
+        if (pt !== null && pt !== undefined) {
+            if (mode === "path") {
+                var l2 = insp.layerMap()
+                var n2 = (l2 && l2.path) ? l2.path.length : 0
+                if (n2 > 0)
+                    b.setEffectLayerPathPoint(selLayer, n2 - 1,
+                                              pt.x, pt.y, pt.z)
+            } else {
+                b.setEffectLayerOrigin(selLayer, pt.x, pt.y, pt.z)
+            }
         }
         b.commitEffectGesture(mode === "path" ? "path waypoint"
                                               : "layer origin")

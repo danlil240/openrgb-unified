@@ -297,10 +297,13 @@ public:
     /* Whole-stack replacement — reset-to-preset (pass an empty
        stack + the preset id to restore registry semantics) and
        saved-look adoption both go through here. `new_preset`
-       rewrites provenance; pass ws.effect.preset to keep it. */
+       rewrites provenance; pass ws.effect.preset to keep it.
+       `label` overrides the undo label (adoption says "save as
+       look", not "reset to preset"). */
     std::optional<EditorEdit> SetLayers(
         const std::vector<EffectLayer>& stack,
-        const std::string& new_preset);
+        const std::string& new_preset,
+        const char* label = nullptr);
 
     /* Per-layer ops — `i` indexes ws.effect.layers. */
     std::optional<EditorEdit> SetLayerEnabled(size_t i, bool on);

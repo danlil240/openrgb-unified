@@ -210,7 +210,14 @@ TestCase {
             b.layers[i].palette.splice(s, 1)
         }
         b.moveEffectLayerStop = function(i, s, pos) {
-            b.layers[i].palette[s].pos = pos
+            /* Mirror the real bridge: re-sort on every move and
+               hand back the dragged stop's NEW index so a scrub
+               tracks the stop across the sort. */
+            var pal = b.layers[i].palette
+            var st = pal[s]
+            st.pos = pos
+            pal.sort(function(a, c) { return a.pos - c.pos })
+            return pal.indexOf(st)
         }
         b.setEffectLayerStopColor = function(i, s, c) {
             b.log.push("stopc:" + i + ":" + s + "=" + c)
@@ -232,6 +239,13 @@ TestCase {
             if (id === "bad id")
                 return { ok: false,
                          errors: [ "bad look id 'bad id'" ] }
+            /* Mirror the real duplicate-id gate (review I3): an
+               existing look id — file or shipped — is refused. */
+            for (var k = 0; k < b.presetList.length; k++)
+                if (b.presetList[k].id === id)
+                    return { ok: false,
+                             errors: [ "look id '" + id
+                                       + "' already exists" ] }
             return { ok: true, id: id,
                      path: "presets/effects/" + id + ".effect.json" }
         }
@@ -344,6 +358,68 @@ TestCase {
         s.destroy()
     }
 
+    /* 5.2 review C1 regression: a mid-gesture effectLayersChanged
+       (every preview move emits it through rebuildEffect) must NOT
+       rebuild the delegate array — a rebuilt pressed slider dies
+       mid-press, never sees onPressedChanged(false), and the
+       gesture leaks open, silently swallowing every later edit.
+       The row cache freezes for the drag; the deferred rebuild
+       lands on commit. */
+    function test_scrubSurvivesModelRefresh() {
+        var b = makeBridge()
+        var s = mk("LayerStack.qml", b)
+        compare(s.rowCache.length, 3)
+        s.opScrubBegin()
+        s.opScrubMove(0, 0.5)
+        var before = s.rowCache
+        s.poke()                 /* = effectLayersChanged mid-drag */
+        verify(s.rowCache === before, "row cache frozen mid-gesture")
+        verify(s.pendingRows, "rebuild deferred, not dropped")
+        s.opScrubMove(0, 0.7)
+        s.opScrubEnd()
+        compare(b.gestureDepth, 0, "gesture closed exactly once")
+        verify(s.rowCache !== before, "deferred rebuild applied")
+        var commits = b.log.filter(function(l) {
+            return l.indexOf("commit:") === 0 })
+        compare(commits.length, 1, "interrupted scrub = one record")
+        s.destroy()
+    }
+
+    /* Same class on the palette side — plus stop IDENTITY: the
+       bridge re-sorts stops on every move, so a dragged stop
+       crossing its neighbor changes index mid-gesture. */
+    function test_paletteDragTracksStopAcrossSort() {
+        var b = makeBridge()
+        b.layers[0].palette = [ { pos: 0.1, color: "#aa0000" },
+                                { pos: 0.5, color: "#00aa00" },
+                                { pos: 0.9, color: "#0000aa" } ]
+        var p = mk("PaletteEditor.qml", b, { layerIndex: 0 })
+        compare(p.stopCache.length, 3)
+        p.posScrubBegin(0)          /* grab the RED stop @0.1 */
+        var cacheBefore = p.stopCache
+        p.posScrubMove(0, 0.6)      /* crosses green -> re-sorted idx 1 */
+        compare(p.dragStop, 1, "dragged stop followed the re-sort")
+        p.poke()                    /* effectLayersChanged mid-drag */
+        /* the model array froze for the whole drag (identity —
+           the stub's stops alias their storage; the real bridge
+           returns fresh maps, so only identity is meaningful). */
+        verify(p.stopCache === cacheBefore,
+               "stop rows frozen mid-gesture")
+        verify(p.pendingStops, "rebuild deferred, not dropped")
+        p.posScrubMove(0, 0.8)      /* stale row index still means RED */
+        p.posScrubEnd()
+        verify(!p.pendingStops, "deferred rebuild consumed on commit")
+        compare(p.stopCache[1].pos, 0.8, "cache shows committed state")
+        var pal = b.layers[0].palette   /* sorted: g .5, r .8, b .9 */
+        compare(pal.length, 3)
+        compare(pal[0].color, "#00aa00")
+        compare(pal[0].pos, 0.5, "untouched neighbor kept its pos")
+        compare(pal[1].color, "#aa0000")
+        compare(pal[1].pos, 0.8, "the dragged stop kept moving")
+        compare(b.gestureDepth, 0)
+        p.destroy()
+    }
+
     function test_srcBadgeStates() {
         var b = makeBridge()
         var s = mk("LayerStack.qml", b)
@@ -376,7 +452,7 @@ TestCase {
         compare(b.layers[1].palette[0].color, "#00ff00",
                 "bad hex refused")
 
-        p.posScrubBegin()
+        p.posScrubBegin(1)
         p.posScrubMove(1, 0.4)
         p.posScrubMove(1, 0.6)
         p.posScrubEnd()
@@ -461,14 +537,19 @@ TestCase {
         /* Item.visible = effective visibility — always false under
            the zero-size TestCase parent; isOpen is the flag. */
         verify(e.isOpen)
-        e.doSave("mylook", "My Look")
+        e.doSave("newlook", "My Look")
         compare(e.saveErrors.length, 0)
-        compare(b.saved.id, "mylook")
+        compare(b.saved.id, "newlook")
         compare(e.savePath,
-                "presets/effects/mylook.effect.json")
+                "presets/effects/newlook.effect.json")
         e.doSave("bad id", "x")
         compare(e.saveErrors.length, 1)
         verify(e.saveErrors[0].indexOf("bad look id") >= 0)
+        /* Duplicate-id gate (review I3): saving onto an existing
+           look — shipped or file — refuses with a VISIBLE error. */
+        e.doSave("aurora", "dup")
+        compare(e.saveErrors.length, 1)
+        verify(e.saveErrors[0].indexOf("already exists") >= 0)
         e.close()
         verify(!e.isOpen)
         e.destroy()

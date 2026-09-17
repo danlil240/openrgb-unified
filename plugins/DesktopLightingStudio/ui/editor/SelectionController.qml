@@ -66,13 +66,23 @@ Item {
     property var    pickTarget: null    /* fn(vector3d pt, string phase) */
 
     function deliverPick(x, y, phase) {
-        if (pickTarget === null || !cam)
+        if (pickTarget === null)
             return
-        var p = cam.planeHitPoint(x, y, 1, pickPlaneY)
-        if (!p && cam.target)
-            p = cam.planeHitPoint(x, y, -1, cam.target)
-        if (!p)
+        var p = null
+        if (cam) {
+            p = cam.planeHitPoint(x, y, 1, pickPlaneY)
+            if (!p && cam.target)
+                p = cam.planeHitPoint(x, y, -1, cam.target)
+        }
+        /* Lifecycle phases must land even without a plane hit —
+           dropping "cancel"/"end" here would leak the owner's
+           effect gesture (begin already ran). pt is null; the
+           callback still commits/cancels. */
+        if (!p) {
+            if (phase === "cancel" || phase === "end")
+                pickTarget(null, phase)
             return
+        }
         pickTarget(p, phase)
     }
 
@@ -444,11 +454,20 @@ Item {
                                      camera-side to restore */
         }
         /* Escape also exits an ARMED pick mode (press already over)
-           — "Escape exits" per the 5.2 contract. */
-        if (pickMode !== "")
+           — "Escape exits" per the 5.2 contract. Hand the owner a
+           cancel so its armed state clears too (the effect
+           editor's armedPick highlight + its pickTarget); with no
+           live gesture the bridge cancel is a no-op. Then clear
+           our side regardless. */
+        var disarmedPick = pickMode !== ""
+        if (disarmedPick) {
+            if (pickTarget !== null)
+                pickTarget(null, "cancel")
             pickMode = ""
+            pickTarget = null
+        }
         reset()
-        return wasPressed || g !== gNone
+        return wasPressed || g !== gNone || disarmedPick
     }
 
     /* Persist a wheel-zoom pose deferred during the press window —

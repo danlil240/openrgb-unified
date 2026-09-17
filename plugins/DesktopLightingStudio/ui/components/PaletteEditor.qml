@@ -43,14 +43,34 @@ Column {
     /* The layer this palette belongs to (-1 = none). */
     property int layerIndex: -1
     /* Re-eval stamp — the host panel bumps it on
-       effectLayersChanged; tests bump it directly. */
+       effectLayersChanged; tests bump it directly. Each bump
+       refreshes stopCache — EXCEPT mid-scrub: rebuilding the stop
+       rows while a position slider is pressed destroys the
+       delegate mid-gesture and leaks the undo gesture. */
     property int fxStamp: 0
+    onFxStampChanged: refreshStops()
+    onLayerIndexChanged: refreshStops()
+    onBridgeOverrideChanged: refreshStops()
     function poke() { fxStamp++ }
 
+    /* The repeaters' model — a CACHED snapshot of stops(). */
+    property var stopCache: []
+    property bool scrubbing: false
+    property bool pendingStops: false
+    function refreshStops() {
+        if (scrubbing) {
+            pendingStops = true
+            return
+        }
+        stopCache = stops()
+    }
+    Component.onCompleted: refreshStops()
+
     /* [{pos: 0..1, color: "#rrggbb"}] — bridge.effectLayer(i)
-       carries the stops list under `palette`. */
+       carries the stops list under `palette`. Always a FRESH
+       read (callers that need the live list use this; the
+       repeaters bind the cache). */
     function stops() {
-        fxStamp
         var b = br()
         if (!b || layerIndex < 0
             || typeof b.effectLayer !== "function")
@@ -101,18 +121,40 @@ Column {
         if (b && /^#[0-9a-fA-F]{6}$/.test(c))
             b.setEffectLayerStopColor(layerIndex, i, c)
     }
-    /* Position scrub = one effect gesture = one undo record. */
-    function posScrubBegin() {
+    /* Position scrub = one effect gesture = one undo record.
+       scrubbing freezes the stop rows for the drag; dragStop
+       tracks the dragged stop's CURRENT index — the bridge op
+       re-sorts the palette on every move, so a stop crossing its
+       neighbor changes index mid-gesture and a stale row index
+       would move the WRONG stop. */
+    property int dragStop: -1
+    function posScrubBegin(i) {
         var b = br()
+        dragStop = (typeof i === "number") ? i : -1
+        scrubbing = true
         if (b) b.beginEffectGesture()
     }
     function posScrubMove(i, v) {
         var b = br()
-        if (b) b.moveEffectLayerStop(layerIndex, i, v)
+        if (!b)
+            return
+        var idx = (dragStop >= 0) ? dragStop : i
+        var ni = b.moveEffectLayerStop(layerIndex, idx, v)
+        /* The real bridge returns the post-sort index; stubs that
+           return undefined keep index-following (pre-review
+           behavior). */
+        if (typeof ni === "number" && ni >= 0)
+            dragStop = ni
     }
     function posScrubEnd() {
         var b = br()
+        dragStop = -1
+        scrubbing = false
         if (b) b.commitEffectGesture("move palette stop")
+        if (pendingStops) {
+            pendingStops = false
+            refreshStops()
+        }
     }
     function doAddStop() {
         var b = br()
@@ -134,14 +176,14 @@ Column {
         border.color: th.border
         clip: true
         Repeater {
-            model: pal.stops()
+            model: pal.stopCache
             delegate: Rectangle {
                 required property var modelData
                 required property int index
                 /* Span from this stop's pos to the next (or 1). */
                 x: strip.width * modelData.pos
                 width: {
-                    var s = pal.stops()
+                    var s = pal.stopCache
                     var next = (index + 1 < s.length) ? s[index + 1].pos
                                                       : 1.0
                     return Math.max(2, strip.width * (next - modelData.pos))
@@ -152,7 +194,7 @@ Column {
         }
         Text {
             anchors.centerIn: parent
-            visible: pal.stops().length === 0
+            visible: pal.stopCache.length === 0
             text: "empty palette"
             color: th.textFaint; font.pixelSize: th.fontSmall
         }
@@ -161,13 +203,21 @@ Column {
     /* ---------- per-stop rows ---------- */
     Repeater {
         id: stopRows
-        model: pal.stops()
+        model: pal.stopCache
         delegate: Row {
             id: srow
             required property var modelData
             required property int index
             spacing: th.spHalf
             height: 22
+
+            /* Safety net: a mid-press rebuild must not leak the
+               gesture — end it so the drag still lands its one
+               undo record. */
+            Component.onDestruction: {
+                if (posSl.pressed)
+                    pal.posScrubEnd()
+            }
 
             /* swatch — click opens the host color dialog */
             Rectangle {
@@ -214,7 +264,7 @@ Column {
                 value: srow.modelData.pos
                 onPressedChanged: {
                     if (pressed)
-                        pal.posScrubBegin()
+                        pal.posScrubBegin(srow.index)
                     else
                         pal.posScrubEnd()
                 }
@@ -271,7 +321,11 @@ Column {
         function doAdd() { pal.doAddStop() }
         Text {
             id: addTxt; anchors.centerIn: parent
-            text: "+ stop @ " + pal.addPos().toFixed(2)
+            /* fxStamp read keeps the seed-position label fresh —
+               stops() itself is a pure read now (the repeaters
+               bind stopCache). */
+            text: { pal.fxStamp
+                    return "+ stop @ " + pal.addPos().toFixed(2) }
             color: th.text; font.pixelSize: th.fontSmall
         }
         MouseArea {

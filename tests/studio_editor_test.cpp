@@ -2003,6 +2003,53 @@ static void TestEffectLayers()
               "fx: commit after cancel is empty");
     }
 
+    /* ---- no-record commits leave ws at the BEGIN snapshot ----
+       (5.2 review I2 + no-op-record minor: a commit that pushes
+       nothing must still restore — and report — the pre-gesture
+       state, or a materialized ghost stack leaks forward.) */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.preset  = "aurora";
+        w.effect.seed    = 5;
+        EditorController ctl(w);
+        ctl.SetLayerResolver(&FxResolver, nullptr);
+
+        /* Materialize-only begin, zero preview writes -> commit
+           restores begin (inline stack dropped again). */
+        CHECK(ctl.BeginLayerGesture(), "fx: gesture begins");
+        CHECK(!w.effect.layers.empty(), "fx: begin materialized");
+        CHECK(!ctl.CommitLayerGesture().has_value(),
+              "fx: materialize-only commit = no record");
+        CHECK(w.effect.layers.empty() && w.effect.preset == "aurora",
+              "fx: ws restored to pre-gesture state");
+
+        /* after == begin but after != base: materialize, then
+           delete every materialized layer — net state equals
+           begin, so no record is pushed (was: a no-op record). */
+        CHECK(ctl.BeginLayerGesture(), "fx: gesture 2 begins");
+        const size_t n = w.effect.layers.size();
+        for(size_t i = 0; i < n; i++)
+        {
+            ctl.RemoveLayer(0);
+        }
+        CHECK(w.effect.layers.empty(), "fx: preview removed all");
+        CHECK(!ctl.CommitLayerGesture().has_value(),
+              "fx: after==begin commit = no record");
+        CHECK(w.effect.layers.empty() && w.effect.preset == "aurora",
+              "fx: after==begin left at begin state");
+
+        /* Discrete ops work immediately after a cancel — the
+           leaked-gesture class of bug (5.2 review C1): a gesture
+           that never ended would swallow this op as preview. */
+        CHECK(ctl.BeginLayerGesture(), "fx: gesture 3 begins");
+        ctl.SetLayerOpacity(0, 0.4f);
+        ctl.CancelLayerGesture();
+        std::optional<EditorEdit> e = ctl.SetLayerEnabled(0, false);
+        CHECK(e.has_value() && !w.effect.layers.empty()
+              && !w.effect.layers[0].enabled,
+              "fx: discrete op lands right after cancel");
+    }
+
     /* ---- reset-to-preset + save-as semantics (SetLayers) ---- */
     {
         StudioDocument   w = Fixture();
@@ -2019,14 +2066,16 @@ static void TestEffectLayers()
         RevertEditorEdit(w, *e);
         CHECK(w.effect.layers.size() == 2,
               "fx: reset undo restores the stack");
-        ApplyEditorEdit(w, *e);
 
         /* Save-as adopt: preset <- saved id, stack cleared — one
-           undoable record. */
-        e = ctl.SetLayers({}, "mylook");
+           undoable record, and its own undo label (review minor:
+           adoption is not "reset to preset"). */
+        e = ctl.SetLayers({}, "mylook", "save as look");
         CHECK(e.has_value() && w.effect.preset == "mylook"
               && w.effect.layers.empty(),
               "fx: save-as sets preset id + clears stack");
+        CHECK(e->label == "save as look",
+              "fx: adopt carries its own undo label");
         RevertEditorEdit(w, *e);
         CHECK(w.effect.preset == "aurora"
               && w.effect.layers.size() == 2,

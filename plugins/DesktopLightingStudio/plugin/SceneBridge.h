@@ -269,7 +269,10 @@ public slots:
     Q_INVOKABLE void addEffectLayerStop(int index, double pos,
                                         const QString& color);
     Q_INVOKABLE void removeEffectLayerStop(int index, int stop);
-    Q_INVOKABLE void moveEffectLayerStop(int index, int stop,
+    /* Returns the dragged stop's index AFTER the controller's
+       re-sort so a position scrub keeps hold of the same stop —
+       the QML side tracks it by this return, not by row index. */
+    Q_INVOKABLE int  moveEffectLayerStop(int index, int stop,
                                          double pos);
     Q_INVOKABLE void setEffectLayerStopColor(int index, int stop,
                                              const QString& color);

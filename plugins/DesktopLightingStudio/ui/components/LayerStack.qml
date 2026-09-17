@@ -43,14 +43,33 @@ Rectangle {
     signal layerSelected(int idx)
 
     /* Re-eval stamp — bumped by the bridge's effectLayersChanged /
-       undoChanged when a real bridge is attached; tests bump it. */
+       undoChanged when a real bridge is attached; tests bump it.
+       Each bump refreshes rowCache — EXCEPT mid-scrub: rebuilding
+       the delegate array while a row's slider is pressed destroys
+       the delegate mid-gesture and leaks the undo gesture (the
+       5.2 review critical). The rebuild is deferred to scrub end. */
     property int fxStamp: 0
+    onFxStampChanged: refreshRows()
     function poke() { fxStamp++ }
+
+    /* The Repeater's model — a CACHED snapshot of rows(). */
+    property var rowCache: []
+    property bool scrubbing: false
+    property bool pendingRows: false
+    function refreshRows() {
+        if (scrubbing) {
+            pendingRows = true
+            return
+        }
+        rowCache = rows()
+    }
+    Component.onCompleted: refreshRows()
+    onBridgeOverrideChanged: refreshRows()
 
     Connections {
         target: stack.brQObj()
-        function onEffectLayersChanged() { stack.fxStamp++ }
-        function onUndoChanged()         { stack.fxStamp++ }
+        function onEffectLayersChanged() { stack.poke() }
+        function onUndoChanged()         { stack.poke() }
     }
 
     /* Normalized row list. The real bridge hands over an
@@ -58,7 +77,6 @@ Rectangle {
        JS array under the same property; last resort is the
        effectLayerCount/effectLayer invokable pair. */
     function rows() {
-        fxStamp
         var b = br()
         if (!b)
             return []
@@ -143,9 +161,13 @@ Rectangle {
         selIndex = rows().length - 1
         layerSelected(selIndex)
     }
-    /* Opacity scrub = one effect gesture = one undo record. */
+    /* Opacity scrub = one effect gesture = one undo record.
+       scrubbing freezes the delegate model for the drag so a
+       mid-gesture effectLayersChanged can't rebuild the pressed
+       slider out from under the pointer. */
     function opScrubBegin() {
         var b = br()
+        scrubbing = true
         if (b) b.beginEffectGesture()
     }
     function opScrubMove(i, v) {
@@ -154,7 +176,12 @@ Rectangle {
     }
     function opScrubEnd() {
         var b = br()
+        scrubbing = false
         if (b) b.commitEffectGesture("layer opacity")
+        if (pendingRows) {
+            pendingRows = false
+            refreshRows()
+        }
     }
 
     implicitHeight: col.implicitHeight
@@ -196,11 +223,21 @@ Rectangle {
 
         Repeater {
             id: lv
-            model: stack.rows()
+            model: stack.rowCache
             delegate: Rectangle {
                 id: row
                 required property var modelData
                 required property int index
+
+                /* Safety net: if this delegate is ever destroyed
+                   while its slider is still pressed (a model
+                   rebuild the gate missed), end the gesture so it
+                   still lands its one undo record instead of
+                   leaking open and swallowing later edits. */
+                Component.onDestruction: {
+                    if (opSl.pressed)
+                        stack.opScrubEnd()
+                }
                 width: col.width
                 height: 44
                 radius: th.radiusSm

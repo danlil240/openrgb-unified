@@ -464,6 +464,57 @@ TestCase {
         compare(saves, 1)
     }
 
+    /*---------------- 5.2 pick mode ------------------*/
+
+    /* Review minor: Escape while a pick is ARMED but not pressed
+       must disarm BOTH sides — pickMode AND pickTarget — and hand
+       the owner a cancel so its armed UI (armedPick) clears. */
+    function test_pick_escape_disarms() {
+        var calls = []
+        sel.pickMode = "origin"
+        sel.pickPlaneY = 0.02
+        sel.pickTarget = function(pt, phase) { calls.push(phase) }
+        verify(sel.cancel(), "an armed pick consumes the Escape")
+        compare(sel.pickMode, "")
+        verify(sel.pickTarget === null, "pickTarget released")
+        compare(calls.join(","), "cancel", "owner was told")
+    }
+
+    /* Mid-press Escape still routes the cancel through
+       deliverPick before disarming. */
+    function test_pick_midpress_escape() {
+        var calls = []
+        sel.pickMode = "origin"
+        sel.pickPlaneY = 0.02
+        sel.pickTarget = function(pt, phase) { calls.push(phase) }
+        sel.beginPressAt(100, 100, Qt.LeftButton, 0, "", null)
+        compare(sel.gesture, 7, "press in pick mode = gPick")
+        compare(calls.join(","), "begin")
+        sel.cancel()
+        compare(sel.pickMode, "")
+        verify(calls.join(",").indexOf("cancel") >= 0,
+               "cancel delivered to the owner")
+    }
+
+    /* A lifecycle phase must land even when the ray misses the
+       plane — dropping "cancel"/"end" would leak the owner's
+       effect gesture (begin already ran). */
+    function test_pick_cancel_without_plane_hit() {
+        var calls = []
+        camStub.planeHitPoint = function(x, y, ax, v) { return null }
+        sel.pickMode = "origin"
+        sel.pickTarget = function(pt, phase) {
+            calls.push(phase + ":" + (pt === null))
+        }
+        sel.deliverPick(10, 10, "cancel")
+        compare(calls.join(","), "cancel:true",
+                "cancel landed with a null point")
+        sel.deliverPick(10, 10, "begin")
+        compare(calls.length, 1, "begin without a hit is dropped")
+        sel.pickMode = ""
+        sel.pickTarget = null
+    }
+
     /*---------------- Compile smoke ------------------*/
 
     /* M9 + general: every edited QML file must compile, and

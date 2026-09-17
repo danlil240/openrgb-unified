@@ -126,21 +126,27 @@ bool EffectLayerModel::SetStack(const std::vector<EffectLayer>& layers)
         return true;
     }
     /* Same shape — diff each row's display fields so a scrub
-       preview updates the changed row without a reset. */
-    bool any = false;
+       preview updates the changed row without a reset. The new
+       stack is assigned BEFORE the emits: a delegate resolving
+       dataChanged must read the new row, not the stale one. */
+    std::vector<int> changed;
     for(int i = 0; i < (int)rows.size(); i++)
     {
         if(RowMap(rows[i], i) != RowMap(layers[i], i))
         {
-            emit dataChanged(index(i), index(i));
-            any = true;
+            changed.push_back(i);
         }
     }
-    if(any)
+    if(changed.empty())
     {
-        rows = layers;
+        return false;
     }
-    return any;
+    rows = layers;
+    for(int i : changed)
+    {
+        emit dataChanged(index(i), index(i));
+    }
+    return true;
 }
 
 QVariantMap EffectLayerModel::rowAt(int row) const
