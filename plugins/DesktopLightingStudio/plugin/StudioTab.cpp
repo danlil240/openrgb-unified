@@ -97,6 +97,25 @@ struct ProbeGuard
     bool                 held;
 };
 
+/* Scope-exit restore: runs fn() on EVERY exit — normal return AND
+   stack unwinding — so a driver throw mid-probe can't leave a device
+   in the probe's mode/colors. The restore itself is best-effort: a
+   throw inside it is swallowed (the outer catch already reports a
+   driver failure for the run). */
+template<typename F>
+struct ScopeExit
+{
+    explicit ScopeExit(F f) : fn(std::move(f)) {}
+    ~ScopeExit() { try { fn(); } catch(...) {} }
+    ScopeExit(const ScopeExit&) = delete;
+    ScopeExit& operator=(const ScopeExit&) = delete;
+    F fn;
+};
+template<typename F> ScopeExit<F> MakeScopeExit(F f)
+{
+    return ScopeExit<F>(std::move(f));
+}
+
 static const char* GraphicsApiName(QSGRendererInterface::GraphicsApi api)
 {
     switch(api)
@@ -626,9 +645,10 @@ void StudioTab::diagFlash(int controller, int zone)
                 const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
                 for(int i = 0; i < 8; i++)
                 {
-                    /* Bail between blinks on close or a device-list
-                       change — `ctrl` may be stale after one. */
-                    if(probe_closing.load()
+                    /* Bail between blinks on close, bridge teardown,
+                       or a device-list change — `ctrl` may be stale
+                       after one. Same abort set diagMeasure uses. */
+                    if(probe_closing.load() || bridge->closing()
                        || controller_epoch.load() != epoch)
                     {
                         done = QStringLiteral("flash aborted — closing"
@@ -728,6 +748,19 @@ void StudioTab::diagMeasure()
                 saved[l] = ctrl->GetZoneColor(z, l);
             }
 
+            /* Color restore runs on EVERY exit — a driver throw
+               mid-sample must not leave the zone wearing probe
+               colors (the throw still propagates to the run's
+               catch after this restore has run). */
+            auto restore_colors = MakeScopeExit([&]()
+            {
+                for(unsigned int l = 0; l < leds; l++)
+                {
+                    ctrl->SetColor(start + l, saved[l]);
+                }
+                ctrl->UpdateZoneLEDs(z);
+            });
+
             QElapsedTimer timer;
             qint64 total = 0;
             qint64 best  = -1;
@@ -752,11 +785,6 @@ void StudioTab::diagMeasure()
                     best = ms;
                 }
             }
-            for(unsigned int l = 0; l < leds; l++)
-            {
-                ctrl->SetColor(start + l, saved[l]);
-            }
-            ctrl->UpdateZoneLEDs(z);
 
             if(taken == 0)
             {
@@ -831,11 +859,17 @@ void StudioTab::diagMeasure()
                     {
                         ctrl->SetZoneActiveMode(z, per_led);
                     }
-                    sample_zone(head, ctrl, z, note);
-                    if(prev != per_led)
+                    /* Mode restore on every exit — a throw inside
+                       sample_zone must not strand the zone in the
+                       per-LED probe mode. */
+                    auto restore_mode = MakeScopeExit([&]()
                     {
-                        ctrl->SetZoneActiveMode(z, prev);
-                    }
+                        if(prev != per_led)
+                        {
+                            ctrl->SetZoneActiveMode(z, prev);
+                        }
+                    });
+                    sample_zone(head, ctrl, z, note);
                 }
             }
             else
@@ -878,14 +912,19 @@ void StudioTab::diagMeasure()
                 {
                     ctrl->SetActiveMode(per_led);
                 }
+                /* Same scope-exit contract as the per-zone path —
+                   a throw mid-sweep restores the device mode. */
+                auto restore_mode = MakeScopeExit([&]()
+                {
+                    if(prev != per_led)
+                    {
+                        ctrl->SetActiveMode(prev);
+                    }
+                });
                 for(unsigned int z = 0; z < ctrl->GetZoneCount()
                                     && !abort_requested(); z++)
                 {
                     sample_zone(head, ctrl, z, note);
-                }
-                if(prev != per_led)
-                {
-                    ctrl->SetActiveMode(prev);
                 }
             }
         }
