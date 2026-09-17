@@ -109,10 +109,29 @@ produced by this plugin today. (If a release bundles third-party
 assets under `presets/` or `ui/` later, their notices must be added
 here.)
 
+## Linux payload
+
+- `libDesktopLightingStudio.so` → `${XDG_CONFIG_HOME:-~/.config}/OpenRGB/plugins/DesktopLightingStudio/`
+- Runtime deps: Qt ≥ 6.8 QML modules (qt6-declarative, qt6-quick3d or
+  distro equivalent), libpulse (or pipewire-pulse).
+- Keys need read access to /dev/input/event*: `sudo usermod -aG input $USER`
+  + relogin, or a udev rule. Without it the Keys input reports the fix.
+- Wayland: screen input reports unsupported; keys/audio unaffected (evdev
+  is compositor-independent).
+
+## macOS payload
+
+- `libDesktopLightingStudio.dylib` → `~/.config/OpenRGB/plugins/DesktopLightingStudio/`
+- Requires macOS ≥ 14.2 for system-audio capture; keys need the
+  Input Monitoring grant; screen needs the Screen Recording grant.
+  Each input's status line names the missing grant.
+
 ## Verification
 
 1. `plugins\DesktopLightingStudio\verify-package.bat` — expected vs
    present files under `out/`; exits non-zero on any miss.
+   `verify-package.sh` is the posix equivalent (plugin binary + loose
+   `ui/` payload; Qt runtime comes from the host install).
 2. `tests\studio_config_store_test` — fresh-install materialization
    loads `:/studio` resources end to end.
 3. Manual (acceptance doc): deploy into a clean host profile and

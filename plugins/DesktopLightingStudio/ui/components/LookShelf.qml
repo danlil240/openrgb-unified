@@ -447,7 +447,7 @@ Rectangle {
             SCheck {
                 id: audioChk
                 text: "Audio"
-                tip: "WASAPI loopback on the default output — onsets drive shockwave rings"
+                tip: "System audio loopback — onsets drive shockwave rings"
                 anchors.verticalCenter: parent.verticalCenter
                 onToggled: function(on) {
                     if (shelf.hasBr()) shelf.br().setAudioInput(on)
