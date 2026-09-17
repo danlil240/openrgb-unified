@@ -2665,6 +2665,18 @@ static void TestBundleImportRejected()
               && HasError(errors, "resolve"),
               "breject: unresolvable workspace refused at inspect");
     }
+    /* an oversize studio.json — the JSON byte cap is enforced
+       while reading, before parse ever sees the content */
+    {
+        const auto dir = TempDir("bundle-oversize");
+        const std::string big = "{\"schema_version\":3,\"name\":\""
+            + std::string(BUNDLE_MAX_JSON_BYTES, 'x') + "\"}";
+        WriteRaw(dir / "studio.json", big);
+        errors.clear();
+        CHECK(!InspectBundle(dir.string(), lreg, plan, &errors)
+              && HasError(errors, "limit"),
+              "breject: oversize studio.json refused");
+    }
     /* a type-reference cycle inside the bundle resolves nothing —
        the closure check passes (both files exist) but the scratch
        registry can't build it */

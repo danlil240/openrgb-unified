@@ -406,7 +406,10 @@ void StudioTab::uiExportBundle()
         const auto choice = QMessageBox::warning(this,
             QStringLiteral("Overwrite bundle?"),
             QStringLiteral("%1 already contains a studio.json bundle.\n"
-                           "Replace it?").arg(dir),
+                           "Replace it?\n\n"
+                           "Note: stale *.device.json files the bundle "
+                           "does not include may be removed from its "
+                           "presets/devices folder.").arg(dir),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if(choice != QMessageBox::Yes)
         {
@@ -423,7 +426,10 @@ void StudioTab::uiExportBundle()
         const auto choice = QMessageBox::warning(this,
             QStringLiteral("Folder not empty"),
             QStringLiteral("%1 is not empty.\n"
-                           "Export the bundle into it anyway?").arg(dir),
+                           "Export the bundle into it anyway?\n\n"
+                           "Note: stale *.device.json files the bundle "
+                           "does not include may be removed from its "
+                           "presets/devices folder.").arg(dir),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if(choice != QMessageBox::Yes)
         {

@@ -22,6 +22,8 @@
 #include "scene/SceneJson.h"
 #include "scene/SceneResolver.h"
 #include "presets/PresetRegistry.h"
+#include "presets/EffectRegistry.h"
+#include "effects/EffectJson.h"
 
 #include <cstdio>
 #include <functional>
@@ -200,6 +202,17 @@ static void TestAutosaveRecovery()
     CHECK(WaitFor([&]() { return QFileInfo::exists(store.AutosavePath()); }),
           "autosave: writes without main doc");
     CHECK(store.HasRecovery(), "autosave: recovery without main doc");
+
+    /* An autosave byte-identical to studio.json is NOT a recovery
+       — HasRecovery's content compare, not just file presence. */
+    store.Save(saved, &err);
+    {
+        QFile af(store.AutosavePath());
+        af.open(QIODevice::WriteOnly);
+        af.write(ReadAll(store.DocumentPath()));
+        af.close();
+    }
+    CHECK(!store.HasRecovery(), "autosave: identical content ignored");
 }
 
 static void TestExternalChange()
@@ -547,6 +560,239 @@ static void TestWritePresetFile()
     }
 }
 
+/*---------------------------------------------------------*\
+||| Task 6.2 — fresh-install materialization: an empty     ||
+||| temp root must gain the full bundled set (all three    ||
+||| schemas, every device type AND every effect look),    ||
+||| the materialized library must feed the registries and  ||
+||| resolve the default workspace, and user edits to a     ||
+||| bundled file are never overwritten (a deleted one is   ||
+||| re-installed).                                          ||
+\*---------------------------------------------------------*/
+static void TestFreshInstall()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+    ConfigStore store(tmp.path());
+    CHECK(store.EnsureWorkspaceDir(), "fresh: materializes");
+
+    for(const char* s : { "studio.schema.json",
+                          "device.schema.json",
+                          "effect.schema.json" })
+    {
+        CHECK(QFileInfo::exists(tmp.path() + "/schemas/" + s),
+              (std::string("fresh: schema ") + s).c_str());
+    }
+
+    /* The whole bundled set landed — compare against the qrc the
+       plugin ships (schema.qrc mirrors ui/studio.qrc here). */
+    const QStringList qrc_dev =
+        QDir(":/studio/presets/devices").entryList(QDir::Files);
+    const QStringList qrc_fx =
+        QDir(":/studio/presets/effects").entryList(QDir::Files);
+    const QStringList dev_files =
+        QDir(store.PresetDir()).entryList(
+            QStringList("*.device.json"), QDir::Files);
+    const QStringList fx_files =
+        QDir(store.EffectPresetDir()).entryList(
+            QStringList("*.effect.json"), QDir::Files);
+    CHECK(!qrc_dev.isEmpty() && dev_files.size() == qrc_dev.size(),
+          "fresh: all bundled device types copied");
+    CHECK(!qrc_fx.isEmpty() && fx_files.size() == qrc_fx.size(),
+          "fresh: all bundled effect looks copied");
+
+    /* The materialized library feeds both registries cleanly. */
+    PresetRegistry reg;
+    std::vector<std::string> lerrs;
+    CHECK(reg.LoadDirectory(store.PresetDir().toStdString(), &lerrs),
+          "fresh: device registry loads clean");
+    EffectRegistry ereg;
+    std::vector<std::string> ferrs;
+    CHECK(ereg.LoadDirectory(store.EffectPresetDir().toStdString(),
+                             &ferrs),
+          "fresh: effect registry loads clean");
+
+    /* ... and the default workspace resolves against it — the
+       first-launch path SceneBridge takes when no doc exists. */
+    StudioDocument w = BuildDefaultWorkspace();
+    SceneDocument scene;
+    std::vector<std::string> rerrs;
+    CHECK(ResolveScene(w, reg, scene, &rerrs) && !scene.objects.empty(),
+          "fresh: default workspace resolves");
+
+    /* No document and no migration marker until the first save —
+       fresh install must not look "already migrated". */
+    CHECK(!store.DocumentExists() && !store.MigrationDone(),
+          "fresh: no doc, no marker");
+
+    /* A user-edited bundled file is never overwritten; one the
+       user deleted is re-installed (missing-files-only copy). */
+    const QString f0 = store.PresetDir() + "/" + dev_files.first();
+    /* qrc copies must land user-editable — the store grants
+       owner-write on materialized files (a read-only bundled
+       file would defeat "remove to restore, edit to customize"). */
+    CHECK(QFileInfo(f0).isWritable(), "fresh: bundled file editable");
+    {
+        QFile f(f0);
+        f.open(QIODevice::WriteOnly);
+        f.write("user edit");
+        f.close();
+    }
+    CHECK(store.EnsureWorkspaceDir(), "fresh: re-run still ok");
+    CHECK(ReadAll(f0) == "user edit", "fresh: user edits survive");
+    QFile::remove(f0);
+    CHECK(store.EnsureWorkspaceDir() && ReadAll(f0) != "user edit",
+          "fresh: deleted type re-installed");
+}
+
+/*---------------------------------------------------------*\
+||| Task 6.2 — effect layers through the v2/v1 migration. ||
+||| The authored inline stack lives at scene.effect.layers||
+||| in an expanded doc; both upgrade paths (legacy host-   ||
+||| settings blob and on-disk v2 file) reduce to           ||
+||| MigrateExpandedScene, which copies scene.effect        ||
+||| wholesale — the stack must reach effects.layers.       ||
+\*---------------------------------------------------------*/
+static void TestMigrationEffectLayers()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+
+    const SceneDocument scene = BuildDefaultDesk();
+    nlohmann::json sj = ToJson(scene);
+    sj["effect"]["layers"] = nlohmann::json::array({
+        {
+            {"primitive", "wave"},
+            {"speed",     2.0},
+            {"direction", { 1.0, 0.0, 0.0 }},
+            {"palette",   nlohmann::json::array({
+                {{"pos", 0.0}, {"color", "#FF0000"}},
+                {{"pos", 1.0}, {"color", "#0000FF"}},
+            })},
+        },
+    });
+
+    /* (1) legacy host-settings blob -> RunLegacyMigration. */
+    {
+        ConfigStore store(tmp.path() + "/legacy");
+        const nlohmann::json legacy = {{"scene", sj}};
+        QString detail;
+        CHECK(store.RunLegacyMigration(legacy, &detail)
+                  == ConfigStore::MigrationResult::Migrated,
+              "fxlayers: legacy blob migrates");
+        StudioDocument w;
+        QString err;
+        CHECK(store.Load(&w, &err)
+              && w.effect.layers.size() == 1
+              && w.effect.layers[0].primitive == "wave"
+              && w.effect.layers[0].palette.stops.size() == 2,
+              "fxlayers: inline stack survives legacy migration");
+        CHECK(!w.meta.live_on_startup,
+              "fxlayers: migration never arms live output");
+    }
+
+    /* (2) expanded v2 studio.json on disk -> Load migrates in
+       place; the rewritten compact doc keeps the layers. */
+    {
+        ConfigStore store(tmp.path() + "/v2file");
+        store.EnsureWorkspaceDir();
+        const nlohmann::json v2 = {
+            {"schema_version", 2},
+            {"name",           "v2 with layers"},
+            {"scene",          sj},
+        };
+        {
+            QFile f(store.DocumentPath());
+            f.open(QIODevice::WriteOnly | QIODevice::Text);
+            f.write(QByteArray::fromStdString(v2.dump(2)));
+            f.close();
+        }
+        StudioDocument w;
+        QString err;
+        CHECK(store.Load(&w, &err)
+              && w.effect.layers.size() == 1
+              && w.effect.layers[0].primitive == "wave",
+              "fxlayers: inline stack survives v2 file migration");
+        const nlohmann::json dj = nlohmann::json::parse(
+            ReadAll(store.DocumentPath()).constData());
+        CHECK(dj.value("schema_version", 0) == 3
+              && dj["effects"]["layers"].size() == 1,
+              "fxlayers: layers persisted in compact doc");
+    }
+}
+
+/*---------------------------------------------------------*\
+||| WriteEffectFile — the personal-look save path (task   ||
+||| 5.2): validated atomic write at presets/effects/, id  ||
+||| == filename, post-commit re-read. studio.json is never||
+||| touched. Mirrors the WritePresetFile contract.        ||
+\*---------------------------------------------------------*/
+static void TestWriteEffectFile()
+{
+    using namespace studio;
+    QTemporaryDir tmp;
+    ConfigStore store(tmp.path());
+    store.EnsureWorkspaceDir();
+
+    EffectDocument d;
+    d.id = "my-look";
+    d.name = "My Look";
+    nlohmann::ordered_json layer;
+    layer["primitive"] = "gradient";
+    layer["direction"] = { 1.0, 0.0, 0.0 };
+    layer["palette"] = nlohmann::ordered_json::array({
+        {{"pos", 0.0}, {"color", "#FF00FF"}},
+        {{"pos", 1.0}, {"color", "#00FFFF"}},
+    });
+    d.layers.push_back(layer);
+
+    QString err;
+    CHECK(store.WriteEffectFile(d, &err), "fxwrite: save");
+    const QString path =
+        store.EffectPresetDir() + "/my-look.effect.json";
+    CHECK(QFileInfo::exists(path), "fxwrite: file landed");
+
+    /* The landed file re-validates and the registry picks it up. */
+    {
+        EffectDocument back;
+        CHECK(EffectDocumentFromJsonFile(path.toStdString(), back,
+                                         nullptr)
+              && back.id == "my-look" && back.layers.size() == 1,
+              "fxwrite: landed file re-validates");
+        EffectRegistry reg;
+        std::vector<std::string> lerrs;
+        CHECK(reg.LoadDirectory(store.EffectPresetDir().toStdString(),
+                                &lerrs)
+              && reg.Contains("my-look"),
+              "fxwrite: registry loads written look");
+    }
+
+    /* studio.json must not appear — a look write never touches
+       the workspace document. */
+    CHECK(!store.DocumentExists(), "fxwrite: studio.json untouched");
+
+    /* A bad id never reaches disk. */
+    EffectDocument bad = d;
+    bad.id = "bad id!";
+    CHECK(!store.WriteEffectFile(bad, &err) && !err.isEmpty(),
+          "fxwrite: bad id refused");
+    CHECK(!QFileInfo::exists(store.EffectPresetDir()
+                             + "/bad id!.effect.json"),
+          "fxwrite: no file for bad id");
+
+    /* A candidate that cannot survive validation (empty palette)
+       is refused and the previous file stays. */
+    {
+        const QByteArray before = ReadAll(path);
+        EffectDocument broken = d;
+        broken.layers[0]["palette"] = nlohmann::ordered_json::array();
+        CHECK(!store.WriteEffectFile(broken, &err),
+              "fxwrite: invalid candidate refused");
+        CHECK(ReadAll(path) == before,
+              "fxwrite: refused write leaves file intact");
+    }
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -559,6 +805,9 @@ int main(int argc, char** argv)
     TestMigrationMarkers();
     TestMigrationRetry();
     TestWritePresetFile();
+    TestFreshInstall();
+    TestMigrationEffectLayers();
+    TestWriteEffectFile();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -2,6 +2,16 @@
     <qresource prefix="/studio">
         <file alias="studio.schema.json">../../plugins/DesktopLightingStudio/schemas/studio.schema.json</file>
         <file alias="device.schema.json">../../plugins/DesktopLightingStudio/schemas/device.schema.json</file>
+        <file alias="effect.schema.json">../../plugins/DesktopLightingStudio/schemas/effect.schema.json</file>
+        <file alias="presets/effects/aurora.effect.json">../../plugins/DesktopLightingStudio/presets/effects/aurora.effect.json</file>
+        <file alias="presets/effects/reactor.effect.json">../../plugins/DesktopLightingStudio/presets/effects/reactor.effect.json</file>
+        <file alias="presets/effects/comet.effect.json">../../plugins/DesktopLightingStudio/presets/effects/comet.effect.json</file>
+        <file alias="presets/effects/chrome.effect.json">../../plugins/DesktopLightingStudio/presets/effects/chrome.effect.json</file>
+        <file alias="presets/effects/portal.effect.json">../../plugins/DesktopLightingStudio/presets/effects/portal.effect.json</file>
+        <file alias="presets/effects/embers.effect.json">../../plugins/DesktopLightingStudio/presets/effects/embers.effect.json</file>
+        <file alias="presets/effects/shockwave.effect.json">../../plugins/DesktopLightingStudio/presets/effects/shockwave.effect.json</file>
+        <file alias="presets/effects/keyripple.effect.json">../../plugins/DesktopLightingStudio/presets/effects/keyripple.effect.json</file>
+        <file alias="presets/effects/ambient.effect.json">../../plugins/DesktopLightingStudio/presets/effects/ambient.effect.json</file>
         <file alias="presets/devices/desk.device.json">../../plugins/DesktopLightingStudio/presets/devices/desk.device.json</file>
         <file alias="presets/devices/monitor.device.json">../../plugins/DesktopLightingStudio/presets/devices/monitor.device.json</file>
         <file alias="presets/devices/pc-case.device.json">../../plugins/DesktopLightingStudio/presets/devices/pc-case.device.json</file>

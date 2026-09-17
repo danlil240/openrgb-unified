@@ -25,6 +25,8 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -651,6 +653,29 @@ static void TestLegacyMigration()
     CHECK(w.effect.preset == "aurora" && w.effect.playing
           && w.effect.seed == 7 && Near(w.effect.speed, 1.25f),
           "migration: effect state preserved");
+
+    /* The authored inline stack (scene.effect.layers in the
+       expanded doc) survives into workspace effects.layers —
+       task 6.2 requires the inline stack to ride the v1/v2
+       upgrade path, not just the scalar effect fields. */
+    {
+        json layered = legacy;
+        layered["scene"]["effect"]["layers"] = json::array({
+            {{"primitive", "wave"},
+             {"speed", 2.0},
+             {"direction", {1.0, 0.0, 0.0}},
+             {"palette", json::array({
+                 {{"pos", 0.0}, {"color", "#FF0000"}},
+                 {{"pos", 1.0}, {"color", "#0000FF"}}})}},
+        });
+        StudioDocument wl;
+        std::vector<DevicePreset> tl;
+        CHECK(MigrateLegacySettings(layered, wl, &tl, &errors)
+              && wl.effect.layers.size() == 1
+              && wl.effect.layers[0].primitive == "wave"
+              && wl.effect.layers[0].palette.stops.size() == 2,
+              "migration: effects.layers inline stack preserved");
+    }
     CHECK(w.inputs.audio && w.inputs.keys && !w.inputs.screen
           && w.inputs.sens_pct == 175 && w.inputs.decay_pct == 200,
           "migration: input settings preserved");
@@ -972,6 +997,93 @@ static void TestUiFavorites()
     }
 }
 
+/*---------------------------------------------------------*\
+||| Task 6.2 — committed scene fixtures: the spec's two   ||
+||| workloads (tests/fixtures/scenes/<name>/studio.json)  ||
+||| must parse as compact v3, resolve against the packaged||
+||| type library, and hit their instance/emitter targets. ||
+||| They are also the perf harness's input — a fixture    ||
+||| that stops validating breaks the measurement.         ||
+\*---------------------------------------------------------*/
+static void TestSceneFixtures()
+{
+    using namespace studio;
+    namespace fs = std::filesystem;
+
+    const fs::path candidates[2] = {
+        fs::path("fixtures") / "scenes",
+        fs::path("..") / "fixtures" / "scenes",
+    };
+    fs::path root;
+    for(const fs::path& c : candidates)
+    {
+        if(fs::is_directory(c))
+        {
+            root = c;
+            break;
+        }
+    }
+    CHECK(!root.empty(), "fixtures: scene dir found");
+    if(root.empty())
+    {
+        return;
+    }
+
+    PresetRegistry reg;
+    reg.SetDefaults(PackagedPresets());
+
+    const struct { const char* id; size_t devices; size_t min_emit;
+                   size_t max_emit; }
+    want[] = {
+        { "normal", 30, 900, 1100 },
+        { "stress", 100, 3600, 5000 },
+    };
+    for(const auto& fx : want)
+    {
+        const fs::path p = root / fx.id / "studio.json";
+        std::ifstream f(p, std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        json j;
+        try
+        {
+            j = json::parse(ss.str());
+        }
+        catch(...)
+        {
+            CHECK(false, (std::string("fixtures: ") + fx.id
+                          + " parses").c_str());
+            continue;
+        }
+        StudioDocument w;
+        std::vector<std::string> errors;
+        CHECK(FromJson(j, w, &errors),
+              (std::string("fixtures: ") + fx.id
+               + " validates v3").c_str());
+        CHECK(w.devices.size() == fx.devices
+              && !w.meta.live_on_startup,
+              (std::string("fixtures: ") + fx.id
+               + " instance count, no live output").c_str());
+        SceneDocument resolved;
+        errors.clear();
+        CHECK(ResolveScene(w, reg, resolved, &errors),
+              (std::string("fixtures: ") + fx.id
+               + " resolves").c_str());
+        size_t emitters = 0;
+        for(const SceneObject& o : resolved.objects)
+        {
+            emitters += o.emitters.size();
+        }
+        CHECK(emitters >= fx.min_emit && emitters <= fx.max_emit,
+              (std::string("fixtures: ") + fx.id
+               + " emitter workload").c_str());
+        std::printf("  (fixture %s: %zu devices, %zu objects,"
+                    " %zu emitters)\n",
+                    fx.id, w.devices.size(), resolved.objects.size(),
+                    emitters);
+    }
+}
+
 int main()
 {
     TestWorkspaceRoundTrip();
@@ -982,6 +1094,7 @@ int main()
     TestDocumentLimits();
     TestDefaultWorkspace();
     TestUiFavorites();
+    TestSceneFixtures();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -37,6 +37,8 @@ SOURCES += main.cpp \
     $$STUDIO/scene/DefaultDesk.cpp \
     $$STUDIO/effects/EffectTypes.cpp \
     $$STUDIO/effects/EffectEngine.cpp \
+    $$STUDIO/effects/EffectJson.cpp \
+    $$STUDIO/presets/EffectRegistry.cpp \
     $$STUDIO/effects/Presets.cpp \
     $$STUDIO/inputs/InputBus.cpp \
     $$STUDIO/inputs/OnsetDetect.cpp \

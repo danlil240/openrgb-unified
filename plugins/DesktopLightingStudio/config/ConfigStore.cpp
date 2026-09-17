@@ -70,8 +70,18 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
     {
         d.mkpath("schemas");
     }
-    const auto sync_bundled = [](const QString& resource,
-                                 const QString& dst) {
+    /* QFile::copy preserves the qrc resource's read-only
+       permissions — files materialized from :/ land read-only
+       on disk, which would silently defeat both the
+       "edit to customize" contract for shipped presets and
+       sync_bundled's own refresh (QFile::remove fails on a
+       read-only file). Grant owner-write on anything we land. */
+    const auto make_writable = [](const QString& dst) {
+        QFile::setPermissions(dst, QFileInfo(dst).permissions()
+                                   | QFileDevice::WriteOwner);
+    };
+    const auto sync_bundled = [&make_writable](const QString& resource,
+                                               const QString& dst) {
         QFile rf(resource);
         if(!rf.open(QIODevice::ReadOnly))
         {
@@ -89,8 +99,12 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
                 return;             /* already current */
             }
         }
+        /* Clear the read-only attr older builds left before the
+           remove — QFile::remove fails on read-only files. */
+        make_writable(dst);
         QFile::remove(dst);
         QFile::copy(resource, dst);
+        make_writable(dst);
     };
     sync_bundled(QStringLiteral(":/studio/studio.schema.json"),
                  schema_dir + "/studio.schema.json");
@@ -117,6 +131,8 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
         {
             QFile::copy(bundled.filePath(name), dst);
         }
+        /* also heals read-only files older builds materialized */
+        make_writable(dst);
     }
 
     /* Ship the packaged effect looks under presets/effects/ —
@@ -135,6 +151,8 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
         {
             QFile::copy(bundled_fx.filePath(name), dst);
         }
+        /* also heals read-only files older builds materialized */
+        make_writable(dst);
     }
     return true;
 }
