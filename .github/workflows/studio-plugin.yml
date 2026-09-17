@@ -38,6 +38,10 @@ jobs:
         run: |
           qmake DesktopLightingStudio.pro
           nmake
+      - name: Verify package (unix)
+        if: runner.os != 'Windows'
+        working-directory: plugins/DesktopLightingStudio
+        run: bash verify-package.sh
       - name: Unit tests (unix)
         if: runner.os != 'Windows'
         run: bash tests/build-studio-tests.sh
