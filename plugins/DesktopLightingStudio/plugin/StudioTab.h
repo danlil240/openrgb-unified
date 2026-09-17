@@ -16,12 +16,15 @@
 #include <QWidget>
 #include <QStringList>
 #include <QVariantList>
+#include <atomic>
 #include <vector>
 
 class QLabel;
 class QQuickWidget;
 class OpenRGBPluginAPIInterface;
 class RGBControllerInterface;
+class QHideEvent;
+class QShowEvent;
 
 namespace studio { class SceneBridge; }
 
@@ -31,6 +34,7 @@ class StudioTab : public QWidget
 
 public:
     explicit StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent = nullptr);
+    ~StudioTab() override;
 
     /* Called by the plugin on device-list changes — re-resolves
        scene bindings and refreshes the inspection list. */
@@ -81,6 +85,8 @@ private slots:
     void        AppendResult(const QString& line);
 
 private:
+    void        showEvent(QShowEvent* event) override;
+    void        hideEvent(QHideEvent* event) override;
     void        RefreshControllers();
     void        PickColor();
     /* Workspace file actions — minimal wrappers; the store/bridge
@@ -99,4 +105,17 @@ private:
     /* Slim strip shown ONLY on QML load failure — with the shell
        living in QML, an engine error would otherwise be silent. */
     QLabel*                 error_label     = nullptr;
+
+    /* Diagnostics probe lifecycle (task 6.1). diagFlash's detached
+       std::thread and diagMeasure's QThread both borrow `this` and
+       `bridge` — probe_workers counts them so ~StudioTab can wait
+       them out before the child bridge dies; probe_closing tells
+       their write loops to bail early; controller_epoch is bumped
+       on every device-list change so a probe whose controller went
+       away mid-run aborts at the next iteration instead of writing
+       through a stale pointer. */
+    std::atomic<bool>       probe_closing   { false };
+    std::atomic<int>        probe_workers   { 0 };
+    std::atomic<quint64>    controller_epoch { 0 };
+    bool                    win_watched     = false;
 };

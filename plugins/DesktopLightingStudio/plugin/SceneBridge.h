@@ -164,11 +164,31 @@ public:
 
     /* Probe support — StudioTab's flash/latency tools call these
        from their worker thread for exclusive hardware access.
-       pausePushes() flips live off on the GUI thread, then holds
-       both lane mutexes so no push worker can write until
-       resumePushes() releases them and restores the prior state. */
-    void pausePushes();
+       pausePushes() flips live off (live_output is atomic; the
+       liveChanged notify is queued so nothing blocks on the GUI
+       thread pumping events — a BlockingQueuedConnection here
+       deadlocks a probe when the bridge is mid-destruction), then
+       holds a probe serializer + both lane mutexes so no push
+       worker can write until resumePushes() releases them and
+       restores live — only when nothing else touched the switch
+       meanwhile (an explicit user toggle during the probe wins).
+       Overlapping probes serialize on probe_serial: the second
+       pauser records live AFTER the first restored it.
+       pausePushes() returns false once shutdown began — callers
+       must skip their hardware run; resumePushes() is only valid
+       after a true return. */
+    bool pausePushes();
     void resumePushes();
+    /* True once ~SceneBridge began teardown — push workers bail
+       between bindings and probe loops should abort their write
+       cycles so the destructor's join stays bounded. */
+    bool closing() const { return shutting_down.load(); }
+    /* Preview visibility gate (GUI thread — StudioTab show/hide +
+       window exposure). Hidden preview: tick() skips the
+       emittersChanged repaint churn while live pushes continue;
+       with live OFF the play timer stops entirely — nothing
+       consumes the frame. */
+    void setPreviewVisible(bool on);
 
 public slots:
     void select(const QString& objectId);
@@ -592,7 +612,10 @@ private:
     bool                        startup_load_done = false;
 
     QString                     selected;
-    bool                        live_output = false;
+    /* Atomic: pausePushes() flips it off from a probe thread (the
+       GUI-side notify is queued); all other access stays on the
+       bridge thread. */
+    std::atomic<bool>           live_output { false };
     bool                        case_ghost  = false;
     QColor                      paint_color = Qt::white;
     QString                     status;
@@ -634,9 +657,30 @@ private:
     QMutex                                  fast_io_mutex;   /* lane 0 writes */
     std::string                             last_push_err;   /* UI thread */
 
-    /* Held for a probe's whole run; see pausePushes()/resumePushes(). */
+    /* Held for a probe's whole run; see pausePushes()/resumePushes().
+       probe_serial goes first so overlapping probes serialize BEFORE
+       either records live state — a second pauser then sees the
+       restored switch, not the paused one. probe_active counts every
+       pause attempt (incl. one blocked on probe_serial) so the dtor
+       can wait probes out instead of freeing mutexes under them. */
+    QMutex                                    probe_serial;
+    std::unique_ptr<std::unique_lock<QMutex>> probe_serial_lock;
     std::unique_ptr<std::unique_lock<QMutex>> probe_lane_locks[2];
     bool                                      probe_was_live = false;
+    std::atomic<int>                          probe_active  { 0 };
+
+    /* Lifecycle quiesce: every detached push worker increments
+       push_workers at spawn (GUI thread — the dtor runs on the same
+       thread, so the count can't be raced up mid-teardown) and
+       decrements on exit; shutting_down tells them to bail between
+       bindings and makes late pausePushes() calls fail. */
+    std::atomic<int>                          push_workers  { 0 };
+    std::atomic<bool>                         shutting_down { false };
+
+    /* Preview visibility — GUI thread only (setPreviewVisible).
+       Gates the preview repaint in tick(); hardware pushes are
+       unaffected. */
+    bool                                      preview_visible = true;
 
     /* Stage 3 — reactive inputs. The bus stamps events on the play
        clock so ring ages are consistent with evaluation time. */

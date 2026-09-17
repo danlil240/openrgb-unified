@@ -243,6 +243,12 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
 
 SceneBridge::~SceneBridge()
 {
+    /* Quiesce FIRST: shutting_down makes late pausePushes() calls
+       fail, lane/push workers bail between bindings, and probe loops
+       reading closing() abort their write cycles — the join below
+       then stays bounded by at most one in-flight driver write. */
+    shutting_down = true;
+
     /* Leave recoverable edits behind on a clean shutdown too. */
     if(store != nullptr)
     {
@@ -255,15 +261,28 @@ SceneBridge::~SceneBridge()
     key_in.Stop();
     screen_in->Stop();
 
-    /* Detached push workers hold `this` — give in-flight writes a
-       moment to finish before the bridge is torn down. */
+    /* Detached push workers borrow `this` (lane mutexes, adapter,
+       queued completion callbacks). There is no safe "give up and
+       free anyway" — a worker mid-write would dereference dead
+       members — so wait for ALL of them (push_workers counts every
+       spawn site, including the unflagged pushLive/pushLiveAll
+       workers) plus any probe sitting between pausePushes() and
+       resumePushes() (probe_active). Queued invokeMethod calls aimed
+       at this object are dropped by ~QObject, so callbacks that
+       arrive after the join are harmless. */
     play_timer->stop();
-    for(int i = 0; i < 50
-            && (push_in_flight.load()
-                || lane_in_flight[0].load() || lane_in_flight[1].load());
+    for(int i = 0;
+        push_workers.load() > 0 || probe_active.load() > 0;
         i++)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if(i > 0 && i % 500 == 0)
+        {
+            qWarning("DesktopLightingStudio: ~SceneBridge waiting on"
+                     " %d push worker(s), %d probe(s) — a wedged"
+                     " driver write is holding shutdown",
+                     push_workers.load(), probe_active.load());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     delete play_clock;
 }
@@ -535,8 +554,10 @@ void SceneBridge::setBrightnessPct(int pct)
 void SceneBridge::setLive(bool on)
 {
     /* Live output is a runtime switch — it is never persisted as
-       enabled (output.live_on_startup is a JSON-edited preference). */
-    if(live_output == on)
+       enabled (output.live_on_startup is a JSON-edited preference).
+       GUI thread only; the flag itself is atomic because
+       pausePushes() also flips it from probe threads. */
+    if(live_output.load() == on)
     {
         return;
     }
@@ -545,25 +566,65 @@ void SceneBridge::setLive(bool on)
     if(on)
     {
         schedulePush();
+        /* Live output is a frame consumer even while hidden — a
+           paused-for-visibility play timer must resume so requested
+           playback keeps pushing. */
+        if(playing_state && !play_timer->isActive())
+        {
+            play_clock->restart();
+            play_timer->start();
+        }
+    }
+    else if(!preview_visible)
+    {
+        /* Live off + hidden = no consumer left; idle the tick until
+           something re-arms it (show, live on). */
+        play_timer->stop();
     }
 }
 
-void SceneBridge::pausePushes()
+bool SceneBridge::pausePushes()
 {
-    /* Called on the probe's worker thread: setLive must run on the
-       GUI thread so liveChanged/property notifies stay there. */
-    if(QThread::currentThread() == thread())
+    /* Register before checking shutting_down (seq_cst pair with the
+       dtor): a probe that reads closing==false had already counted
+       itself, so ~SceneBridge's drain loop must see it. The re-check
+       after probe_serial covers the probe that was queued behind an
+       active one while shutdown began. */
+    probe_active.fetch_add(1);
+    if(shutting_down.load())
     {
-        probe_was_live = live_output;
-        setLive(false);
+        probe_active.fetch_sub(1);
+        return false;
     }
-    else
+    probe_serial_lock = std::make_unique<std::unique_lock<QMutex>>(probe_serial);
+    if(shutting_down.load())
     {
-        QMetaObject::invokeMethod(this, [this]()
+        /* Move off the member before unlocking — see resumePushes(). */
+        auto serial = std::move(probe_serial_lock);
+        serial.reset();
+        probe_active.fetch_sub(1);
+        return false;
+    }
+
+    /* Flip live off directly — the flag is atomic, so no GUI-thread
+       round-trip is needed (a BlockingQueuedConnection here
+       deadlocks the probe forever when the bridge thread is inside
+       ~SceneBridge). The notify is queued so liveChanged still fires
+       on the bridge thread; probe_serial is held first, so a second
+       probe records probe_was_live only after the first restored it —
+       overlapping probes can no longer leave live stuck off. */
+    probe_was_live = live_output.exchange(false);
+    if(probe_was_live)
+    {
+        if(QThread::currentThread() == thread())
         {
-            probe_was_live = live_output;
-            setLive(false);
-        }, Qt::BlockingQueuedConnection);
+            emit liveChanged();
+        }
+        else
+        {
+            QMetaObject::invokeMethod(this, [this]() { emit liveChanged(); },
+                                      Qt::QueuedConnection);
+        }
     }
 
     /* Once live_output is false no new push can start — schedulePush,
@@ -572,23 +633,60 @@ void SceneBridge::pausePushes()
        workers and blocks any straggler that slipped the gate. */
     probe_lane_locks[0] = std::make_unique<std::unique_lock<QMutex>>(io_mutex);
     probe_lane_locks[1] = std::make_unique<std::unique_lock<QMutex>>(fast_io_mutex);
+    return true;
 }
 
 void SceneBridge::resumePushes()
 {
-    probe_lane_locks[0].reset();
-    probe_lane_locks[1].reset();
+    /* Move the lock holders off the members BEFORE unlocking: a
+       reset() on the member would store nullptr AFTER the mutex
+       release inside ~unique_lock, racing the next probe's member
+       assignment the instant it acquires. Moving first makes every
+       member write happen-before the unlock. */
+    auto lane0  = std::move(probe_lane_locks[0]);
+    auto lane1  = std::move(probe_lane_locks[1]);
+    auto serial = std::move(probe_serial_lock);
+    lane0.reset();
+    lane1.reset();
 
-    const bool restore = probe_was_live;
-    if(QThread::currentThread() == thread())
+    /* Restore only when the pause itself turned live off and nothing
+       else re-armed it meanwhile — a user toggle during the probe
+       wins over our stale snapshot. The flag store MUST be
+       synchronous here, before probe_serial is released: queueing
+       the whole setLive(true) let a second probe acquire
+       probe_serial and exchange() a still-false live_output, record
+       probe_was_live=false, and leave live output off forever after
+       both probes finished. The flag is atomic; only the GUI
+       side-effects (notify, first push, timer re-arm) may ride the
+       event queue. */
+    const bool restore = probe_was_live && !live_output.load();
+    if(restore)
     {
-        setLive(restore);
+        live_output = true;
+        auto rearm = [this]()
+        {
+            /* Same side-effects as setLive(true) — the flag store
+               already happened on the probe thread. */
+            emit liveChanged();
+            schedulePush();
+            if(playing_state && !play_timer->isActive())
+            {
+                play_clock->restart();
+                play_timer->start();
+            }
+        };
+        if(QThread::currentThread() == thread())
+        {
+            rearm();
+        }
+        else
+        {
+            QMetaObject::invokeMethod(this, std::move(rearm),
+                                      Qt::QueuedConnection);
+        }
     }
-    else
-    {
-        QMetaObject::invokeMethod(this, [this, restore]() { setLive(restore); },
-                                  Qt::QueuedConnection);
-    }
+    serial.reset();
+    probe_active.fetch_sub(1);
 }
 
 void SceneBridge::setCaseGhost(bool on)
@@ -3111,7 +3209,13 @@ void SceneBridge::setPlaying(bool on)
         }
         frame_sent = false;   /* first tick always repaints + pushes */
         play_clock->start();
-        play_timer->start();
+        /* A hidden preview with live OFF has no frame consumer —
+           keep the timer off (setPreviewVisible re-arms it on show).
+           With live on it must run: the tick is what pushes. */
+        if(preview_visible || live_output.load())
+        {
+            play_timer->start();
+        }
         tick();     /* evaluate immediately — don't wait for the timer */
     }
     else
@@ -3882,12 +3986,18 @@ void SceneBridge::tick()
 
     /* An identical frame skips repaint + push — a static preset (or
        a silent reactive one) would otherwise re-write every device
-       at the full tick rate for zero visible change. */
+       at the full tick rate for zero visible change. A hidden
+       preview skips the emittersChanged repaint churn but still
+       pushes — requested live playback continues while hidden
+       (spec §8); the frame state stays current either way. */
     if(!frame_sent || frame != last_frame)
     {
         last_frame = frame;
         frame_sent = true;
-        emitFrameChanged();
+        if(preview_visible)
+        {
+            emitFrameChanged();
+        }
         schedulePush();
     }
 
@@ -3922,6 +4032,39 @@ void SceneBridge::emitFrameChanged()
     }
 }
 
+void SceneBridge::setPreviewVisible(bool on)
+{
+    /* GUI thread only (StudioTab show/hide + top-level window
+       visibility). Hidden: tick() keeps evaluating + pushing for
+       live output but skips the emittersChanged repaint. When live
+       is ALSO off nothing consumes the frame at all — stop the play
+       timer so hidden playback doesn't spin the engine; play_t
+       freezes until the next show (on-demand idle rendering).
+       Re-showing repaints the current frame once so the preview
+       never displays a stale buffer. */
+    if(preview_visible == on)
+    {
+        return;
+    }
+    preview_visible = on;
+    if(on)
+    {
+        if(!frame.empty())
+        {
+            emitFrameChanged();
+        }
+        if(playing_state && !play_timer->isActive())
+        {
+            play_clock->restart();
+            play_timer->start();
+        }
+    }
+    else if(!live_output.load() && play_timer->isActive())
+    {
+        play_timer->stop();
+    }
+}
+
 /* Newest-frame push: at most one worker in flight per lane plus one
    pending request. Intermediate ticks while a lane is busy collapse
    into a single follow-up push of the latest frame.
@@ -3935,7 +4078,7 @@ void SceneBridge::emitFrameChanged()
    monolithic under both mutexes. */
 void SceneBridge::schedulePush()
 {
-    if(!live_output || api == nullptr)
+    if(!live_output || api == nullptr || shutting_down.load())
     {
         return;
     }
@@ -3953,9 +4096,16 @@ void SceneBridge::schedulePush()
         return;
     }
     const SceneDocument doc_copy = doc;
+    push_workers.fetch_add(1);
     std::thread([this, doc_copy]()
     {
+        /* Decrement on every exit — the dtor's join relies on it.
+           A driver exception must not escape a detached thread
+           (that is terminate) nor strand the count. */
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } guard{push_workers};
         std::string err;
+        try
         {
             /* Both lane mutexes: a lane worker can still be finishing
                a write when the effect just stopped. */
@@ -3963,8 +4113,12 @@ void SceneBridge::schedulePush()
             QMutexLocker lock_fast(&fast_io_mutex);
             err = adapter.PushAll(doc_copy, nullptr);
         }
+        catch(...)
+        {
+            err = "push failed: driver threw";
+        }
         push_in_flight = false;
-        if(push_again.exchange(false))
+        if(push_again.exchange(false) && !shutting_down.load())
         {
             QMetaObject::invokeMethod(this, [this]() { schedulePush(); },
                                       Qt::QueuedConnection);
@@ -4028,11 +4182,28 @@ void SceneBridge::scheduleLane(int lane)
     }
     const SceneDocument doc_copy   = doc;
     const FrameColors   frame_copy = frame;
+    push_workers.fetch_add(1);
     std::thread([this, lane, doc_copy, frame_copy]()
     {
-        runPushLane(lane, doc_copy, frame_copy);
+        /* Counted for the dtor's join; lane_in_flight stays the
+           coalescing flag. A driver throw must not escape (that is
+           terminate) nor strand either flag — a stuck in_flight
+           would wedge the lane forever. */
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } guard{push_workers};
+        try
+        {
+            runPushLane(lane, doc_copy, frame_copy);
+        }
+        catch(...)
+        {
+            QMetaObject::invokeMethod(this, [this]()
+            {
+                setStatus(QStringLiteral("push failed: driver threw"));
+            }, Qt::QueuedConnection);
+        }
         lane_in_flight[lane] = false;
-        if(lane_again[lane].exchange(false))
+        if(lane_again[lane].exchange(false) && !shutting_down.load())
         {
             QMetaObject::invokeMethod(this, [this, lane]() { scheduleLane(lane); },
                                       Qt::QueuedConnection);
@@ -4081,6 +4252,14 @@ void SceneBridge::runPushLane(int lane, const SceneDocument& dc,
     std::string err;
     for(const DeviceBinding& b : dc.bindings)
     {
+        /* Bail between bindings once teardown started — the dtor is
+           waiting on this worker and a remaining sweep is dead
+           work. Mid-write exits stay impossible to shortcut, so the
+           join stays bounded by one driver write. */
+        if(shutting_down.load())
+        {
+            break;
+        }
         PushPace*  pace = nullptr;
         bool       i2c  = false;
         int        eff  = 1;
@@ -4192,15 +4371,33 @@ void SceneBridge::pushLive(const std::string& object_id)
     }
     const SceneDocument snapshot = doc;
     const std::string oid = object_id;
+    push_workers.fetch_add(1);
     std::thread([this, snapshot, oid]()
     {
-        QMutexLocker lock(&io_mutex);
-        const std::string err = adapter.PushObject(snapshot, oid);
-        if(!err.empty())
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } guard{push_workers};
+        try
         {
-            const QString msg = QString::fromStdString(err);
-            QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
-                                      Qt::QueuedConnection);
+            /* BOTH lane mutexes, not just io_mutex: a lane-0 worker
+               (measured-fast binding) writes under fast_io_mutex —
+               taking only io_mutex here would let a static push
+               interleave on the very same controller mid-frame. */
+            QMutexLocker lock(&io_mutex);
+            QMutexLocker lock_fast(&fast_io_mutex);
+            const std::string err = adapter.PushObject(snapshot, oid);
+            if(!err.empty())
+            {
+                const QString msg = QString::fromStdString(err);
+                QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
+                                          Qt::QueuedConnection);
+            }
+        }
+        catch(...)
+        {
+            QMetaObject::invokeMethod(this, [this]()
+            {
+                setStatus(QStringLiteral("push failed: driver threw"));
+            }, Qt::QueuedConnection);
         }
     }).detach();
 }
@@ -4212,14 +4409,28 @@ void SceneBridge::pushLiveAll()
         return;
     }
     const SceneDocument snapshot = doc;
+    push_workers.fetch_add(1);
     std::thread([this, snapshot]()
     {
-        QMutexLocker lock(&io_mutex);
-        const std::string err = adapter.PushAll(snapshot);
-        const QString msg = err.empty() ? QStringLiteral("live output on")
-                                        : QString::fromStdString(err);
-        QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
-                                  Qt::QueuedConnection);
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } guard{push_workers};
+        try
+        {
+            QMutexLocker lock(&io_mutex);
+            QMutexLocker lock_fast(&fast_io_mutex);
+            const std::string err = adapter.PushAll(snapshot);
+            const QString msg = err.empty() ? QStringLiteral("live output on")
+                                            : QString::fromStdString(err);
+            QMetaObject::invokeMethod(this, [this, msg]() { setStatus(msg); },
+                                      Qt::QueuedConnection);
+        }
+        catch(...)
+        {
+            QMetaObject::invokeMethod(this, [this]()
+            {
+                setStatus(QStringLiteral("push failed: driver threw"));
+            }, Qt::QueuedConnection);
+        }
     }).detach();
 }
 

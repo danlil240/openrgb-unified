@@ -33,12 +33,15 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQmlError>
+#include <QHideEvent>
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QShowEvent>
 #include <QThread>
 #include <QVBoxLayout>
 #include <QVariantMap>
+#include <QWindow>
 
 #include <set>
 
@@ -78,6 +81,21 @@ static QString PluginDirectory()
 /* Serializes this tab's controller writes (flash/measure). The bridge's
    live push uses its own mutex; stop other effect writers first. */
 static QMutex g_io_mutex;
+
+/* RAII scope for one diagnostics probe: pausePushes() on entry,
+   resumePushes() on exit — every worker exit path (early return,
+   driver exception) releases the lane locks, so a probe can never
+   wedge live output. held==false means the bridge is shutting down
+   and the run must be skipped (do NOT call resume). */
+struct ProbeGuard
+{
+    explicit ProbeGuard(studio::SceneBridge* b) : bridge(b), held(b->pausePushes()) {}
+    ~ProbeGuard() { if(held) bridge->resumePushes(); }
+    ProbeGuard(const ProbeGuard&) = delete;
+    ProbeGuard& operator=(const ProbeGuard&) = delete;
+    studio::SceneBridge* bridge;
+    bool                 held;
+};
 
 static const char* GraphicsApiName(QSGRendererInterface::GraphicsApi api)
 {
@@ -216,10 +234,76 @@ StudioTab::StudioTab(OpenRGBPluginAPIInterface* plugin_api, QWidget* parent)
     RefreshControllers();
 }
 
+StudioTab::~StudioTab()
+{
+    /* The diagnostics probes are detached/self-deleting workers that
+       borrow `this` (bridge pointer, queued AppendResult calls) —
+       let them notice the close and exit BEFORE member/child
+       teardown deletes the bridge under them. Probes poll
+       probe_closing between writes, so this join is bounded by one
+       driver write (+ one flash sleep). */
+    probe_closing = true;
+    for(int i = 0; probe_workers.load() > 0; i++)
+    {
+        if(i == 500)
+        {
+            qWarning("DesktopLightingStudio: ~StudioTab waiting on"
+                     " %d diagnostics probe(s)", probe_workers.load());
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+void StudioTab::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    /* Preview gate: hidden tab/minimized window does no per-tick
+       scene repaint while requested live playback keeps pushing
+       (spec §8). The windowHandle() connect covers minimize —
+       the widget itself stays logically "visible" there. */
+    if(!win_watched)
+    {
+        if(QWindow* win = windowHandle())
+        {
+            win_watched = true;
+            connect(win, &QWindow::visibilityChanged, this,
+                    [this](QWindow::Visibility v)
+            {
+                bridge->setPreviewVisible(v != QWindow::Minimized
+                                          && v != QWindow::Hidden
+                                          && isVisible());
+            });
+        }
+    }
+    if(QWindow* win = windowHandle())
+    {
+        bridge->setPreviewVisible(win->visibility() != QWindow::Minimized
+                                  && win->visibility() != QWindow::Hidden);
+    }
+    else
+    {
+        bridge->setPreviewVisible(true);
+    }
+}
+
+void StudioTab::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    bridge->setPreviewVisible(false);
+}
+
 void StudioTab::OnDevicesChanged()
 {
-    /* Only re-resolve bindings — repopulating the inspection list on
-       every resource signal would wipe the diagnostics log. */
+    /* Re-snapshot the controller list too — the old list can hold
+       dangling pointers after a disconnect, and the QML combos plus
+       the probe pickers read it. Silent (no log dump) so the
+       diagnostics log survives a rescan; the epoch bump makes any
+       in-flight probe abort its write loop instead of touching a
+       stale controller. */
+    controllers = (api != nullptr) ? api->GetRGBControllers()
+                                   : std::vector<RGBControllerInterface*>();
+    controller_epoch.fetch_add(1);
+    emit diagnosticsControllersChanged();
     bridge->refreshDevices();
 }
 
@@ -517,26 +601,56 @@ void StudioTab::diagFlash(int controller, int zone)
                  .arg(QString::fromStdString(ctrl->GetName()))
                  .arg(QString::fromStdString(ctrl->GetZoneName(zone_idx))));
 
-    std::thread([this, ctrl, zone_idx]()
+    const quint64 epoch = controller_epoch.load();
+    probe_workers.fetch_add(1);
+    std::thread([this, ctrl, zone_idx, epoch]()
     {
-        bridge->pausePushes();
+        /* Decrement on every exit — ~StudioTab's join counts on it,
+           and a throw inside a detached thread is std::terminate. */
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } count{probe_workers};
+        QString done = QStringLiteral("flash done");
+        try
         {
-            QMutexLocker io_lock(&g_io_mutex);
-            const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
-            for(int i = 0; i < 8; i++)
+            /* RAII pause: any exit path (abort, exception) releases
+               the lane mutexes — a leaked pause wedges every future
+               push and hangs ~SceneBridge. */
+            ProbeGuard paused(bridge);
+            if(!paused.held)
             {
-                const RGBColor color = (i % 2 == 0) ? ToRGBColor(64, 0, 0) : 0;
-                for(unsigned int l = 0; l < leds; l++)
+                done = QStringLiteral("flash skipped — studio closing");
+                return;
+            }
+            {
+                QMutexLocker io_lock(&g_io_mutex);
+                const unsigned int leds = ctrl->GetZoneLEDsCount(zone_idx);
+                for(int i = 0; i < 8; i++)
                 {
-                    ctrl->SetColor(ctrl->GetZoneStartIndex(zone_idx) + l, color);
+                    /* Bail between blinks on close or a device-list
+                       change — `ctrl` may be stale after one. */
+                    if(probe_closing.load()
+                       || controller_epoch.load() != epoch)
+                    {
+                        done = QStringLiteral("flash aborted — closing"
+                                              " or device list changed");
+                        break;
+                    }
+                    const RGBColor color = (i % 2 == 0) ? ToRGBColor(64, 0, 0) : 0;
+                    for(unsigned int l = 0; l < leds; l++)
+                    {
+                        ctrl->SetColor(ctrl->GetZoneStartIndex(zone_idx) + l, color);
+                    }
+                    ctrl->UpdateZoneLEDs(zone_idx);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
                 }
-                ctrl->UpdateZoneLEDs(zone_idx);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
         }
-        bridge->resumePushes();
+        catch(...)
+        {
+            done = QStringLiteral("flash failed — driver threw");
+        }
         QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
-                                  Q_ARG(QString, QStringLiteral("flash done")));
+                                  Q_ARG(QString, done));
     }).detach();
 }
 
@@ -558,14 +672,34 @@ void StudioTab::diagMeasure()
 
     AppendResult(QStringLiteral("measuring write latency..."));
 
+    const quint64 epoch = controller_epoch.load();
     auto snapshot = controllers;
-    QThread* worker = QThread::create([this, snapshot]()
+    probe_workers.fetch_add(1);
+    QThread* worker = QThread::create([this, snapshot, epoch]()
     {
+        struct ExitCount { std::atomic<int>& c;
+            ~ExitCount() { c.fetch_sub(1); } } count{probe_workers};
         constexpr int SAMPLES = 15;
 
         /* Exclusive hardware access: live pushes pause and drain
-           until resumePushes() at the end of the run. */
-        bridge->pausePushes();
+           until the ProbeGuard resumes them at scope exit — any
+           exit path (abort, driver throw) included. held==false
+           means the bridge is closing: skip the run entirely. */
+        ProbeGuard paused(bridge);
+        if(!paused.held)
+        {
+            QMetaObject::invokeMethod(this, "AppendResult",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(QString, QStringLiteral(
+                                          "measurement skipped — studio closing")));
+            return;
+        }
+        QString tail_msg = QStringLiteral("measurement complete");
+        auto abort_requested = [this, epoch]()
+        {
+            return probe_closing.load() || bridge->closing()
+                   || controller_epoch.load() != epoch;
+        };
 
         auto emit_line = [this](const QString& head, RGBControllerInterface* ctrl,
                                 unsigned int z, const QString& tail)
@@ -580,7 +714,7 @@ void StudioTab::diagMeasure()
                                       Q_ARG(QString, line));
         };
 
-        auto sample_zone = [this, &emit_line](const QString& head,
+        auto sample_zone = [this, &emit_line, &abort_requested](const QString& head,
                                             RGBControllerInterface* ctrl,
                                             unsigned int z, const QString& mode_note)
         {
@@ -598,7 +732,8 @@ void StudioTab::diagMeasure()
             qint64 total = 0;
             qint64 best  = -1;
             qint64 worst = 0;
-            for(int s = 0; s < SAMPLES; s++)
+            int    taken = 0;
+            for(int s = 0; s < SAMPLES && !abort_requested(); s++)
             {
                 const RGBColor c = (s & 1) ? ToRGBColor(0, 0, 24)
                                           : ToRGBColor(24, 0, 0);
@@ -610,6 +745,7 @@ void StudioTab::diagMeasure()
                 ctrl->UpdateZoneLEDs(z);
                 const qint64 ms = timer.elapsed();
                 total += ms;
+                taken++;
                 worst  = qMax(worst, ms);
                 if(best < 0 || ms < best)
                 {
@@ -622,7 +758,13 @@ void StudioTab::diagMeasure()
             }
             ctrl->UpdateZoneLEDs(z);
 
-            const double avg = (double)total / SAMPLES;
+            if(taken == 0)
+            {
+                emit_line(head, ctrl, z,
+                          QStringLiteral("aborted before first sample"));
+                return;
+            }
+            const double avg = (double)total / taken;
             QString tail = mode_note + QStringLiteral("avg %1 ms, min %2 ms, max %3 ms, ~%4 updates/s")
                            .arg(avg, 0, 'f', 1)
                            .arg(best)
@@ -636,7 +778,9 @@ void StudioTab::diagMeasure()
             emit_line(head, ctrl, z, tail);
         };
 
-        for(size_t ci = 0; ci < snapshot.size(); ci++)
+        try
+        {
+        for(size_t ci = 0; ci < snapshot.size() && !abort_requested(); ci++)
         {
             RGBControllerInterface* ctrl = snapshot[ci];
             const QString head = QStringLiteral("[%1] %2")
@@ -646,7 +790,8 @@ void StudioTab::diagMeasure()
             if(ctrl->SupportsPerZoneModes())
             {
                 /* Per-zone modes: switch and restore each zone. */
-                for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+                for(unsigned int z = 0; z < ctrl->GetZoneCount()
+                                    && !abort_requested(); z++)
                 {
                     const int prev = ctrl->GetZoneActiveMode(z);
 
@@ -733,7 +878,8 @@ void StudioTab::diagMeasure()
                 {
                     ctrl->SetActiveMode(per_led);
                 }
-                for(unsigned int z = 0; z < ctrl->GetZoneCount(); z++)
+                for(unsigned int z = 0; z < ctrl->GetZoneCount()
+                                    && !abort_requested(); z++)
                 {
                     sample_zone(head, ctrl, z, note);
                 }
@@ -743,9 +889,18 @@ void StudioTab::diagMeasure()
                 }
             }
         }
-        bridge->resumePushes();
+        }
+        catch(...)
+        {
+            tail_msg = QStringLiteral("measurement failed — driver threw");
+        }
+        if(abort_requested())
+        {
+            tail_msg = QStringLiteral("measurement aborted — closing"
+                                      " or device list changed");
+        }
         QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
-                                  Q_ARG(QString, QStringLiteral("measurement complete")));
+                                  Q_ARG(QString, tail_msg));
     });
     connect(worker, &QThread::finished, worker, &QThread::deleteLater);
     worker->start();
@@ -765,6 +920,10 @@ void StudioTab::PickColor()
 void StudioTab::RefreshControllers()
 {
     controllers.clear();
+    /* Same epoch bump as OnDevicesChanged — the list just changed,
+       so a probe still holding the old pointers should bail at its
+       next write. */
+    controller_epoch.fetch_add(1);
 
     if(api == nullptr)
     {
