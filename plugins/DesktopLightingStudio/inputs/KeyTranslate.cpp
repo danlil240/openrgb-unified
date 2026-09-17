@@ -9,6 +9,8 @@
 #include "KeyTranslate.h"
 #include "VkDefs.h"
 
+#include <cstddef>
+
 namespace studio
 {
 
@@ -124,9 +126,9 @@ static const CodeVk mac_vk[] =
        intentionally unmapped on macOS. */
 };
 
-static int Lookup(const CodeVk* table, size_t count, int code)
+static int Lookup(const CodeVk* table, std::size_t count, int code)
 {
-    for(size_t i = 0; i < count; i++)
+    for(std::size_t i = 0; i < count; i++)
     {
         if(table[i].code == code)
         {
