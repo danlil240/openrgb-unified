@@ -41,9 +41,14 @@ EDITOR_SRC=(
    "$STUDIO/editor/TransformCommands.cpp"
 )
 
-# Static C++ runtime: on Windows hosts the produced exe would otherwise
+# Static C++ runtime on Windows hosts: the produced exe would otherwise
 # need libstdc++-6.dll/libgcc from the compiler's bin dir on PATH.
-CXXFLAGS=(-std=c++17 -static-libstdc++ -static-libgcc -I"$STUDIO" -I"$JSON")
+# clang rejects -static-libgcc, so keep it MSYS/Cygwin-only.
+STATIC_FLAGS=()
+case "$OSTYPE" in
+    msys*|cygwin*|win32*) STATIC_FLAGS=(-static-libstdc++ -static-libgcc) ;;
+esac
+CXXFLAGS=(-std=c++17 "${STATIC_FLAGS[@]}" -I"$STUDIO" -I"$JSON")
 
 "$CXX" "${CXXFLAGS[@]}" studio_scene_test.cpp \
    "${SCENE_SRC[@]}" "${V3_SRC[@]}" \
