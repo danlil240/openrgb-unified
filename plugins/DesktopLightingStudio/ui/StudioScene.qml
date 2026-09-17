@@ -42,8 +42,9 @@ Rectangle {
     property var focusPeer: null
     /* Second peer — the floating preset editor (task 4.3) is a
        sibling of the docked inspector, so both report through
-       editingText(). */
+       editingText(). Third peer — the 5.2 effect editor. */
     property var focusPeer2: null
+    property var focusPeer3: null
     readonly property var editorCtl: selCtl
     readonly property var editorCam: camCtl
     /* Test seam: the tiered environment instance (probe/qml tests
@@ -54,6 +55,7 @@ Rectangle {
         return inspector.textFocus
                || (focusPeer && focusPeer.textFocus)
                || (focusPeer2 && focusPeer2.textFocus)
+               || (focusPeer3 && focusPeer3.textFocus)
     }
 
     // Diagnostic state readable from the probe / debug overlays.

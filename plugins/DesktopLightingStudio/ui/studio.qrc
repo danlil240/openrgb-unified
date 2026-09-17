@@ -8,6 +8,10 @@
         <file alias="components/DevicePresetEditor.qml">components/DevicePresetEditor.qml</file>
         <file alias="components/Inspector.qml">components/Inspector.qml</file>
         <file alias="components/LookShelf.qml">components/LookShelf.qml</file>
+        <file alias="components/EffectEditor.qml">components/EffectEditor.qml</file>
+        <file alias="components/LayerStack.qml">components/LayerStack.qml</file>
+        <file alias="components/PaletteEditor.qml">components/PaletteEditor.qml</file>
+        <file alias="components/EffectInspector.qml">components/EffectInspector.qml</file>
         <file alias="editor/CameraController.qml">editor/CameraController.qml</file>
         <file alias="editor/SelectionController.qml">editor/SelectionController.qml</file>
         <file alias="editor/TransformGizmo.qml">editor/TransformGizmo.qml</file>

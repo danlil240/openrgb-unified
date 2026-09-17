@@ -43,6 +43,11 @@ public:
     | the GUI thread.                                      |
     \*-----------------------------------------------------*/
     Q_INVOKABLE void        uiPickColor();
+    /* Task 5.2 — generic color pick for the palette editor:
+       QColorDialog seeded with `initial` ("#rrggbb"), returns the
+       chosen hex string or "" on cancel. Same dialog idiom as
+       uiPickColor, without touching paintColor/selection. */
+    Q_INVOKABLE QString     uiPickColorFor(const QString& initial);
     Q_INVOKABLE void        uiSave();
     Q_INVOKABLE void        uiSaveCopyAs();
     Q_INVOKABLE void        uiReload();

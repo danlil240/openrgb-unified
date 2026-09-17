@@ -37,6 +37,9 @@ struct PresetInfo
     std::string description;
     std::string needs;          /* required input source: "audio" |   */
                                 /* "key" | "screen" | "" = none       */
+    bool        from_file = false;  /* a presets/effects file supplies  */
+                                    /* this look (file-over-default or  */
+                                    /* file-only)                       */
 };
 
 /* Preset strip listing — the nine shipped looks in fixed card

@@ -803,6 +803,87 @@ bool ConfigStore::WritePresetFile(const DevicePreset& p, QString* error)
     return true;
 }
 
+bool ConfigStore::WriteEffectFile(const EffectDocument& d,
+                                  QString* error)
+{
+    /* id == filename is a registry rule — refuse to write a file
+       the next scan would reject, and keep the charset portable. */
+    if(!IsPresetId(d.id))
+    {
+        if(error)
+        {
+            *error = QStringLiteral("bad look id '%1' — expected"
+                                    " [A-Za-z0-9_-]")
+                         .arg(QString::fromStdString(d.id));
+        }
+        return false;
+    }
+
+    /* Round-trip the candidate through the real parser before disk
+       is touched — a look that can't survive its own serializer
+       never becomes a file. The document keeps ordered_json layers
+       so remix specs stay literal in the file. */
+    const QByteArray bytes =
+        QByteArray::fromStdString(EffectDocumentToJson(d).dump(2))
+        + "\n";
+    {
+        const nlohmann::ordered_json j = nlohmann::ordered_json::parse(
+            bytes.constBegin(), bytes.constEnd(), nullptr, false);
+        EffectDocument check;
+        std::vector<std::string> errs;
+        if(j.is_discarded() || !EffectDocumentFromJson(j, check, &errs))
+        {
+            if(error)
+            {
+                *error = QStringLiteral("candidate invalid: %1")
+                    .arg(QString::fromStdString(
+                        errs.empty() ? "serialization" : errs.front()));
+            }
+            return false;
+        }
+    }
+
+    QDir qd(dir);
+    if(!QFileInfo::exists(EffectPresetDir())
+       && !qd.mkpath("presets/effects"))
+    {
+        if(error)
+        {
+            *error = QStringLiteral("cannot create %1")
+                         .arg(EffectPresetDir());
+        }
+        return false;
+    }
+    const QString target = EffectPresetDir() + "/"
+        + QString::fromStdString(d.id) + ".effect.json";
+    if(!WriteAtomic(target, bytes, error))
+    {
+        return false;
+    }
+
+    /* Validate the file that actually landed — a committed look
+       must parse on the next registry scan; a failed write leaves
+       nothing behind. */
+    EffectDocument landed;
+    std::vector<std::string> verrs;
+    if(!EffectDocumentFromJsonFile(target.toStdString(), landed,
+                                   &verrs)
+       || landed.id != d.id)
+    {
+        QFile::remove(target);
+        if(error)
+        {
+            *error = QStringLiteral("%1: written look failed"
+                                    " re-validation (%2)")
+                .arg(target)
+                .arg(QString::fromStdString(
+                    verrs.empty() ? "id mismatch" : verrs.front()));
+        }
+        return false;
+    }
+    return true;
+}
+
 void ConfigStore::MarkDirty()
 {
     if(!dirty_state)

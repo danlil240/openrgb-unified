@@ -40,6 +40,31 @@ Rectangle {
         return (h !== null && h.objectName !== undefined) ? h : null
     }
 
+    /* Task 5.2 — the workspace hosts the effect editor; the
+       shelf only asks. */
+    signal editRequested()
+
+    /* Required-input badge text for a look's `needs` —
+       icon glyph + words (never color alone). state:
+       "" = unknown, "ok" = live, "off" = toggled off,
+       "down" = provider not running. */
+    function needsBadge(needs) {
+        if (!needs || needs === "")
+            return { text: "", state: "" }
+        var b = br()
+        if (!b || typeof b.inputSourceState !== "function")
+            return { text: needs, state: "" }
+        var st = b.inputSourceState(needs)
+        if (!st || st.name === undefined)
+            return { text: needs, state: "" }
+        if (!st.enabled)
+            return { text: needs + " — off", state: "off" }
+        if (!st.ready)
+            return { text: needs + " — " + (st.status || "disconnected"),
+                     state: "down" }
+        return { text: needs, state: "ok" }
+    }
+
     property bool inputsOpen: false
     /* Bump on bridge signals so the stubs/tests re-read too. */
     property int fxStamp: 0
@@ -57,7 +82,7 @@ Rectangle {
             shelf.fxStamp++
             speedSl.sync(); intenSl.sync()
         }
-        function onInputsChanged()       { shelf.syncAll() }
+        function onInputsChanged()       { shelf.syncAll(); shelf.fxStamp++ }
         function onBrightnessChanged()   { brightSl.sync() }
     }
 
@@ -215,7 +240,7 @@ Rectangle {
                 delegate: Rectangle {
                     id: card
                     required property var modelData
-                    height: 34; width: cardLabel.width + 20
+                    height: 34; width: cardCol.width + 20
                     radius: th.radiusSm
                     property bool on: {
                         shelf.fxStamp
@@ -224,6 +249,15 @@ Rectangle {
                                     && b.activePreset === modelData.id)
                                  : false
                     }
+                    /* needs badge — always icon+word; the
+                       disconnected suffix shows on the ACTIVE or
+                       hovered card when the required source is
+                       toggled off or its provider is down. */
+                    property var nb: {
+                        shelf.fxStamp
+                        cardHov.containsMouse
+                        return shelf.needsBadge(card.modelData.needs || "")
+                    }
                     color: on ? th.accentBg
                          : (cardHov.containsMouse ? th.panelAlt : th.field)
                     border.color: on ? th.accent : th.borderHi
@@ -231,11 +265,32 @@ Rectangle {
                         if (shelf.hasBr())
                             shelf.br().playPreset(card.modelData.id)
                     }
-                    Text {
-                        id: cardLabel
+                    Column {
+                        id: cardCol
                         anchors.centerIn: parent
-                        text: card.modelData.name
-                        color: th.text; font.pixelSize: th.fontBody
+                        Text {
+                            id: cardLabel
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: card.modelData.name
+                                   + (card.modelData.fromFile ? " •" : "")
+                            color: th.text; font.pixelSize: th.fontBody
+                        }
+                        Text {
+                            visible: text !== ""
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: {
+                                var nb = card.nb
+                                if (nb.state === "" || nb.state === "ok")
+                                    return nb.text
+                                if (card.on || cardHov.containsMouse)
+                                    return nb.text      /* off/down msg */
+                                return card.modelData.needs || ""
+                            }
+                            color: (card.nb.state === "off"
+                                    || card.nb.state === "down")
+                                   ? th.warn : th.textFaint
+                            font.pixelSize: th.fontSmall
+                        }
                     }
                     MouseArea {
                         id: cardHov; anchors.fill: parent; hoverEnabled: true
@@ -245,7 +300,14 @@ Rectangle {
                        as a tooltip — restored (was dropped in 3.1). */
                     ToolTip.visible: cardHov.containsMouse
                                      && (card.modelData.description || "") !== ""
-                    ToolTip.text: card.modelData.description || ""
+                    ToolTip.text: {
+                        var d = card.modelData.description || ""
+                        var nb = card.nb
+                        var n = (nb.state === "off" || nb.state === "down")
+                              ? nb.text : ""
+                        return n === "" ? d
+                               : (d === "" ? n : d + " — " + n)
+                    }
                     ToolTip.delay: 500
                 }
             }
@@ -285,6 +347,23 @@ Rectangle {
                     return shelf.hasBr() && shelf.br().activePreset !== ""
                 }
                 onClicked: if (shelf.hasBr()) shelf.br().remix()
+            }
+            SButton {
+                text: "Edit"; w: 46
+                tip: "Edit the look's layer stack — order, blending, palettes, targets"
+                enabled: {
+                    shelf.fxStamp
+                    var b = shelf.br()
+                    if (!b)
+                        return false
+                    /* Something to edit: a named look (materializes
+                       on first edit) or an existing inline stack. */
+                    if (b.activePreset !== "")
+                        return true
+                    return (typeof b.effectLayerCount === "function")
+                           && b.effectLayerCount() > 0
+                }
+                onClicked: shelf.editRequested()
             }
 
             Item { width: 4; height: 1 }

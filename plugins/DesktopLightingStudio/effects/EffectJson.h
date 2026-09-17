@@ -75,6 +75,11 @@ struct EffectDocument
 |||| positions, a present-but-empty palette, empty target  ||
 |||| strings and remix specs are all validation errors.    |
 \*---------------------------------------------------------*/
+/* The primitive whitelist — the same names the layer parser and
+   the engine's dispatch agree on. The editor's add-layer op uses
+   this so a bad name is refused before it reaches the document. */
+bool IsPrimitive(const std::string& s);
+
 nlohmann::json EffectLayerToJson(const EffectLayer& l);
 nlohmann::json EffectLayersToJson(const std::vector<EffectLayer>& layers);
 

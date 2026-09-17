@@ -231,6 +231,15 @@ void StudioTab::uiPickColor()
     PickColor();
 }
 
+QString StudioTab::uiPickColorFor(const QString& initial)
+{
+    const QColor seed = QColor::isValidColorName(initial)
+        ? QColor(initial) : bridge->paintColor();
+    const QColor color = QColorDialog::getColor(
+        seed, this, QStringLiteral("Palette stop color"));
+    return color.isValid() ? color.name() : QString();
+}
+
 void StudioTab::uiSave()
 {
     bridge->saveScene();

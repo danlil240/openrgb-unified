@@ -126,13 +126,15 @@ Vec3 EulerDegFromMat4(const Mat4& r)
 bool EditorEdit::Empty() const
 {
     return devices.Empty() && settings.Empty() && bindings.Empty()
-        && object_colors.Empty() && emitter_colors.Empty();
+        && object_colors.Empty() && emitter_colors.Empty()
+        && !has_effect;
 }
 
 bool EditorEdit::TransformsOnly() const
 {
     if(!settings.Empty() || !bindings.Empty()
-       || !object_colors.Empty() || !emitter_colors.Empty())
+       || !object_colors.Empty() || !emitter_colors.Empty()
+       || has_effect)
     {
         return false;
     }
@@ -177,6 +179,12 @@ void ApplyEditorEdit(StudioDocument& ws, const EditorEdit& e)
     ApplySection(ws.bindings,        e.bindings);
     ApplySection(ws.object_colors,   e.object_colors);
     ApplySection(ws.emitter_colors,  e.emitter_colors);
+    if(e.has_effect)
+    {
+        ws.effect.preset = e.effect_after.preset;
+        ws.effect.seed   = e.effect_after.seed;
+        ws.effect.layers = e.effect_after.layers;
+    }
 }
 
 void RevertEditorEdit(StudioDocument& ws, const EditorEdit& e)
@@ -186,6 +194,12 @@ void RevertEditorEdit(StudioDocument& ws, const EditorEdit& e)
     RevertSection(ws.bindings,        e.bindings);
     RevertSection(ws.object_colors,   e.object_colors);
     RevertSection(ws.emitter_colors,  e.emitter_colors);
+    if(e.has_effect)
+    {
+        ws.effect.preset = e.effect_before.preset;
+        ws.effect.seed   = e.effect_before.seed;
+        ws.effect.layers = e.effect_before.layers;
+    }
 }
 
 } /* namespace studio */

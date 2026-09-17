@@ -50,6 +50,31 @@ Item {
     readonly property int gMarquee: 4
     readonly property int gOrbit:   5
     readonly property int gPaint:   6
+    readonly property int gPick:    7
+
+    /* Task 5.2 — effect pick mode, armed by the effect editor:
+       "origin" | "path". While armed a left press becomes a pick
+       gesture instead of select/move/marquee — exclusive like
+       Paint (it can never move devices); middle-button pan still
+       wins. Picks land on the desk plane at pickPlaneY (the layer
+       origin's height) through cam.planeHitPoint — the same math
+       the move gesture and device-drop use. pickTarget(pt, phase)
+       receives "begin" | "drag" | "end" | "cancel"; the callback
+       owns the undo bookkeeping (one effect gesture per pick). */
+    property string pickMode: ""        /* "" | "origin" | "path" */
+    property real   pickPlaneY: 0.0
+    property var    pickTarget: null    /* fn(vector3d pt, string phase) */
+
+    function deliverPick(x, y, phase) {
+        if (pickTarget === null || !cam)
+            return
+        var p = cam.planeHitPoint(x, y, 1, pickPlaneY)
+        if (!p && cam.target)
+            p = cam.planeHitPoint(x, y, -1, cam.target)
+        if (!p)
+            return
+        pickTarget(p, phase)
+    }
 
     property int    gesture: gNone
     property bool   pressed: false
@@ -166,6 +191,16 @@ Item {
         if (button !== Qt.LeftButton)
             return
 
+        /* Effect pick mode: the press is already the gesture — a
+           click delivers begin+end, a drag streams "drag" points
+           (origin scrub / waypoint reposition). No selection, no
+           move, no marquee. */
+        if (pickMode !== "") {
+            gesture = gPick
+            deliverPick(x, y, "begin")
+            return
+        }
+
         if (tool === 2) {
             /* Paint mode: pointer gestures can never start movement
                or camera orbit — only emitter painting. */
@@ -259,6 +294,10 @@ Item {
                     && rp.objectHit.objectName.indexOf("emit|") === 0)
                     paintHit(rp.objectHit.objectName)
             }
+            return
+        }
+        if (gesture === gPick) {
+            deliverPick(x, y, "drag")
             return
         }
         if (gesture === gMove) {
@@ -356,6 +395,10 @@ Item {
         } else if (g === gPan || g === gOrbit) {
             if (cam)
                 cam.endPose()     /* persist final pose */
+        } else if (g === gPick) {
+            /* One completed pick gesture — the callback folds it
+               into a single undo command. */
+            deliverPick(x, y, "end")
         } else if (g === gNone && button === Qt.LeftButton
                    && pressButton === Qt.LeftButton) {
             clickAt(mods)
@@ -395,9 +438,15 @@ Item {
                                                   wins over any
                                                   deferred zoom */
         } else {
+            if (g === gPick)
+                deliverPick(lastPos.x, lastPos.y, "cancel")
             flushCamPose()        /* gNone/gPaint/gMarquee — nothing
                                      camera-side to restore */
         }
+        /* Escape also exits an ARMED pick mode (press already over)
+           — "Escape exits" per the 5.2 contract. */
+        if (pickMode !== "")
+            pickMode = ""
         reset()
         return wasPressed || g !== gNone
     }

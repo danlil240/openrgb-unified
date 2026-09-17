@@ -19,6 +19,7 @@
 
 #include "StudioConfig.h"
 #include "../presets/DevicePreset.h"
+#include "../effects/EffectJson.h"
 
 #include <QObject>
 #include <QByteArray>
@@ -110,6 +111,18 @@ public:
        instance placement — and a failed save leaves the previous
        file (and the active scene/inputs/output) untouched. */
     bool WritePresetFile(const DevicePreset& p, QString* error = nullptr);
+
+    /* Validated atomic write of ONE effect-look file at
+       presets/effects/<id>.effect.json — the effect editor's
+       "save as personal look" path (task 5.2). The candidate is
+       serialized, re-validated through EffectDocumentFromJson, and
+       required to satisfy id == filename (IsPresetId charset)
+       before disk is touched; after commit the landed file is
+       re-read and re-validated, and a failure removes the file so
+       no invalid look is left behind. studio.json is never
+       touched. */
+    bool WriteEffectFile(const EffectDocument& d,
+                         QString* error = nullptr);
 
     /* Dirty tracking + debounced autosave. The provider is invoked
        on this object's thread when the autosave timer fires. */

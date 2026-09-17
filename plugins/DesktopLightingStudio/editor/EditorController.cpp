@@ -6,12 +6,14 @@
 
 #include "EditorController.h"
 
+#include "../effects/EffectJson.h"
 #include "../presets/DevicePreset.h"
 #include "../presets/PresetRegistry.h"
 #include "../scene/SceneJson.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cfloat>
 
 namespace studio
 {
@@ -287,6 +289,12 @@ bool EditorController::BeginTransform()
     if(gesture.active)
     {
         Cancel();
+    }
+    /* A live effect-layer gesture is cancelled the same way — the
+       two preview kinds are mutually exclusive. */
+    if(layer_gesture.active)
+    {
+        CancelLayerGesture();
     }
     gesture = Gesture{};
     gesture.movable = Movable();
@@ -1604,6 +1612,914 @@ EditorController::SetZoneParams(const std::string& iid,
     s.zones[zone_id].verified  = verified;
     CaptureKey(e.settings, ws.device_settings, iid);
     return e;
+}
+
+/*---------------------------------------------------------*\
+|| Effect layers (task 5.2) — authored inline stack         ||
+\*---------------------------------------------------------*/
+namespace
+{
+
+bool SameColorF(const ColorF& a, const ColorF& b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+}
+
+bool SameLayer(const EffectLayer& a, const EffectLayer& b)
+{
+    if(a.primitive != b.primitive || a.space != b.space
+       || a.blend != b.blend || a.enabled != b.enabled
+       || a.opacity != b.opacity || a.speed != b.speed
+       || a.scale != b.scale || a.phase != b.phase
+       || a.density != b.density || a.seed != b.seed
+       || a.source != b.source || a.targets != b.targets
+       || !SameVec(a.origin, b.origin)
+       || !SameVec(a.direction, b.direction)
+       || a.path.size() != b.path.size()
+       || a.palette.stops.size() != b.palette.stops.size())
+    {
+        return false;
+    }
+    for(size_t i = 0; i < a.path.size(); i++)
+    {
+        if(!SameVec(a.path[i], b.path[i]))
+        {
+            return false;
+        }
+    }
+    for(size_t i = 0; i < a.palette.stops.size(); i++)
+    {
+        if(a.palette.stops[i].pos != b.palette.stops[i].pos
+           || !SameColorF(a.palette.stops[i].color,
+                          b.palette.stops[i].color))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameStack(const std::vector<EffectLayer>& a,
+               const std::vector<EffectLayer>& b)
+{
+    if(a.size() != b.size())
+    {
+        return false;
+    }
+    for(size_t i = 0; i < a.size(); i++)
+    {
+        if(!SameLayer(a[i], b[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+} /* anonymous namespace */
+
+void EditorController::SetLayerResolver(LayerResolver resolver, void* ctx)
+{
+    layer_resolver     = resolver;
+    layer_resolver_ctx = ctx;
+}
+
+EffectDelta EditorController::SnapEffect() const
+{
+    EffectDelta d;
+    d.preset = ws.effect.preset;
+    d.seed   = ws.effect.seed;
+    d.layers = ws.effect.layers;
+    return d;
+}
+
+bool EditorController::EffectDeltaEqual(const EffectDelta& a,
+                                        const EffectDelta& b) const
+{
+    return a.preset == b.preset && a.seed == b.seed
+        && SameStack(a.layers, b.layers);
+}
+
+void EditorController::RestoreEffect(const EffectDelta& d)
+{
+    ws.effect.preset = d.preset;
+    ws.effect.seed   = d.seed;
+    ws.effect.layers = d.layers;
+}
+
+bool EditorController::EnsureLayers()
+{
+    if(!ws.effect.layers.empty())
+    {
+        return true;                            /* already inline   */
+    }
+    if(ws.effect.preset.empty())
+    {
+        return true;                            /* no preset to     */
+    }                                           /* materialize      */
+    if(layer_resolver == nullptr)
+    {
+        last_error = "effect edits need a look resolver";
+        return false;
+    }
+    std::vector<EffectLayer> out;
+    if(!layer_resolver(ws.effect.preset, ws.effect.seed, out,
+                       layer_resolver_ctx))
+    {
+        last_error = "effect look '" + ws.effect.preset
+                   + "' does not resolve";
+        return false;
+    }
+    ws.effect.layers = out;
+    return true;
+}
+
+EffectLayer* EditorController::LayerAt(size_t i)
+{
+    if(!EnsureLayers() || i >= ws.effect.layers.size())
+    {
+        return nullptr;
+    }
+    return &ws.effect.layers[i];
+}
+
+/* Restore `before` after a refused/no-op write so a materialization
+   performed for the op doesn't leak into the document unrecorded. */
+std::optional<EditorEdit>
+EditorController::UndoEffectOp(const EffectDelta& before)
+{
+    RestoreEffect(before);
+    return std::nullopt;
+}
+
+std::optional<EditorEdit>
+EditorController::FinishEffectEdit(const EffectDelta& before,
+                                   const std::string& label)
+{
+    /* Inside a layer gesture the write already landed in ws — the
+       Commit folds the whole gesture into one record. */
+    if(layer_gesture.active)
+    {
+        return std::nullopt;
+    }
+    const EffectDelta after = SnapEffect();
+    if(EffectDeltaEqual(before, after))
+    {
+        /* No net change (incl. a materialize-only op) — restore so
+           an untouched preset stays registry-resolved. */
+        RestoreEffect(before);
+        return std::nullopt;
+    }
+    EditorEdit e;
+    e.label         = label;
+    e.has_effect    = true;
+    e.effect_before = before;
+    e.effect_after  = after;
+    return e;
+}
+
+bool EditorController::BeginLayerGesture()
+{
+    /* Same exclusivity rules as the transform gesture: a live one
+       is cancelled (snapshot restored) before the new begin. */
+    if(layer_gesture.active)
+    {
+        CancelLayerGesture();
+    }
+    if(gesture.active)
+    {
+        Cancel();
+    }
+    layer_gesture        = LayerGesture{};
+    layer_gesture.begin  = SnapEffect();
+    /* Materialize up front so preview ops edit the inline stack;
+       a preset that doesn't resolve still allows AddLayer. */
+    EnsureLayers();
+    layer_gesture.base   = SnapEffect();
+    layer_gesture.active = true;
+    return true;
+}
+
+std::optional<EditorEdit>
+EditorController::CommitLayerGesture(const std::string& label)
+{
+    if(!layer_gesture.active)
+    {
+        return std::nullopt;
+    }
+    const EffectDelta after  = SnapEffect();
+    const EffectDelta begin  = layer_gesture.begin;
+    const EffectDelta base   = layer_gesture.base;
+    layer_gesture            = LayerGesture{};
+    if(EffectDeltaEqual(after, base))
+    {
+        /* The gesture produced no net change — restore the
+           pre-gesture snapshot (undoes a materialize-only begin). */
+        RestoreEffect(begin);
+        return std::nullopt;
+    }
+    EditorEdit e;
+    e.label         = label;
+    e.has_effect    = true;
+    e.effect_before = begin;
+    e.effect_after  = after;
+    return e;
+}
+
+void EditorController::CancelLayerGesture()
+{
+    if(!layer_gesture.active)
+    {
+        return;
+    }
+    RestoreEffect(layer_gesture.begin);
+    layer_gesture = LayerGesture{};
+}
+
+/*---------------------------------------------------------*\
+|| Stack-level ops                                          ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::MoveLayer(size_t from, size_t to)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    if(!EnsureLayers())
+    {
+        return std::nullopt;
+    }
+    const size_t n = ws.effect.layers.size();
+    if(from >= n || to >= n || from == to)
+    {
+        return UndoEffectOp(before);
+    }
+    EffectLayer tmp = ws.effect.layers[from];
+    ws.effect.layers.erase(ws.effect.layers.begin() + (ptrdiff_t)from);
+    ws.effect.layers.insert(ws.effect.layers.begin() + (ptrdiff_t)to,
+                            tmp);
+    return FinishEffectEdit(before, "reorder effect layer");
+}
+
+std::optional<EditorEdit>
+EditorController::AddLayer(const std::string& primitive)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!IsPrimitive(primitive))
+    {
+        last_error = "unknown primitive '" + primitive + "'";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    if(!EnsureLayers())
+    {
+        return std::nullopt;
+    }
+    if(ws.effect.layers.size() >= EFFECT_MAX_LAYERS)
+    {
+        last_error = "layer count exceeds cap "
+                   + std::to_string(EFFECT_MAX_LAYERS);
+        return UndoEffectOp(before);
+    }
+    /* Sensible defaults: the struct's own defaults, plus a two-stop
+       palette so gradient/wave/spin render something out of the
+       box and static shows a color. */
+    EffectLayer l;
+    l.primitive = primitive;
+    l.palette   = MakePalette({ MakeSceneColor(255, 255, 255),
+                                MakeSceneColor(40, 120, 255) });
+    if(primitive == "screenfield")
+    {
+        l.source = "screen";
+    }
+    ws.effect.layers.push_back(l);
+    return FinishEffectEdit(before, "add " + primitive + " layer");
+}
+
+std::optional<EditorEdit>
+EditorController::RemoveLayer(size_t i)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    if(!EnsureLayers() || i >= ws.effect.layers.size())
+    {
+        return UndoEffectOp(before);
+    }
+    ws.effect.layers.erase(ws.effect.layers.begin() + (ptrdiff_t)i);
+    return FinishEffectEdit(before, "remove effect layer");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayers(const std::vector<EffectLayer>& stack,
+                            const std::string& new_preset)
+{
+    if(gesture.active || layer_gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(stack.size() > EFFECT_MAX_LAYERS)
+    {
+        last_error = "layer count exceeds cap "
+                   + std::to_string(EFFECT_MAX_LAYERS);
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    ws.effect.layers = stack;
+    ws.effect.preset = new_preset;
+    return FinishEffectEdit(before, stack.empty()
+                          ? "reset effect to preset"
+                          : "replace effect layers");
+}
+
+/*---------------------------------------------------------*\
+|| Per-layer ops                                            ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::SetLayerEnabled(size_t i, bool on)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->enabled == on)
+    {
+        return UndoEffectOp(before);
+    }
+    l->enabled = on;
+    return FinishEffectEdit(before, on ? "enable layer"
+                                       : "disable layer");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerBlend(size_t i, BlendMode mode)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->blend == mode)
+    {
+        return UndoEffectOp(before);
+    }
+    l->blend = mode;
+    return FinishEffectEdit(before, "set layer blend");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerOpacity(size_t i, float v)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(v))
+    {
+        last_error = "opacity must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    const float nv = std::max(0.0f, std::min(1.0f, v));
+    if(nv == l->opacity)
+    {
+        return UndoEffectOp(before);
+    }
+    l->opacity = nv;
+    return FinishEffectEdit(before, "set layer opacity");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerField(size_t i, LayerField f, double v)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(v))
+    {
+        last_error = "value must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    const char* name = "parameter";
+    switch(f)
+    {
+    case LayerField::Speed:
+        name = "speed";
+        if((float)v == l->speed)
+        {
+            return UndoEffectOp(before);
+        }
+        l->speed = (float)v;
+        if(!std::isfinite(l->speed))
+        {
+            last_error = "speed overflows float";
+            return UndoEffectOp(before);
+        }
+        break;
+    case LayerField::Scale:
+        name = "scale";
+        if(v <= 0.0)
+        {
+            last_error = "scale must be > 0";
+            return UndoEffectOp(before);
+        }
+        if((float)v == l->scale)
+        {
+            return UndoEffectOp(before);
+        }
+        l->scale = (float)v;
+        if(!std::isfinite(l->scale))
+        {
+            last_error = "scale overflows float";
+            return UndoEffectOp(before);
+        }
+        break;
+    case LayerField::Phase:
+        name = "phase";
+        if((float)v == l->phase)
+        {
+            return UndoEffectOp(before);
+        }
+        l->phase = (float)v;
+        if(!std::isfinite(l->phase))
+        {
+            last_error = "phase overflows float";
+            return UndoEffectOp(before);
+        }
+        break;
+    case LayerField::Density:
+        name = "density";
+        v = std::max(0.0, v);
+        if((float)v == l->density)
+        {
+            return UndoEffectOp(before);
+        }
+        l->density = (float)v;
+        if(!std::isfinite(l->density))
+        {
+            last_error = "density overflows float";
+            return UndoEffectOp(before);
+        }
+        break;
+    case LayerField::Seed:
+        name = "seed";
+        v = std::max(0.0, std::min(4294967295.0, std::floor(v)));
+        if((unsigned int)v == l->seed)
+        {
+            return UndoEffectOp(before);
+        }
+        l->seed = (unsigned int)v;
+        break;
+    }
+    return FinishEffectEdit(before,
+                            std::string("set layer ") + name);
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerSpace(size_t i, CoordSpace space)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->space == space)
+    {
+        return UndoEffectOp(before);
+    }
+    l->space = space;
+    return FinishEffectEdit(before, "set layer space");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerOrigin(size_t i, const Vec3& v)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(v.x) || !std::isfinite(v.y)
+       || !std::isfinite(v.z))
+    {
+        last_error = "origin must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(SameVec(l->origin, v))
+    {
+        return UndoEffectOp(before);
+    }
+    l->origin = v;
+    return FinishEffectEdit(before, "set layer origin");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerDirection(size_t i, const Vec3& v)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(v.x) || !std::isfinite(v.y)
+       || !std::isfinite(v.z))
+    {
+        last_error = "direction must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(SameVec(l->direction, v))
+    {
+        return UndoEffectOp(before);
+    }
+    l->direction = v;
+    return FinishEffectEdit(before, "set layer direction");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerSource(size_t i, const std::string& src)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!src.empty() && src != "audio" && src != "key"
+       && src != "screen")
+    {
+        last_error = "source must be \"\", \"audio\", \"key\""
+                     " or \"screen\"";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->source == src)
+    {
+        return UndoEffectOp(before);
+    }
+    l->source = src;
+    return FinishEffectEdit(before, "set layer source");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerTargets(size_t i,
+                                  const std::vector<std::string>& targets)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(targets.size() > EFFECT_MAX_TARGETS)
+    {
+        last_error = "target count exceeds cap "
+                   + std::to_string(EFFECT_MAX_TARGETS);
+        return std::nullopt;
+    }
+    for(const std::string& t : targets)
+    {
+        if(t.empty())
+        {
+            last_error = "target ids must be non-empty";
+            return std::nullopt;
+        }
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->targets == targets)
+    {
+        return UndoEffectOp(before);
+    }
+    l->targets = targets;
+    return FinishEffectEdit(before, "set layer targets");
+}
+
+/*---------------------------------------------------------*\
+|| Palette-stop ops — positions strictly increasing in 0..1 ||
+\*---------------------------------------------------------*/
+bool EditorController::SortLayerStops(EffectLayer& l,
+                                      size_t track_stop,
+                                      size_t& new_index) const
+{
+    /* Stable sort keeps same-position order deterministic; the
+       moved stop's new slot is reported for selection tracking. */
+    struct Tracked { PaletteStop s; bool tracked; };
+    std::vector<Tracked> ts;
+    ts.reserve(l.palette.stops.size());
+    for(size_t i = 0; i < l.palette.stops.size(); i++)
+    {
+        ts.push_back({ l.palette.stops[i], i == track_stop });
+    }
+    std::stable_sort(ts.begin(), ts.end(),
+                     [](const Tracked& a, const Tracked& b) {
+                         return a.s.pos < b.s.pos;
+                     });
+    new_index = 0;
+    for(size_t i = 0; i < ts.size(); i++)
+    {
+        l.palette.stops[i] = ts[i].s;
+        if(ts[i].tracked)
+        {
+            new_index = i;
+        }
+    }
+    return true;
+}
+
+std::optional<EditorEdit>
+EditorController::AddLayerStop(size_t i, float pos, const ColorF& color)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(pos) || pos < 0.0f || pos > 1.0f)
+    {
+        last_error = "stop position must be in 0..1";
+        return std::nullopt;
+    }
+    if(!std::isfinite(color.r) || !std::isfinite(color.g)
+       || !std::isfinite(color.b) || !std::isfinite(color.a))
+    {
+        last_error = "stop color must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->palette.stops.size() >= EFFECT_MAX_STOPS)
+    {
+        last_error = "stop count exceeds cap "
+                   + std::to_string(EFFECT_MAX_STOPS);
+        return UndoEffectOp(before);
+    }
+    for(const PaletteStop& s : l->palette.stops)
+    {
+        if(s.pos == pos)
+        {
+            last_error = "stop positions must be unique";
+            return UndoEffectOp(before);
+        }
+    }
+    PaletteStop st;
+    st.pos   = pos;
+    st.color = color;
+    l->palette.stops.push_back(st);
+    size_t nidx = 0;
+    SortLayerStops(*l, l->palette.stops.size() - 1, nidx);
+    return FinishEffectEdit(before, "add palette stop");
+}
+
+std::optional<EditorEdit>
+EditorController::RemoveLayerStop(size_t i, size_t stop)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(stop >= l->palette.stops.size())
+    {
+        return UndoEffectOp(before);
+    }
+    l->palette.stops.erase(l->palette.stops.begin()
+                           + (ptrdiff_t)stop);
+    return FinishEffectEdit(before, "remove palette stop");
+}
+
+std::optional<EditorEdit>
+EditorController::MoveLayerStop(size_t i, size_t stop, float pos)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(pos) || pos < 0.0f || pos > 1.0f)
+    {
+        last_error = "stop position must be in 0..1";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(stop >= l->palette.stops.size())
+    {
+        return UndoEffectOp(before);
+    }
+    for(size_t k = 0; k < l->palette.stops.size(); k++)
+    {
+        if(k != stop && l->palette.stops[k].pos == pos)
+        {
+            last_error = "stop positions must be unique";
+            return UndoEffectOp(before);
+        }
+    }
+    if(l->palette.stops[stop].pos == pos)
+    {
+        return UndoEffectOp(before);
+    }
+    l->palette.stops[stop].pos = pos;
+    size_t nidx = 0;
+    SortLayerStops(*l, stop, nidx);
+    return FinishEffectEdit(before, "move palette stop");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerStopColor(size_t i, size_t stop,
+                                    const ColorF& color)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(color.r) || !std::isfinite(color.g)
+       || !std::isfinite(color.b) || !std::isfinite(color.a))
+    {
+        last_error = "stop color must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(stop >= l->palette.stops.size())
+    {
+        return UndoEffectOp(before);
+    }
+    if(SameColorF(l->palette.stops[stop].color, color))
+    {
+        return UndoEffectOp(before);
+    }
+    l->palette.stops[stop].color = color;
+    return FinishEffectEdit(before, "recolor palette stop");
+}
+
+/*---------------------------------------------------------*\
+|| Path-point ops (comet waypoints)                         ||
+\*---------------------------------------------------------*/
+std::optional<EditorEdit>
+EditorController::AddLayerPathPoint(size_t i, const Vec3& p)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(p.x) || !std::isfinite(p.y)
+       || !std::isfinite(p.z))
+    {
+        last_error = "path point must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(l->path.size() >= EFFECT_MAX_PATH)
+    {
+        last_error = "path point count exceeds cap "
+                   + std::to_string(EFFECT_MAX_PATH);
+        return UndoEffectOp(before);
+    }
+    l->path.push_back(p);
+    return FinishEffectEdit(before, "add path point");
+}
+
+std::optional<EditorEdit>
+EditorController::SetLayerPathPoint(size_t i, size_t pt,
+                                    const Vec3& p)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    if(!std::isfinite(p.x) || !std::isfinite(p.y)
+       || !std::isfinite(p.z))
+    {
+        last_error = "path point must be finite";
+        return std::nullopt;
+    }
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(pt >= l->path.size())
+    {
+        return UndoEffectOp(before);
+    }
+    if(SameVec(l->path[pt], p))
+    {
+        return UndoEffectOp(before);
+    }
+    l->path[pt] = p;
+    return FinishEffectEdit(before, "move path point");
+}
+
+std::optional<EditorEdit>
+EditorController::RemoveLayerPathPoint(size_t i, size_t pt)
+{
+    if(gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    EffectLayer* l = LayerAt(i);
+    if(l == nullptr)
+    {
+        return UndoEffectOp(before);
+    }
+    if(pt >= l->path.size())
+    {
+        return UndoEffectOp(before);
+    }
+    l->path.erase(l->path.begin() + (ptrdiff_t)pt);
+    return FinishEffectEdit(before, "remove path point");
 }
 
 /*---------------------------------------------------------*\

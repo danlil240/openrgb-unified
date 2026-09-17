@@ -669,22 +669,6 @@ bool SeedField(const J& v, unsigned int& out, RemixRng* rng,
     return true;
 }
 
-bool IsPrimitive(const std::string& s)
-{
-    static const char* const prims[] = {
-        "static", "gradient", "wave", "pulse", "comet", "noise",
-        "spin", "ripple", "screenfield", "level",
-    };
-    for(const char* p : prims)
-    {
-        if(s == p)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 /*---------------------------------------------------------*\
 |||| The shared layer parser. Iterates the layer object   ||
 |||| in document order so remix draws land in file order. ||
@@ -878,6 +862,22 @@ bool ParseLayer(const J& j, EffectLayer& l, const std::string& path,
 }
 
 } /* anonymous namespace */
+
+bool IsPrimitive(const std::string& s)
+{
+    static const char* const prims[] = {
+        "static", "gradient", "wave", "pulse", "comet", "noise",
+        "spin", "ripple", "screenfield", "level",
+    };
+    for(const char* p : prims)
+    {
+        if(s == p)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 /*---------------------------------------------------------*\
 |||| Resolved-layer serialization (canonical — the        ||

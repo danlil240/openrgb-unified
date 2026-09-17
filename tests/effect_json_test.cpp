@@ -940,6 +940,122 @@ static void TestSceneDocLayers()
     CHECK(!f1.empty() && f2.empty(), "enabled=false composites nothing");
 }
 
+/*---------------------------------------------------------*\
+|||| Task 5.2 — the personal-look file: a resolved inline  |
+|||| stack serialized as an .effect.json lands in a fresh  |
+|||| registry dir, re-parses, and builds the same stack.   |
+|||| WriteEffectFile itself is Qt-side; this pins the      |
+|||| grammar contract it relies on.                        |
+\*---------------------------------------------------------*/
+static void TestPersonalLookFile()
+{
+    std::error_code ec;
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "dls_fx_personal";
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    /* Build the look the way saveLookAs does: resolved literals
+       only, canonical field order. */
+    std::vector<EffectLayer> stack;
+    {
+        EffectLayer l;
+        l.primitive = "static";
+        l.palette   = MakePalette({ MakeSceneColor(8, 12, 32) });
+        stack.push_back(l);
+        EffectLayer w;
+        w.primitive = "wave";
+        w.blend     = BlendMode::Screen;
+        w.opacity   = 0.8f;
+        w.speed     = 0.22f;
+        w.density   = 1.4f;
+        w.direction = { 0.3f, 0.0f, -0.9f };
+        w.targets   = { "desk" };
+        w.seed      = 12345;
+        w.enabled   = true;
+        w.palette   = MakePalette({ MakeSceneColor(0, 200, 180),
+                                    MakeSceneColor(112, 64, 224) });
+        stack.push_back(w);
+        EffectLayer r;
+        r.primitive = "ripple";
+        r.source    = "key";
+        r.origin    = { 0.1f, 0.05f, -0.2f };
+        r.path      = { { 0.0f, 0.0f, 0.0f }, { 0.4f, 0.0f, 0.4f } };
+        stack.push_back(r);
+    }
+    EffectDocument d;
+    d.id    = "mylook";
+    d.name  = "My Look";
+    d.needs = "key";
+    d.layers = nlohmann::ordered_json::array();
+    for(const EffectLayer& l : stack)
+    {
+        d.layers.push_back(
+            nlohmann::ordered_json::parse(EffectLayerToJson(l).dump()));
+    }
+
+    /* Serialize -> parse -> build: the file the save path writes
+       must validate and resolve the same layers. */
+    const std::string path = (dir / "mylook.effect.json").string();
+    {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f << EffectDocumentToJson(d).dump(2) << "\n";
+    }
+    EffectDocument landed;
+    std::vector<std::string> errs;
+    CHECK(EffectDocumentFromJsonFile(path, landed, &errs),
+          "personal look file re-parses");
+    CHECK(landed.id == "mylook" && landed.needs == "key"
+          && landed.layers.size() == 3,
+          "personal look fields survive the file");
+
+    EffectRegistry reg;
+    CHECK(reg.LoadDirectory(dir.string(), &errs),
+          "registry picks up the personal look");
+    const EffectRegistry::EffectInfo* info = nullptr;
+    for(const EffectRegistry::EffectInfo& i : reg.List())
+    {
+        if(i.id == "mylook")
+        {
+            info = &i;
+        }
+    }
+    CHECK(info != nullptr && info->from_file && info->name == "My Look"
+          && info->needs == "key",
+          "personal look lists as a file look");
+    std::vector<EffectLayer> built;
+    CHECK(reg.Build("mylook", 9, built, &errs) && built.size() == 3,
+          "personal look builds");
+    if(built.size() == 3)
+    {
+        CHECK(built[0].primitive == "static"
+              && built[1].primitive == "wave"
+              && built[1].blend == BlendMode::Screen
+              && Near(built[1].opacity, 0.8f)
+              && built[1].seed == 12345
+              && built[1].targets.size() == 1
+              && built[2].primitive == "ripple"
+              && built[2].source == "key"
+              && built[2].path.size() == 2,
+              "saved stack resolves identically");
+    }
+
+    /* Grammar facts the save path relies on: an EMPTY layers array
+       is a valid look (it contributes nothing), while a present-
+       but-empty palette is not. */
+    {
+        nlohmann::ordered_json j;
+        j["schema_version"] = 1;
+        j["id"]    = "emptylook";
+        j["layers"] = nlohmann::ordered_json::array();
+        EffectDocument e;
+        CHECK(EffectDocumentFromJson(j, e, &errs),
+              "empty layers array is a valid look");
+    }
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 int main()
 {
     std::printf("== effect_json_test ==\n");
@@ -950,6 +1066,7 @@ int main()
     TestRegistry();
     TestWorkspaceLayers();
     TestSceneDocLayers();
+    TestPersonalLookFile();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

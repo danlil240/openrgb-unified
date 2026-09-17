@@ -21,11 +21,14 @@
 #include "../scene/DefaultDesk.h"
 #include "../scene/EmitterLayout.h"
 #include "../scene/SceneGraph.h"
+#include "../scene/SceneJson.h"
 #include "../scene/SceneResolver.h"
 #include "../config/ConfigStore.h"
 #include "../presets/PresetBundle.h"
+#include "../editor/EffectLayerModel.h"
 #include "../editor/PresetListModel.h"
 #include "../editor/SceneObjectModel.h"
+#include "../effects/EffectJson.h"
 #include "../effects/Presets.h"
 #include "../inputs/KeyMap.h"
 #include "../inputs/ScreenSampler.h"
@@ -221,6 +224,19 @@ SceneBridge::SceneBridge(OpenRGBPluginAPIInterface* plugin_api, QObject* parent)
     preset_model = new PresetListModel(this);
     preset_model->Bind(&registry, &meta);
     preset_model->Reload();
+
+    /* Effect-layer editing: the effective-stack model fills on the
+       first rebuildEffect; the resolver lets the Qt-free controller
+       materialize a named look's resolved stack on first edit
+       without linking the registry itself. */
+    layer_model = new EffectLayerModel(this);
+    editor.SetLayerResolver(
+        [](const std::string& preset_id, unsigned int seed,
+           std::vector<EffectLayer>& out, void*) -> bool {
+            out = BuildPreset(preset_id, seed);
+            return !out.empty();
+        }, nullptr);
+    RefreshEffectModel();   /* initial effective stack */
 
     refreshDevices();
 }
@@ -603,8 +619,9 @@ void SceneBridge::undo()
        gesture survives and keeps previewing; the status hint tells
        the user why nothing happened. The QML shortcut/button gates
        catch this first — this guard is the contract for every
-       caller. */
-    if(editor.GestureActive())
+       caller. The layer gesture previews against a snapshot the
+       same way, so it refuses too. */
+    if(editor.GestureActive() || editor.LayerGestureActive())
     {
         emit statusMessage(
             QStringLiteral("undo refused — finish the drag first"));
@@ -618,7 +635,7 @@ void SceneBridge::undo()
 void SceneBridge::redo()
 {
     /* Same mid-gesture refusal as undo(). */
-    if(editor.GestureActive())
+    if(editor.GestureActive() || editor.LayerGestureActive())
     {
         emit statusMessage(
             QStringLiteral("redo refused — finish the drag first"));
@@ -733,6 +750,7 @@ void SceneBridge::ApplyWorkspace(const StudioDocument& w)
        before the swap, then drop the selection: ids in it belong to
        the old doc. */
     editor.Cancel();
+    editor.CancelLayerGesture();
     workspace = w;
     doc       = w.scene;
     doc.name  = w.meta.name;
@@ -925,8 +943,25 @@ void SceneBridge::ReloadPresets()
         }
     }
     /* Re-resolved stacks may differ — refresh a preset-driven
-       effect (an untouched inline stack keeps user edits). */
-    rebuildEffect();
+       effect (an untouched inline stack keeps user edits). When the
+       named look vanished from the library entirely (its file was
+       deleted), keep the last-good engine stack instead of blanking
+       the desk mid-session — the file-error status already reports
+       the loss. */
+    const bool lost_look = doc.effect.layers.empty()
+        && !doc.effect.preset.empty()
+        && !EffectLooks().Contains(doc.effect.preset);
+    if(lost_look)
+    {
+        emit statusMessage(QStringLiteral(
+            "effect look '%1' no longer resolves — keeping last-good"
+            " output").arg(QString::fromStdString(doc.effect.preset)));
+        RefreshEffectModel();   /* model shows the now-empty resolve */
+    }
+    else
+    {
+        rebuildEffect();
+    }
     /* The library panel's rows come from List() — re-snapshot so a
        reload (Reload button, landed variant file) shows it. */
     if(preset_model != nullptr)
@@ -1072,6 +1107,15 @@ void SceneBridge::AdoptResolved(const SceneDocument& r, const EditorEdit& e)
     }
     rebuildMatrixLayouts();
     rebuildKeyLookup();      /* moved keyboards ripple from the new pos */
+    if(e.has_effect)
+    {
+        /* The resolved scene carries the edited effect state
+           (ResolveScene copies workspace.effect wholesale) — the
+           engine rebuild makes preview + pushed output follow, and
+           the layer editor's model refreshes inside. */
+        rebuildEffect();
+        emit presetChanged();
+    }
     if(obj_model != nullptr)
     {
         if(e.TransformsOnly())
@@ -2868,6 +2912,7 @@ void SceneBridge::resetScene()
     /* Same doc-swap isolation as ApplyWorkspace: cancel the gesture
        while the old workspace is live, then drop the selection. */
     editor.Cancel();
+    editor.CancelLayerGesture();
     editor.ClearSelection();
     if(!selected.isEmpty())
     {
@@ -2881,7 +2926,7 @@ void SceneBridge::resetScene()
         ? resolved : BuildDefaultDesk();
     doc.name = workspace.meta.name;
     frame.clear();
-    engine.SetLayers({});
+    rebuildEffect();             /* model + engine follow the reset */
     emit presetChanged();
     emit effectParamsChanged();
     undo_stack->clear();
@@ -2915,6 +2960,11 @@ QVariantList SceneBridge::presetList() const
         m["id"]          = QString::fromStdString(p.id);
         m["name"]        = QString::fromStdString(p.name);
         m["description"] = QString::fromStdString(p.description);
+        /* Input-requirement badge + provenance for the strip:
+           "audio" | "key" | "screen" | "" and whether a file look
+           supplies this row. */
+        m["needs"]       = QString::fromStdString(p.needs);
+        m["fromFile"]    = p.from_file;
         out.push_back(m);
     }
     return out;
@@ -2983,6 +3033,11 @@ void SceneBridge::rebuildEffect()
        one where the static-scene push path runs) — the next tick
        must emit + push regardless of the identical-frame skip. */
     frame_sent = false;
+    /* Single choke point for the layer editor: every path that
+       rebuilds (commit, undo/redo, preset pick, reload, param
+       sliders, workspace load) re-snapshots the effective stack. */
+    RefreshEffectModel();
+    emit effectLayersChanged();
 }
 
 void SceneBridge::playPreset(const QString& presetId)
@@ -3065,7 +3120,7 @@ void SceneBridge::stopEffect()
     doc.effect.layers.clear();   /* "no effect" clears the stack too */
     markDirty();
     frame.clear();
-    engine.SetLayers({});
+    rebuildEffect();             /* empty stack + model refresh */
     emit presetChanged();
     /* Return preview + hardware to the painted scene. */
     for(const SceneObject& o : doc.objects)
@@ -3111,18 +3166,618 @@ void SceneBridge::setEffectIntensityPct(int pct)
 void SceneBridge::applyEffectLayers(
     const std::vector<EffectLayer>& layers)
 {
-    /* Whole-stack replacement — the 5.2 layer editor's commit seam.
+    /* Whole-stack replacement — one undoable authored edit.
        Callers hand over VALIDATED resolved literals (EffectJson's
        grammar); the stack wins over `preset` at rebuild while the
-       preset id stays as provenance. */
-    doc.effect.layers = layers;
-    markDirty();
-    rebuildEffect();
-    if(!layers.empty())
+       preset id stays as provenance. AdoptResolved rebuilds the
+       engine + layer model and ApplyEffectOp starts playback when
+       the new stack produces output. */
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayers(
+        layers, workspace.effect.preset));
+}
+
+/*---------------------------------------------------------*\
+|| Task 5.2 — effect-layer editing                          ||
+||                                                           ||
+||   Reads answer the EFFECTIVE stack (authored inline      ||
+||   layers when present, else the resolved named look).    ||
+||   Every write runs SyncWorkspace -> controller op ->     ||
+||   ApplyEffectOp, which either pushes the returned        ||
+||   record through commitEdit (discrete edit / gesture     ||
+||   commit) or mirrors a live gesture preview into doc —   ||
+||   so drags re-render the preview every move but land     ||
+||   exactly one undo command.                              ||
+\*---------------------------------------------------------*/
+QObject* SceneBridge::effectLayerModel() const
+{
+    return layer_model;
+}
+
+std::vector<EffectLayer> SceneBridge::EffectiveLayers() const
+{
+    if(!doc.effect.layers.empty())
     {
-        setPlaying(true);
+        return doc.effect.layers;
     }
-    emit presetChanged();
+    if(!doc.effect.preset.empty())
+    {
+        return BuildPreset(doc.effect.preset, doc.effect.seed);
+    }
+    return {};
+}
+
+void SceneBridge::RefreshEffectModel()
+{
+    if(layer_model != nullptr)
+    {
+        layer_model->SetStack(EffectiveLayers());
+    }
+}
+
+void SceneBridge::PreviewEffectSync()
+{
+    /* Mirror the workspace's previewed effect state into doc —
+       SyncWorkspace must NOT run here: doc.effect is stale during a
+       layer gesture, and copying it back would clobber the preview
+       stack the controller just wrote. */
+    doc.effect.preset = workspace.effect.preset;
+    doc.effect.seed   = workspace.effect.seed;
+    doc.effect.layers = workspace.effect.layers;
+    rebuildEffect();
+}
+
+void SceneBridge::ApplyEffectOp(std::optional<EditorEdit>&& e)
+{
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        /* An authored stack that produces output previews
+           immediately — same contract as applyEffectLayers. */
+        if(!engine.Empty() && !playing_state)
+        {
+            setPlaying(true);
+        }
+        return;
+    }
+    if(editor.LayerGestureActive())
+    {
+        /* Inside a gesture a nullopt means the write landed as
+           preview state — mirror it so the viewport follows the
+           pointer. */
+        PreviewEffectSync();
+        return;
+    }
+    if(!editor.LastError().empty())
+    {
+        emit statusMessage(
+            QString::fromStdString(editor.LastError()));
+    }
+}
+
+int SceneBridge::effectLayerCount() const
+{
+    return (int)EffectiveLayers().size();
+}
+
+QVariantMap SceneBridge::effectLayer(int index) const
+{
+    const std::vector<EffectLayer> layers = EffectiveLayers();
+    QVariantMap m;
+    if(index < 0 || index >= (int)layers.size())
+    {
+        return m;
+    }
+    const EffectLayer& l = layers[index];
+    m["index"]     = index;
+    m["primitive"] = QString::fromStdString(l.primitive);
+    m["enabled"]   = l.enabled;
+    m["blend"]     = l.blend == BlendMode::Add    ? "add"
+                   : l.blend == BlendMode::Screen ? "screen"
+                                                  : "replace";
+    m["opacity"]   = l.opacity;
+    m["space"]     = l.space == CoordSpace::Local ? "local" : "world";
+    m["speed"]     = l.speed;
+    m["scale"]     = l.scale;
+    m["phase"]     = l.phase;
+    m["density"]   = l.density;
+    const auto vec = [](const Vec3& v) {
+        QVariantMap o;
+        o["x"] = v.x;  o["y"] = v.y;  o["z"] = v.z;
+        return o;
+    };
+    m["origin"]    = vec(l.origin);
+    m["direction"] = vec(l.direction);
+    QVariantList path;
+    for(const Vec3& p : l.path)
+    {
+        path.push_back(vec(p));
+    }
+    m["path"] = path;
+    QVariantList stops;
+    for(const PaletteStop& s : l.palette.stops)
+    {
+        QVariantMap st;
+        st["pos"]   = s.pos;
+        st["color"] = QString::fromStdString(
+            SceneColorHex(ToSceneColor(s.color)));
+        stops.push_back(st);
+    }
+    m["palette"] = stops;
+    QStringList targets;
+    for(const std::string& t : l.targets)
+    {
+        targets << QString::fromStdString(t);
+    }
+    m["targets"] = targets;
+    m["source"]  = QString::fromStdString(l.source);
+    m["seed"]    = (double)l.seed;
+    return m;
+}
+
+QVariantList SceneBridge::effectTargetIds() const
+{
+    /* Valid layer-target terms: object ids + geometry tags + emitter
+       groups — the dead-target guard in rebuildEffect matches
+       against the same terms. */
+    QVariantList out;
+    std::set<std::string> seen;
+    const auto add = [&out, &seen](const std::string& s) {
+        if(!s.empty() && seen.insert(s).second)
+        {
+            out.push_back(QString::fromStdString(s));
+        }
+    };
+    for(const SceneObject& o : doc.objects)
+    {
+        add(o.id);
+        add(o.geometry);
+        for(const Emitter& em : o.emitters)
+        {
+            add(em.group);
+        }
+    }
+    return out;
+}
+
+QVariantMap SceneBridge::inputSourceState(const QString& source) const
+{
+    QVariantMap m;
+    const QString s = source.toLower();
+    m["name"] = s;
+    if(s == "audio")
+    {
+        m["enabled"] = audio_on;
+        m["ready"]   = audio_in.Running();
+        m["status"]  = QString::fromStdString(audio_in.Status());
+    }
+    else if(s == "key")
+    {
+        m["enabled"] = key_on;
+        m["ready"]   = key_in.Running();
+        m["status"]  = QString::fromStdString(key_in.Status());
+    }
+    else if(s == "screen")
+    {
+        m["enabled"] = screen_on;
+        m["ready"]   = screen_in->Running();
+        m["status"]  = screen_in->Status();
+    }
+    else
+    {
+        /* Unknown/none — the badge hides itself. */
+        m["enabled"] = false;
+        m["ready"]   = false;
+        m["status"]  = QString();
+    }
+    return m;
+}
+
+/*---------------------------------------------------------*\
+|| Effect gestures — one undo command per completed drag    ||
+\*---------------------------------------------------------*/
+void SceneBridge::beginEffectGesture()
+{
+    SyncWorkspace();
+    editor.BeginLayerGesture();
+}
+
+void SceneBridge::commitEffectGesture(const QString& label)
+{
+    std::optional<EditorEdit> e = editor.CommitLayerGesture(
+        label.toStdString());
+    if(e.has_value())
+    {
+        commitEdit(std::move(*e));
+        if(!engine.Empty() && !playing_state)
+        {
+            setPlaying(true);
+        }
+    }
+}
+
+void SceneBridge::cancelEffectGesture()
+{
+    if(!editor.LayerGestureActive())
+    {
+        return;
+    }
+    editor.CancelLayerGesture();
+    /* Mirror the restored snapshot back into doc so preview and
+       engine drop the abandoned preview state. */
+    PreviewEffectSync();
+}
+
+/*---------------------------------------------------------*\
+|| Stack + per-layer ops                                    ||
+\*---------------------------------------------------------*/
+void SceneBridge::moveEffectLayer(int from, int to)
+{
+    if(from < 0 || to < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.MoveLayer((size_t)from, (size_t)to));
+}
+
+void SceneBridge::addEffectLayer(const QString& primitive)
+{
+    SyncWorkspace();
+    ApplyEffectOp(editor.AddLayer(primitive.toStdString()));
+    /* Select-by-index is QML-side state; the new row is last. */
+}
+
+void SceneBridge::removeEffectLayer(int index)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.RemoveLayer((size_t)index));
+}
+
+void SceneBridge::setEffectLayerEnabled(int index, bool on)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerEnabled((size_t)index, on));
+}
+
+void SceneBridge::setEffectLayerBlend(int index, const QString& blend)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    const QString b = blend.toLower();
+    BlendMode mode;
+    if(b == "add")
+    {
+        mode = BlendMode::Add;
+    }
+    else if(b == "screen")
+    {
+        mode = BlendMode::Screen;
+    }
+    else if(b == "replace")
+    {
+        mode = BlendMode::Replace;
+    }
+    else
+    {
+        emit statusMessage(QStringLiteral(
+            "blend must be replace|add|screen"));
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerBlend((size_t)index, mode));
+}
+
+void SceneBridge::setEffectLayerOpacity(int index, double v)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerOpacity((size_t)index, (float)v));
+}
+
+void SceneBridge::setEffectLayerField(int index, const QString& field,
+                                      double v)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    const QString f = field.toLower();
+    EditorController::LayerField lf;
+    if(f == "speed")        { lf = EditorController::LayerField::Speed;   }
+    else if(f == "scale")   { lf = EditorController::LayerField::Scale;   }
+    else if(f == "phase")   { lf = EditorController::LayerField::Phase;   }
+    else if(f == "density") { lf = EditorController::LayerField::Density; }
+    else if(f == "seed")    { lf = EditorController::LayerField::Seed;    }
+    else
+    {
+        emit statusMessage(QStringLiteral(
+            "unknown layer field '%1'").arg(field));
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerField((size_t)index, lf, v));
+}
+
+void SceneBridge::setEffectLayerSpace(int index, bool local)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerSpace(
+        (size_t)index, local ? CoordSpace::Local : CoordSpace::World));
+}
+
+void SceneBridge::setEffectLayerOrigin(int index,
+                                       double x, double y, double z)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerOrigin(
+        (size_t)index, { (float)x, (float)y, (float)z }));
+}
+
+void SceneBridge::setEffectLayerDirection(int index,
+                                          double x, double y, double z)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerDirection(
+        (size_t)index, { (float)x, (float)y, (float)z }));
+}
+
+void SceneBridge::setEffectLayerSource(int index, const QString& source)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerSource((size_t)index,
+                                        source.toStdString()));
+}
+
+void SceneBridge::setEffectLayerTargets(int index,
+                                        const QStringList& targets)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    std::vector<std::string> ts;
+    ts.reserve(targets.size());
+    for(const QString& t : targets)
+    {
+        const QString s = t.trimmed();
+        if(!s.isEmpty())
+        {
+            ts.push_back(s.toStdString());
+        }
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerTargets((size_t)index, ts));
+}
+
+/*---------------------------------------------------------*\
+|| Palette stops + path points                              ||
+\*---------------------------------------------------------*/
+void SceneBridge::addEffectLayerStop(int index, double pos,
+                                     const QString& color)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SceneColor c = 0;
+    if(!ParseSceneColor(nlohmann::json(color.toStdString()), c))
+    {
+        emit statusMessage(QStringLiteral(
+            "stop color must be \"#RRGGBB\""));
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.AddLayerStop((size_t)index, (float)pos,
+                                      ToColorF(c)));
+}
+
+void SceneBridge::removeEffectLayerStop(int index, int stop)
+{
+    if(index < 0 || stop < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.RemoveLayerStop((size_t)index,
+                                         (size_t)stop));
+}
+
+void SceneBridge::moveEffectLayerStop(int index, int stop, double pos)
+{
+    if(index < 0 || stop < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.MoveLayerStop((size_t)index, (size_t)stop,
+                                       (float)pos));
+}
+
+void SceneBridge::setEffectLayerStopColor(int index, int stop,
+                                          const QString& color)
+{
+    if(index < 0 || stop < 0)
+    {
+        return;
+    }
+    SceneColor c = 0;
+    if(!ParseSceneColor(nlohmann::json(color.toStdString()), c))
+    {
+        emit statusMessage(QStringLiteral(
+            "stop color must be \"#RRGGBB\""));
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerStopColor((size_t)index,
+                                           (size_t)stop,
+                                           ToColorF(c)));
+}
+
+void SceneBridge::addEffectLayerPathPoint(int index,
+                                          double x, double y, double z)
+{
+    if(index < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.AddLayerPathPoint(
+        (size_t)index, { (float)x, (float)y, (float)z }));
+}
+
+void SceneBridge::setEffectLayerPathPoint(int index, int pt,
+                                          double x, double y, double z)
+{
+    if(index < 0 || pt < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayerPathPoint(
+        (size_t)index, (size_t)pt, { (float)x, (float)y, (float)z }));
+}
+
+void SceneBridge::removeEffectLayerPathPoint(int index, int pt)
+{
+    if(index < 0 || pt < 0)
+    {
+        return;
+    }
+    SyncWorkspace();
+    ApplyEffectOp(editor.RemoveLayerPathPoint((size_t)index,
+                                              (size_t)pt));
+}
+
+void SceneBridge::resetEffectLayers()
+{
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayers({}, workspace.effect.preset));
+}
+
+/*---------------------------------------------------------*\
+|| Save-as personal look                                    ||
+\*---------------------------------------------------------*/
+QVariantMap SceneBridge::saveLookAs(const QString& id,
+                                    const QString& name)
+{
+    QVariantMap out;
+    out["ok"] = false;
+    const std::string lid = id.trimmed().toStdString();
+    if(!IsPresetId(lid))
+    {
+        out["errors"] = QStringList{ QStringLiteral(
+            "bad look id '%1' — expected [A-Za-z0-9_-]").arg(id) };
+        return out;
+    }
+    if(store == nullptr)
+    {
+        out["errors"] = QStringList{ QStringLiteral(
+            "no workspace store") };
+        return out;
+    }
+
+    /* The saved look's layers are the EFFECTIVE stack — resolved
+       literals, no remix specs (a saved look is what the user sees,
+       not a template). */
+    const std::vector<EffectLayer> stack = EffectiveLayers();
+    EffectDocument d;
+    d.id   = lid;
+    d.name = name.trimmed().isEmpty()
+        ? lid : name.trimmed().toStdString();
+    /* Derive `needs` from the layers: the first non-empty source
+       wins; a screenfield primitive implies screen sampling even
+       with no source set. */
+    std::string needs;
+    for(const EffectLayer& l : stack)
+    {
+        const std::string want =
+            !l.source.empty() ? l.source
+            : l.primitive == "screenfield" ? "screen" : "";
+        if(!want.empty())
+        {
+            needs = want;
+            break;
+        }
+    }
+    d.needs = needs;
+    /* Canonical field order keeps the file hand-readable — the
+       plain-json serializer would sort keys alphabetically. */
+    static const char* const order[] = {
+        "primitive", "space", "blend", "opacity", "speed", "scale",
+        "phase", "density", "origin", "direction", "path",
+        "palette", "targets", "source", "seed", "enabled",
+    };
+    d.layers = nlohmann::ordered_json::array();
+    for(const EffectLayer& l : stack)
+    {
+        const nlohmann::json jl = EffectLayerToJson(l);
+        nlohmann::ordered_json ol;
+        for(const char* k : order)
+        {
+            if(jl.contains(k))
+            {
+                ol[k] = jl[k];
+            }
+        }
+        d.layers.push_back(ol);
+    }
+
+    QString werr;
+    if(!store->WriteEffectFile(d, &werr))
+    {
+        out["errors"] = QStringList{ werr };
+        return out;
+    }
+
+    /* Pick up the landed file (and any other edits to
+       presets/effects/) before pointing the workspace at it. */
+    ReloadPresets();
+    if(!EffectLooks().Contains(lid))
+    {
+        out["errors"] = QStringList{ QStringLiteral(
+            "saved look '%1' did not register").arg(id) };
+        return out;
+    }
+
+    /* Adopt as one undoable edit: preset <- saved id, inline stack
+       cleared (the file is now the definition). */
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayers({}, lid));
+    out["ok"]   = true;
+    out["id"]   = QString::fromStdString(lid);
+    out["path"] = store->EffectPresetDir() + "/"
+                + QString::fromStdString(lid) + ".effect.json";
+    return out;
 }
 
 void SceneBridge::tick()

@@ -26,6 +26,7 @@ HEADERS += $$STUDIO/plugin/SceneBridge.h \
     $$STUDIO/config/ConfigStore.h \
     $$STUDIO/editor/SceneObjectModel.h \
     $$STUDIO/editor/PresetListModel.h \
+    $$STUDIO/editor/EffectLayerModel.h \
     $$STUDIO/presets/PresetBundle.h \
     $$STUDIO/inputs/ScreenSampler.h
 
@@ -38,10 +39,12 @@ SOURCES += main.cpp \
     $$STUDIO/editor/TransformCommands.cpp \
     $$STUDIO/editor/SceneObjectModel.cpp \
     $$STUDIO/editor/PresetListModel.cpp \
+    $$STUDIO/editor/EffectLayerModel.cpp \
     $$STUDIO/output/ControllerAdapter.cpp \
     $$STUDIO/presets/DevicePreset.cpp \
     $$STUDIO/presets/PresetBundle.cpp \
     $$STUDIO/presets/PresetRegistry.cpp \
+    $$STUDIO/presets/EffectRegistry.cpp \
     $$STUDIO/scene/SceneTypes.cpp \
     $$STUDIO/scene/SceneGraph.cpp \
     $$STUDIO/scene/EmitterLayout.cpp \
@@ -51,6 +54,7 @@ SOURCES += main.cpp \
     $$STUDIO/scene/DefaultDesk.cpp \
     $$STUDIO/effects/EffectTypes.cpp \
     $$STUDIO/effects/EffectEngine.cpp \
+    $$STUDIO/effects/EffectJson.cpp \
     $$STUDIO/effects/Presets.cpp \
     $$STUDIO/inputs/InputBus.cpp \
     $$STUDIO/inputs/OnsetDetect.cpp \

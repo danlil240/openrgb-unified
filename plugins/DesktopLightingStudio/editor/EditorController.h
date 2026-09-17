@@ -241,6 +241,99 @@ public:
                                             const std::string& zone_id,
                                             int addr_base, bool verified);
 
+    /*------------------------------------------------*\
+    || Effect-layer ops (task 5.2). Every op edits    ||
+    || ws.effect.layers — the AUTHORED inline stack — ||
+    || and returns the record (nullopt = rejected or  ||
+    || no-op or gesture-preview). When the inline     ||
+    || stack is empty, the FIRST mutating op          ||
+    || materializes it by resolving `preset` through  ||
+    || the installed resolver (SetLayerResolver) with ||
+    || the persisted seed — the resolved stack lands  ||
+    || INSIDE the same undo record, so one undo       ||
+    || returns the workspace to registry resolution.  ||
+    || `preset` is never rewritten by layer edits —   ||
+    || it stays as provenance.                        ||
+    ||                                                ||
+    || Continuous gestures (slider scrub, stop drag,  ||
+    || viewport origin/path drag) run through         ||
+    || BeginLayerGesture / preview ops /              ||
+    || CommitLayerGesture — previews mutate ws but    ||
+    || return no record; Commit folds the whole       ||
+    || gesture into ONE record; CancelLayerGesture    ||
+    || restores the begin snapshot. The transform     ||
+    || gesture above and the layer gesture are        ||
+    || mutually exclusive — beginning one cancels     ||
+    || the other.                                     ||
+    \*------------------------------------------------*/
+    typedef bool (*LayerResolver)(const std::string& preset_id,
+                                  unsigned int seed,
+                                  std::vector<EffectLayer>& out,
+                                  void* ctx);
+    void SetLayerResolver(LayerResolver resolver, void* ctx);
+
+    /* Scalar fields a numeric edit can target. */
+    enum class LayerField
+    {
+        Speed,
+        Scale,
+        Phase,
+        Density,
+        Seed,
+    };
+
+    bool BeginLayerGesture();
+    bool LayerGestureActive() const { return layer_gesture.active; }
+    std::optional<EditorEdit> CommitLayerGesture(
+        const std::string& label = "edit layers");
+    void CancelLayerGesture();
+
+    /* Stack-level ops. `primitive` must be one of the JSON grammar
+       names ("static" | "gradient" | "wave" | "pulse" | "comet" |
+       "noise" | "spin" | "ripple" | "screenfield" | "level"). */
+    std::optional<EditorEdit> MoveLayer(size_t from, size_t to);
+    std::optional<EditorEdit> AddLayer(const std::string& primitive);
+    std::optional<EditorEdit> RemoveLayer(size_t i);
+    /* Whole-stack replacement — reset-to-preset (pass an empty
+       stack + the preset id to restore registry semantics) and
+       saved-look adoption both go through here. `new_preset`
+       rewrites provenance; pass ws.effect.preset to keep it. */
+    std::optional<EditorEdit> SetLayers(
+        const std::vector<EffectLayer>& stack,
+        const std::string& new_preset);
+
+    /* Per-layer ops — `i` indexes ws.effect.layers. */
+    std::optional<EditorEdit> SetLayerEnabled(size_t i, bool on);
+    std::optional<EditorEdit> SetLayerBlend(size_t i, BlendMode mode);
+    std::optional<EditorEdit> SetLayerOpacity(size_t i, float v);
+    std::optional<EditorEdit> SetLayerField(size_t i, LayerField f,
+                                            double v);
+    std::optional<EditorEdit> SetLayerSpace(size_t i, CoordSpace space);
+    std::optional<EditorEdit> SetLayerOrigin(size_t i, const Vec3& v);
+    std::optional<EditorEdit> SetLayerDirection(size_t i, const Vec3& v);
+    std::optional<EditorEdit> SetLayerSource(size_t i,
+                                           const std::string& src);
+    std::optional<EditorEdit> SetLayerTargets(
+        size_t i, const std::vector<std::string>& targets);
+
+    /* Palette-stop ops — positions stay strictly increasing in
+       0..1; equal/adjacent-colliding positions are refused. */
+    std::optional<EditorEdit> AddLayerStop(size_t i, float pos,
+                                           const ColorF& color);
+    std::optional<EditorEdit> RemoveLayerStop(size_t i, size_t stop);
+    std::optional<EditorEdit> MoveLayerStop(size_t i, size_t stop,
+                                            float pos);
+    std::optional<EditorEdit> SetLayerStopColor(size_t i, size_t stop,
+                                              const ColorF& color);
+
+    /* Path-point ops (comet). */
+    std::optional<EditorEdit> AddLayerPathPoint(size_t i,
+                                                const Vec3& p);
+    std::optional<EditorEdit> SetLayerPathPoint(size_t i, size_t pt,
+                                                const Vec3& p);
+    std::optional<EditorEdit> RemoveLayerPathPoint(size_t i,
+                                                   size_t pt);
+
     /* Snapping — defaults come from ControlsPrefs (10 mm / 15 deg). */
     static Vec3  SnapTranslate(const Vec3& v, float step_m = 0.01f);
     static float SnapAngle(float deg, float step_deg = 15.0f);
@@ -276,9 +369,38 @@ private:
        instance subtree. */
     static bool PathBelongsTo(const std::string& key, const std::string& id);
 
+    /* Effect-layer plumbing — SnapEffect copies the authored
+       preset/seed/layers triple; EnsureLayers materializes the
+       resolved preset stack into ws.effect.layers on first edit
+       (resolver-injected so the Qt-free core never links the
+       registry); FinishEffectEdit assembles the before/after
+       record — inside a layer gesture it returns nullopt and
+       leaves the preview state in ws. */
+    struct LayerGesture
+    {
+        bool        active = false;
+        EffectDelta begin;      /* snapshot at gesture start        */
+        EffectDelta base;       /* post-materialize baseline        */
+    };
+
+    EffectDelta SnapEffect() const;
+    bool        EnsureLayers();
+    void        RestoreEffect(const EffectDelta& d);
+    std::optional<EditorEdit> UndoEffectOp(const EffectDelta& before);
+    std::optional<EditorEdit> FinishEffectEdit(
+        const EffectDelta& before, const std::string& label);
+    bool        EffectDeltaEqual(const EffectDelta& a,
+                                 const EffectDelta& b) const;
+    EffectLayer* LayerAt(size_t i);
+    bool        SortLayerStops(EffectLayer& l, size_t track_stop,
+                               size_t& new_index) const;
+
     StudioDocument&         ws;
     std::vector<std::string> selection;
     Gesture                  gesture;
+    LayerGesture             layer_gesture;
+    LayerResolver            layer_resolver = nullptr;
+    void*                    layer_resolver_ctx = nullptr;
     std::string              last_error;
 };
 

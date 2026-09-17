@@ -151,7 +151,8 @@ const std::vector<PresetInfo>& PresetList()
                                          kKnownOrder + kKnownCount);
     for(const EffectRegistry::EffectInfo& i : EffectLooks().List(order))
     {
-        cache.push_back({ i.id, i.name, i.description, i.needs });
+        cache.push_back({ i.id, i.name, i.description, i.needs,
+                          i.from_file });
     }
     return cache;
 }

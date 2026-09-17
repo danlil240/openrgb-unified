@@ -79,6 +79,7 @@ Rectangle {
     readonly property var libPanel:   devLib
     readonly property var shelfPanel: shelf
     readonly property var inspPanel:  insp
+    readonly property var fxEditor:   effectEd
     readonly property var sceneView:  scene
 
     function logLine(s) {
@@ -560,6 +561,7 @@ Rectangle {
             overlayInspector: false
             focusPeer: insp
             focusPeer2: presetEd
+            focusPeer3: effectEd
         }
 
         /* Right splitter — docked inspector width (drag +x
@@ -614,6 +616,7 @@ Rectangle {
         height: implicitHeight
         bridgeOverride: ws.bridgeOverride
         hostOverride: ws.hostOverride
+        onEditRequested: effectEd.open()
         Rectangle { anchors.top: parent.top; width: parent.width
                     height: 1; color: th.border }
     }
@@ -809,6 +812,20 @@ Rectangle {
         x: Math.max(10, Math.round((ws.width - width) / 2))
         y: ws.hdrH + 10
         bridgeOverride: ws.bridgeOverride
+    }
+
+    /* Task 5.2 — effect-layer editor: modeless pane over the
+       workspace, same host conventions as the preset editor.
+       pickCtl is the scene's SelectionController — the "edit
+       origin/path in viewport" buttons arm its pick mode; every
+       pick lands as one undoable effect gesture. */
+    C.EffectEditor {
+        id: effectEd
+        x: Math.max(10, Math.round((ws.width - width) / 2))
+        y: ws.hdrH + 10
+        bridgeOverride: ws.bridgeOverride
+        hostOverride: ws.hostOverride
+        pickCtl: scene.editorCtl
     }
 
     Component.onCompleted: {

@@ -33,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -44,6 +45,7 @@ class QUndoStack;
 namespace studio
 {
 class ConfigStore;
+class EffectLayerModel;
 class PresetListModel;
 class SceneObjectModel;
 class ScreenSampler;
@@ -65,6 +67,12 @@ class SceneBridge : public QObject
     Q_PROPERTY(int effectSpeedPct READ effectSpeedPct NOTIFY effectParamsChanged)
     Q_PROPERTY(int effectIntensityPct READ effectIntensityPct NOTIFY effectParamsChanged)
     Q_PROPERTY(QVariantList presetList READ presetList CONSTANT)
+    /* Effect-layer editing (task 5.2): the EFFECTIVE stack as a
+       list model (inline layers when authored, else the resolved
+       look) plus whether the stack is authored inline. Both refresh
+       on effectLayersChanged (emitted by rebuildEffect). */
+    Q_PROPERTY(QObject* effectLayerModel READ effectLayerModel CONSTANT)
+    Q_PROPERTY(bool effectStackInline READ effectStackInline NOTIFY effectLayersChanged)
     Q_PROPERTY(bool audioInput READ audioInput NOTIFY inputsChanged)
     Q_PROPERTY(bool keyInput READ keyInput NOTIFY inputsChanged)
     Q_PROPERTY(bool screenInput READ screenInput NOTIFY inputsChanged)
@@ -203,6 +211,84 @@ public slots:
     {
         return doc.effect.layers;
     }
+
+    /* Task 5.2 — effect-layer editing. Read side: the EFFECTIVE
+       stack (authored inline layers when present, else the resolved
+       named-look stack) as a list model + per-layer detail maps.
+       Write side: every op funnels through the Qt-free
+       EditorController into commitEdit — discrete ops are one undo
+       record each; continuous gestures (slider scrub, stop/origin/
+       path drags) run begin -> preview writes -> commit, one record
+       per completed gesture. The first edit on a preset-backed
+       workspace materializes the resolved stack inline inside the
+       same record. */
+    QObject*        effectLayerModel() const;
+    bool            effectStackInline() const
+    {
+        return !doc.effect.layers.empty();
+    }
+    Q_INVOKABLE int         effectLayerCount() const;
+    Q_INVOKABLE QVariantMap effectLayer(int index) const;
+    /* Valid target terms for the layer editor: object ids, geometry
+       tags and emitter groups of the resolved scene. */
+    Q_INVOKABLE QVariantList effectTargetIds() const;
+    /* Input-source availability for one source name
+       ("audio"|"key"|"screen"): {name, enabled, ready, status} —
+       the editor's requirement badges read this so a disconnected
+       provider is visible beside the layer/effect that needs it. */
+    Q_INVOKABLE QVariantMap inputSourceState(const QString& source) const;
+    Q_INVOKABLE bool effectGestureActive() const
+    {
+        return editor.LayerGestureActive();
+    }
+    Q_INVOKABLE void beginEffectGesture();
+    Q_INVOKABLE void commitEffectGesture(const QString& label);
+    Q_INVOKABLE void cancelEffectGesture();
+    Q_INVOKABLE void moveEffectLayer(int from, int to);
+    Q_INVOKABLE void addEffectLayer(const QString& primitive);
+    Q_INVOKABLE void removeEffectLayer(int index);
+    Q_INVOKABLE void setEffectLayerEnabled(int index, bool on);
+    Q_INVOKABLE void setEffectLayerBlend(int index,
+                                         const QString& blend);
+    Q_INVOKABLE void setEffectLayerOpacity(int index, double v);
+    /* field: "speed" | "scale" | "phase" | "density" | "seed" */
+    Q_INVOKABLE void setEffectLayerField(int index,
+                                         const QString& field,
+                                         double v);
+    Q_INVOKABLE void setEffectLayerSpace(int index, bool local);
+    Q_INVOKABLE void setEffectLayerOrigin(int index,
+                                          double x, double y, double z);
+    Q_INVOKABLE void setEffectLayerDirection(int index,
+                                             double x, double y, double z);
+    Q_INVOKABLE void setEffectLayerSource(int index,
+                                          const QString& source);
+    Q_INVOKABLE void setEffectLayerTargets(int index,
+                                           const QStringList& targets);
+    /* Palette stops: pos in 0..1 (strictly increasing after the
+       controller's re-sort), color "#RRGGBB". */
+    Q_INVOKABLE void addEffectLayerStop(int index, double pos,
+                                        const QString& color);
+    Q_INVOKABLE void removeEffectLayerStop(int index, int stop);
+    Q_INVOKABLE void moveEffectLayerStop(int index, int stop,
+                                         double pos);
+    Q_INVOKABLE void setEffectLayerStopColor(int index, int stop,
+                                             const QString& color);
+    /* Comet path points, meters. */
+    Q_INVOKABLE void addEffectLayerPathPoint(int index,
+                                             double x, double y, double z);
+    Q_INVOKABLE void setEffectLayerPathPoint(int index, int pt,
+                                             double x, double y, double z);
+    Q_INVOKABLE void removeEffectLayerPathPoint(int index, int pt);
+    /* Reset-to-preset: clears the authored inline stack so the
+       named look resolves again (one undoable record). */
+    Q_INVOKABLE void resetEffectLayers();
+    /* Save-as personal look: validates + writes
+       presets/effects/<id>.effect.json through
+       ConfigStore::WriteEffectFile, reloads the look registry, then
+       adopts it as one undoable edit (effects.preset = id, inline
+       stack cleared). Returns {ok, id, path} or {ok:false, errors}. */
+    Q_INVOKABLE QVariantMap saveLookAs(const QString& id,
+                                       const QString& name);
 
     /* Stage 3 — reactive input sources */
     void setAudioInput(bool on);
@@ -366,6 +452,10 @@ signals:
     void playingChanged();
     void presetChanged();
     void effectParamsChanged();
+    /* Effective layer stack changed (commit, gesture preview,
+       undo/redo, preset pick, reload) — the layer editor panels
+       re-read effectLayerModel/effectLayer/effectStackInline. */
+    void effectLayersChanged();
     void inputsChanged();
     void dirtyChanged();
     /* studio.json changed on disk (not our write); arg = dirty. */
@@ -449,6 +539,20 @@ private:
        pushes one undo command; previewAdopt is the dirty-free
        gesture path. */
     void SyncWorkspace();
+    /* Effect-gesture preview: mirror the workspace's previewed
+       effect state into doc + rebuild the engine — no dirty, no
+       record. SyncWorkspace must NOT run here (doc.effect is stale
+       mid-gesture; copying it back would clobber the preview). */
+    void PreviewEffectSync();
+    /* Route a controller op result: a record commits through
+       commitEdit; no record inside a live layer gesture means
+       preview — mirror it; a refusal reaches the status line. */
+    void ApplyEffectOp(std::optional<EditorEdit>&& e);
+    void RefreshEffectModel();
+    /* The stack the engine runs: authored inline layers when
+       present, else the resolved named-look stack (unscaled —
+       global speed/intensity apply on the engine copy). */
+    std::vector<EffectLayer> EffectiveLayers() const;
     /* Drop selection ids the workspace no longer has (undo/redo,
        rollback paths). `selected` keeps its stored OBJECT id while
        its owning instance remains selected (sub-object granularity
@@ -478,6 +582,7 @@ private:
     EditorController            editor;           /* edits `workspace`       */
     SceneObjectModel*           obj_model = nullptr; /* stable list model    */
     PresetListModel*            preset_model = nullptr; /* type library rows  */
+    EffectLayerModel*           layer_model = nullptr; /* effective fx stack */
     QUndoStack*                 undo_stack;
     ConfigStore*                store = nullptr;
     WorkspaceMeta               meta;             /* prefs + retained sections */

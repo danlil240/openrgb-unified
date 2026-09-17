@@ -17,6 +17,7 @@
 #include "config/StudioConfig.h"
 #include "presets/DevicePreset.h"
 #include "presets/PresetRegistry.h"
+#include "effects/Presets.h"
 #include "editor/EditorController.h"
 #include "editor/TransformCommands.h"
 
@@ -1698,6 +1699,379 @@ static void TestPresetSchemaRoundTrip()
     }
 }
 
+/*---------------------------------------------------------*\
+||| Task 5.2 — effect-layer editing. Every op is a delta  ||
+||| on ws.effect (preset provenance + seed + the authored ||
+||| inline stack); first edit on a preset-backed document ||
+||| materializes the resolved stack inside the SAME undo  ||
+||| record; gestures collapse to one record.              ||
+\*---------------------------------------------------------*/
+static bool FxResolver(const std::string& id, unsigned int seed,
+                       std::vector<studio::EffectLayer>& out, void*)
+{
+    out = studio::BuildPreset(id, seed);
+    return !out.empty();
+}
+
+static void TestEffectLayers()
+{
+    using namespace studio;
+
+    /* A deterministic authored stack so indexes don't depend on
+       the packaged looks' contents. */
+    auto two_layers = []() {
+        EffectLayer a;
+        a.primitive = "static";
+        a.palette   = MakePalette({ MakeSceneColor(255, 0, 0),
+                                    MakeSceneColor(0, 0, 255) });
+        EffectLayer b;
+        b.primitive = "wave";
+        b.blend     = BlendMode::Add;
+        b.palette   = MakePalette({ MakeSceneColor(0, 255, 0) });
+        b.targets   = { "fan0" };
+        return std::vector<EffectLayer>{ a, b };
+    };
+
+    /* ---- materialize-on-first-edit + exact undo/redo ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.preset  = "aurora";
+        w.effect.seed    = 7;
+        EditorController ctl(w);
+        ctl.SetLayerResolver(&FxResolver, nullptr);
+        CHECK(w.effect.layers.empty(), "fx: preset stack starts empty");
+
+        std::optional<EditorEdit> e = ctl.SetLayerEnabled(1, false);
+        CHECK(e.has_value() && e->has_effect,
+              "fx: first edit materializes the stack");
+        CHECK(!w.effect.layers.empty(),
+              "fx: resolved stack landed inline");
+        CHECK(w.effect.preset == "aurora",
+              "fx: preset kept as provenance");
+        CHECK(w.effect.layers.size() > 1
+              && !w.effect.layers[1].enabled,
+              "fx: the enabled write applied");
+        CHECK(e->effect_before.layers.empty()
+              && e->effect_before.preset == "aurora"
+              && e->effect_before.seed == 7,
+              "fx: record holds the pre-materialize state");
+        RevertEditorEdit(w, *e);
+        CHECK(w.effect.layers.empty() && w.effect.preset == "aurora"
+              && w.effect.seed == 7,
+              "fx: undo returns to registry resolution");
+        ApplyEditorEdit(w, *e);
+        CHECK(w.effect.layers.size() == e->effect_after.layers.size()
+              && !w.effect.layers[1].enabled,
+              "fx: redo restores materialized + edited stack");
+    }
+
+    /* ---- materialize without a resolver refuses, cleanly ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.preset  = "aurora";
+        EditorController ctl(w);            /* no resolver installed */
+        CHECK(!ctl.SetLayerEnabled(0, false).has_value(),
+              "fx: no resolver -> op refused");
+        CHECK(w.effect.layers.empty(),
+              "fx: refused op leaves preset resolution intact");
+        CHECK(!ctl.LastError().empty(), "fx: refusal reason set");
+
+        /* An unresolvable preset id refuses the same way. */
+        ctl.SetLayerResolver(&FxResolver, nullptr);
+        w.effect.preset = "no_such_look";
+        CHECK(!ctl.SetLayerEnabled(0, false).has_value(),
+              "fx: unresolvable look refuses layer ops");
+        /* ...but AddLayer still seeds a fresh inline stack. */
+        std::optional<EditorEdit> e = ctl.AddLayer("static");
+        CHECK(e.has_value() && w.effect.layers.size() == 1
+              && w.effect.layers[0].primitive == "static",
+              "fx: AddLayer works on an unresolvable preset");
+    }
+
+    /* ---- discrete ops: deltas + exact undo/redo ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+
+        std::optional<EditorEdit> e = ctl.SetLayerOpacity(0, 0.35f);
+        CHECK(e.has_value() && e->has_effect
+              && e->effect_after.layers[0].opacity == 0.35f,
+              "fx: opacity record");
+        RevertEditorEdit(w, *e);
+        CHECK(Near(w.effect.layers[0].opacity, 1.0f),
+              "fx: opacity undo");
+        ApplyEditorEdit(w, *e);
+        CHECK(Near(w.effect.layers[0].opacity, 0.35f),
+              "fx: opacity redo");
+
+        CHECK(ctl.SetLayerBlend(0, BlendMode::Screen).has_value()
+              && w.effect.layers[0].blend == BlendMode::Screen,
+              "fx: blend edit");
+        CHECK(ctl.SetLayerField(0, EditorController::LayerField::Speed,
+                                2.5).has_value()
+              && Near(w.effect.layers[0].speed, 2.5f),
+              "fx: speed edit");
+        CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Scale,
+                                 0.0).has_value(),
+              "fx: scale 0 refused (grammar requires > 0)");
+        CHECK(!ctl.SetLayerField(0, EditorController::LayerField::Phase,
+                                 1e300).has_value(),
+              "fx: float-overflow phase refused");
+        CHECK(ctl.SetLayerField(0, EditorController::LayerField::Density,
+                                -2.0).has_value()
+              && w.effect.layers[0].density == 0.0f,
+              "fx: density clamps to 0");
+        CHECK(ctl.SetLayerField(0, EditorController::LayerField::Seed,
+                                42.0).has_value()
+              && w.effect.layers[0].seed == 42,
+              "fx: seed edit");
+        CHECK(ctl.SetLayerSpace(0, CoordSpace::Local).has_value()
+              && w.effect.layers[0].space == CoordSpace::Local,
+              "fx: space edit");
+        CHECK(ctl.SetLayerOrigin(0, { 0.1f, 0.2f, 0.3f }).has_value()
+              && NearVec(w.effect.layers[0].origin, { 0.1f, 0.2f, 0.3f }),
+              "fx: origin edit");
+        CHECK(!ctl.SetLayerOrigin(0,
+                { std::numeric_limits<float>::infinity(), 0.0f, 0.0f })
+              .has_value(),
+              "fx: non-finite origin refused");
+        CHECK(ctl.SetLayerDirection(0, { 0.0f, 0.0f, -1.0f }).has_value()
+              && NearVec(w.effect.layers[0].direction,
+                         { 0.0f, 0.0f, -1.0f }),
+              "fx: direction edit");
+        CHECK(ctl.SetLayerSource(1, "audio").has_value()
+              && w.effect.layers[1].source == "audio",
+              "fx: source edit");
+        CHECK(!ctl.SetLayerSource(1, "midi").has_value(),
+              "fx: bogus source refused");
+        CHECK(ctl.SetLayerTargets(1, { "desk", "fan1" }).has_value()
+              && w.effect.layers[1].targets.size() == 2,
+              "fx: targets edit");
+        CHECK(!ctl.SetLayerTargets(1, { "" }).has_value(),
+              "fx: empty target refused");
+
+        /* reorder */
+        std::optional<EditorEdit> mv = ctl.MoveLayer(0, 1);
+        CHECK(mv.has_value()
+              && w.effect.layers[0].primitive == "wave"
+              && w.effect.layers[1].primitive == "static",
+              "fx: reorder moves the row");
+        RevertEditorEdit(w, *mv);
+        CHECK(w.effect.layers[0].primitive == "static",
+              "fx: reorder undo");
+
+        /* add/remove */
+        std::optional<EditorEdit> add = ctl.AddLayer("comet");
+        CHECK(add.has_value() && w.effect.layers.size() == 3
+              && w.effect.layers[2].primitive == "comet"
+              && w.effect.layers[2].palette.stops.size() == 2,
+              "fx: AddLayer defaults (palette included)");
+        CHECK(!ctl.AddLayer("fireworks").has_value(),
+              "fx: unknown primitive refused");
+        RevertEditorEdit(w, *add);
+        CHECK(w.effect.layers.size() == 2, "fx: add undo");
+        ApplyEditorEdit(w, *add);
+        std::optional<EditorEdit> rm = ctl.RemoveLayer(2);
+        CHECK(rm.has_value() && w.effect.layers.size() == 2,
+              "fx: remove layer");
+    }
+
+    /* ---- palette stops: sorted insert, dup refusal, move,
+           recolor, remove — each one record ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+
+        /* layer 0 palette: stops at 0.0 and 0.5 (MakePalette evens) */
+        std::optional<EditorEdit> e =
+            ctl.AddLayerStop(0, 0.25f, ToColorF(MakeSceneColor(0,255,0)));
+        CHECK(e.has_value() && w.effect.layers[0].palette.stops.size() == 3
+              && Near(w.effect.layers[0].palette.stops[1].pos, 0.25f),
+              "fx: stop inserts sorted");
+        CHECK(!ctl.AddLayerStop(0, 0.25f,
+                                ToColorF(MakeSceneColor(1,2,3))).has_value(),
+              "fx: duplicate stop position refused");
+        CHECK(!ctl.AddLayerStop(0, 1.5f,
+                                ToColorF(MakeSceneColor(1,2,3))).has_value(),
+              "fx: stop position > 1 refused");
+
+        e = ctl.MoveLayerStop(0, 2, 0.1f);
+        CHECK(e.has_value()
+              && Near(w.effect.layers[0].palette.stops[1].pos, 0.1f)
+              && Near(w.effect.layers[0].palette.stops[2].pos, 0.25f),
+              "fx: stop move re-sorts");
+        CHECK(!ctl.MoveLayerStop(0, 0, 0.1f).has_value(),
+              "fx: stop move onto sibling refused");
+
+        e = ctl.SetLayerStopColor(0, 0, ToColorF(MakeSceneColor(9,9,9)));
+        CHECK(e.has_value()
+              && Near(ToSceneColor(w.effect.layers[0].palette.stops[0].color)
+                          & 0xFF, 9.0f),
+              "fx: stop recolor");
+        RevertEditorEdit(w, *e);
+        CHECK(Near(ToSceneColor(w.effect.layers[0].palette.stops[0].color)
+                       & 0xFF, 255.0f),
+              "fx: stop recolor undo");
+
+        e = ctl.RemoveLayerStop(0, 1);
+        CHECK(e.has_value()
+              && w.effect.layers[0].palette.stops.size() == 2,
+              "fx: stop remove");
+    }
+
+    /* ---- path points ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+
+        CHECK(ctl.AddLayerPathPoint(0, { 0.0f, 0.0f, 0.0f }).has_value()
+              && ctl.AddLayerPathPoint(0, { 0.2f, 0.0f, 0.1f }).has_value()
+              && w.effect.layers[0].path.size() == 2,
+              "fx: path points append");
+        std::optional<EditorEdit> e =
+            ctl.SetLayerPathPoint(0, 1, { 0.3f, 0.0f, 0.2f });
+        CHECK(e.has_value()
+              && NearVec(w.effect.layers[0].path[1], { 0.3f, 0.0f, 0.2f }),
+              "fx: path point set");
+        RevertEditorEdit(w, *e);
+        CHECK(NearVec(w.effect.layers[0].path[1], { 0.2f, 0.0f, 0.1f }),
+              "fx: path point undo");
+        e = ctl.RemoveLayerPathPoint(0, 0);
+        CHECK(e.has_value() && w.effect.layers[0].path.size() == 1,
+              "fx: path point remove");
+        CHECK(!ctl.SetLayerPathPoint(0, 9,
+                { 0.0f, 0.0f, 0.0f }).has_value(),
+              "fx: out-of-range path index refused");
+    }
+
+    /* ---- gesture collapse: 100 previews -> ONE record ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+        ctl.SetLayerResolver(&FxResolver, nullptr);
+
+        CHECK(ctl.BeginLayerGesture(), "fx: layer gesture begins");
+        for(int i = 1; i <= 100; i++)
+        {
+            /* preview writes land in ws but return no record */
+            CHECK(!ctl.SetLayerOpacity(0, i / 100.0f).has_value(),
+                  "fx: preview yields no record");
+        }
+        CHECK(Near(w.effect.layers[0].opacity, 1.0f),
+              "fx: preview state is live in ws");
+        /* The scrub ends where it began — a no-net-change gesture
+           produces no record and restores the snapshot. */
+        std::optional<EditorEdit> e =
+            ctl.CommitLayerGesture("scrub opacity");
+        CHECK(!e.has_value(),
+              "fx: no-change gesture yields no record");
+        CHECK(Near(w.effect.layers[0].opacity, 1.0f),
+              "fx: no-change gesture restored");
+
+        /* 100-update scrub lands one record with the real delta */
+        CHECK(ctl.BeginLayerGesture(), "fx: gesture 2 begins");
+        for(int i = 1; i <= 100; i++)
+        {
+            ctl.SetLayerOpacity(0, i * 0.005f);
+        }
+        e = ctl.CommitLayerGesture();
+        CHECK(e.has_value()
+              && Near(w.effect.layers[0].opacity, 0.5f)
+              && e->effect_before.layers[0].opacity == 1.0f
+              && Near(e->effect_after.layers[0].opacity, 0.5f),
+              "fx: 100 previews -> one record, begin..final delta");
+
+        /* cancel restores the begin snapshot — including an
+           undo of begin-time materialization. */
+        StudioDocument   w2 = Fixture();
+        w2.effect.preset   = "aurora";
+        w2.effect.seed     = 3;
+        EditorController ctl2(w2);
+        ctl2.SetLayerResolver(&FxResolver, nullptr);
+        CHECK(ctl2.BeginLayerGesture(), "fx: gesture 3 begins");
+        CHECK(!w2.effect.layers.empty(),
+              "fx: begin materializes for preview");
+        ctl2.SetLayerEnabled(0, false);
+        ctl2.CancelLayerGesture();
+        CHECK(w2.effect.layers.empty() && w2.effect.preset == "aurora",
+              "fx: cancel restores pre-materialize snapshot");
+        CHECK(!ctl2.CommitLayerGesture().has_value(),
+              "fx: commit after cancel is empty");
+    }
+
+    /* ---- reset-to-preset + save-as semantics (SetLayers) ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.preset  = "aurora";
+        w.effect.seed    = 11;
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+
+        /* Reset: inline stack cleared, preset semantics restore. */
+        std::optional<EditorEdit> e = ctl.SetLayers({}, "aurora");
+        CHECK(e.has_value() && w.effect.layers.empty()
+              && w.effect.preset == "aurora",
+              "fx: reset clears the inline stack");
+        RevertEditorEdit(w, *e);
+        CHECK(w.effect.layers.size() == 2,
+              "fx: reset undo restores the stack");
+        ApplyEditorEdit(w, *e);
+
+        /* Save-as adopt: preset <- saved id, stack cleared — one
+           undoable record. */
+        e = ctl.SetLayers({}, "mylook");
+        CHECK(e.has_value() && w.effect.preset == "mylook"
+              && w.effect.layers.empty(),
+              "fx: save-as sets preset id + clears stack");
+        RevertEditorEdit(w, *e);
+        CHECK(w.effect.preset == "aurora"
+              && w.effect.layers.size() == 2,
+              "fx: save-as undo restores stack + provenance");
+
+        /* Whole-stack replacement also carries layers. */
+        std::vector<EffectLayer> st = two_layers();
+        st[0].primitive = "ripple";
+        e = ctl.SetLayers(st, "mylook2");
+        CHECK(e.has_value() && w.effect.layers.size() == 2
+              && w.effect.layers[0].primitive == "ripple"
+              && w.effect.preset == "mylook2",
+              "fx: whole-stack replacement");
+    }
+
+    /* ---- gesture exclusivity: transform vs layer ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+        ctl.SetLayerResolver(&FxResolver, nullptr);
+        ctl.Select("fan1");
+
+        CHECK(ctl.BeginLayerGesture(), "fx: layer gesture starts");
+        ctl.SetLayerOpacity(0, 0.5f);
+        /* discrete device ops refuse during a layer gesture? — no:
+           transform ops don't check layer_gesture; the LAYER ops
+           refuse during a TRANSFORM gesture instead. */
+        CHECK(ctl.BeginTransform(),
+              "fx: BeginTransform cancels the layer gesture");
+        CHECK(!ctl.LayerGestureActive(),
+              "fx: layer gesture no longer active");
+        CHECK(Near(w.effect.layers[0].opacity, 1.0f),
+              "fx: cancelled preview state restored");
+        ctl.Cancel();
+
+        /* Layer ops refuse while a transform gesture is live. */
+        CHECK(ctl.BeginTransform(), "fx: transform begins");
+        CHECK(!ctl.SetLayerOpacity(0, 0.2f).has_value()
+              && Near(w.effect.layers[0].opacity, 1.0f),
+              "fx: layer op refused mid-transform");
+        ctl.Cancel();
+    }
+}
+
 int main()
 {
     TestDragOneRecord();
@@ -1723,6 +2097,7 @@ int main()
     TestZoneLayoutToPoints();
     TestZoneBinding();
     TestPresetSchemaRoundTrip();
+    TestEffectLayers();
 
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

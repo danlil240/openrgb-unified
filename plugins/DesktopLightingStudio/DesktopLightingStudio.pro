@@ -33,6 +33,7 @@ HEADERS += \
     editor/TransformCommands.h \
     editor/SceneObjectModel.h \
     editor/PresetListModel.h \
+    editor/EffectLayerModel.h \
     output/ControllerAdapter.h \
     presets/DevicePreset.h \
     presets/PresetRegistry.h \
@@ -68,6 +69,7 @@ SOURCES += \
     editor/TransformCommands.cpp \
     editor/SceneObjectModel.cpp \
     editor/PresetListModel.cpp \
+    editor/EffectLayerModel.cpp \
     output/ControllerAdapter.cpp \
     presets/DevicePreset.cpp \
     presets/PresetRegistry.cpp \
@@ -104,6 +106,10 @@ DISTFILES += \
     ui/components/DevicePresetEditor.qml \
     ui/components/Inspector.qml \
     ui/components/LookShelf.qml \
+    ui/components/EffectEditor.qml \
+    ui/components/LayerStack.qml \
+    ui/components/PaletteEditor.qml \
+    ui/components/EffectInspector.qml \
     ui/editor/CameraController.qml \
     ui/editor/SelectionController.qml \
     ui/editor/TransformGizmo.qml \

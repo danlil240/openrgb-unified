@@ -34,6 +34,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace studio
 {
@@ -141,6 +142,25 @@ void RevertSection(std::map<std::string, T>& dst, const SectionDelta<T>& d)
 }
 
 /*---------------------------------------------------------*\
+|| EffectDelta — the authored effect state captured in   ||
+|| one undo record: the inline layer stack plus the look ||
+|| id it was derived from and the global seed. `preset`  ||
+|| is provenance — editing the stack never rewrites it,  ||
+|| but reset-to-preset clears `layers` so the named look ||
+|| resolves again, and adopting a saved look rewrites    ||
+|| `preset` + `layers` together. Values are the AUTHORED ||
+|| ones — runtime speed/intensity/ripple multipliers are ||
+|| applied on the engine copy in rebuildEffect and never ||
+|| reach this snapshot.                                  ||
+\*---------------------------------------------------------*/
+struct EffectDelta
+{
+    std::string              preset;
+    unsigned int             seed  = 0;
+    std::vector<EffectLayer> layers;
+};
+
+/*---------------------------------------------------------*\
 || EditorEdit — one undoable workspace edit.             ||
 \*---------------------------------------------------------*/
 struct EditorEdit
@@ -151,6 +171,9 @@ struct EditorEdit
     SectionDelta<DeviceBinding>                     bindings;
     SectionDelta<SceneColor>                        object_colors;
     SectionDelta<std::map<int, SceneColor>>         emitter_colors;
+    bool                                            has_effect = false;
+    EffectDelta                                     effect_before;
+    EffectDelta                                     effect_after;
 
     bool Empty() const;
 
