@@ -2091,6 +2091,74 @@ static void TestEffectLayers()
               "fx: whole-stack replacement");
     }
 
+    /* ---- M5 finding 1: look pick + stop go through the editor
+       now — SelectPreset / "clear effect" are the undoable routes
+       playPreset/stopEffect take, so destroying the authored
+       stack is a normal record, not a silent doc write. ---- */
+    {
+        StudioDocument   w = Fixture();
+        w.effect.preset  = "aurora";
+        w.effect.seed    = 11;
+        w.effect.layers  = two_layers();
+        EditorController ctl(w);
+
+        /* Picking a DIFFERENT look: stack cleared, fresh seed,
+           one record carrying preset + seed + layers. */
+        std::optional<EditorEdit> e = ctl.SelectPreset("mylook");
+        CHECK(e.has_value() && e->has_effect
+              && e->label == "select look",
+              "fx: look pick is one undoable record");
+        CHECK(w.effect.layers.empty() && w.effect.preset == "mylook"
+              && w.effect.seed == 0,
+              "fx: pick clears stack + adopts id + fresh seed");
+        RevertEditorEdit(w, *e);
+        CHECK(w.effect.preset == "aurora" && w.effect.seed == 11
+              && w.effect.layers.size() == 2,
+              "fx: pick undo restores stack + preset + seed");
+        ApplyEditorEdit(w, *e);
+
+        /* Re-picking the SAME look keeps the remix seed (the old
+           playPreset contract) and still clears the stack. */
+        w.effect.seed   = 42;
+        w.effect.layers = two_layers();
+        e = ctl.SelectPreset("mylook");
+        CHECK(e.has_value() && w.effect.preset == "mylook"
+              && w.effect.seed == 42 && w.effect.layers.empty(),
+              "fx: re-pick keeps seed, still clears stack");
+
+        /* Stop: clears BOTH preset and stack — undoable, restores
+           both (was a direct doc write autosave persisted). */
+        w.effect.layers = two_layers();
+        e = ctl.SetLayers({}, "", "clear effect");
+        CHECK(e.has_value() && e->label == "clear effect"
+              && w.effect.preset.empty() && w.effect.layers.empty(),
+              "fx: stop clears preset + stack undoably");
+        RevertEditorEdit(w, *e);
+        CHECK(w.effect.preset == "mylook"
+              && w.effect.layers.size() == 2,
+              "fx: stop undo restores preset + stack");
+
+        /* A pick that changes nothing pushes no record. */
+        StudioDocument   w2 = Fixture();
+        w2.effect.preset = "empty_look";
+        EditorController ctl2(w2);
+        CHECK(!ctl2.SelectPreset("empty_look").has_value(),
+              "fx: same-look pick with no stack = no record");
+
+        /* Both routes refuse mid-gesture — the bridge pairs this
+           with a status refusal so a stray click can't clobber
+           a live drag. */
+        w2.effect.layers = two_layers();
+        CHECK(ctl2.BeginLayerGesture(), "fx: gesture begins");
+        CHECK(!ctl2.SelectPreset("other").has_value()
+              && !ctl2.SetLayers({}, "", "clear effect").has_value(),
+              "fx: pick + clear refuse mid-gesture");
+        CHECK(w2.effect.layers.size() == 2
+              && w2.effect.preset == "empty_look",
+              "fx: refused pick left the stack untouched");
+        ctl2.CancelLayerGesture();
+    }
+
     /* ---- gesture exclusivity: transform vs layer ---- */
     {
         StudioDocument   w = Fixture();

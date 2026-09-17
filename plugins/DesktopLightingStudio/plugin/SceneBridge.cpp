@@ -3048,21 +3048,29 @@ void SceneBridge::playPreset(const QString& presetId)
         setStatus(QStringLiteral("unknown preset %1").arg(presetId));
         return;
     }
-    if(doc.effect.preset != id)
+    if(editor.GestureActive() || editor.LayerGestureActive())
     {
-        doc.effect.preset = id;
-        doc.effect.seed   = 0;
-        play_t            = 0.0;
-        input_bus.ClearEvents();   /* old-clock events would age wrong */
-        markDirty();
-        emit presetChanged();
+        /* A stray card click mid-drag must not clobber the live
+           gesture or silently re-write the stack — same refusal
+           contract as undo()/redo(). */
+        emit statusMessage(QStringLiteral(
+            "look pick refused — finish the drag first"));
+        return;
     }
+    const bool preset_swap = (doc.effect.preset != id);
     /* Selecting a preset (re-selecting included) clears the authored
-       inline stack — the named look is the whole point of the pick. */
-    if(!doc.effect.layers.empty())
+       inline stack — the named look is the whole point of the pick.
+       Routed through the editor so preset swap + stack clear +
+       seed reset land as ONE undoable record: undo restores the
+       stack, the previous preset id and the previous seed together.
+       (Was: a direct doc write autosave persisted irreversibly —
+       a stray click permanently deleted the authored stack.) */
+    SyncWorkspace();
+    ApplyEffectOp(editor.SelectPreset(id));
+    if(preset_swap)
     {
-        doc.effect.layers.clear();
-        markDirty();
+        play_t = 0.0;
+        input_bus.ClearEvents();   /* old-clock events would age wrong */
     }
     /* A reactive preset auto-enables its input source — the toggle
        stays visible and can be switched off. */
@@ -3115,10 +3123,20 @@ void SceneBridge::setPlaying(bool on)
 
 void SceneBridge::stopEffect()
 {
+    if(editor.GestureActive() || editor.LayerGestureActive())
+    {
+        /* Same refusal as undo(): a mid-drag Stop used to silently
+           delete the authored stack with no way back. */
+        emit statusMessage(QStringLiteral(
+            "stop refused — finish the drag first"));
+        return;
+    }
     setPlaying(false);
-    doc.effect.preset.clear();
-    doc.effect.layers.clear();   /* "no effect" clears the stack too */
-    markDirty();
+    /* "no effect" clears preset + stack — through the editor now,
+       so the wipe is an undoable record (undo restores both)
+       instead of a direct doc write autosave persisted. */
+    SyncWorkspace();
+    ApplyEffectOp(editor.SetLayers({}, "", "clear effect"));
     frame.clear();
     rebuildEffect();             /* empty stack + model refresh */
     emit presetChanged();

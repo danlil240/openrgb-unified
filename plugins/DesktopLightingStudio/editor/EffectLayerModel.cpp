@@ -26,6 +26,21 @@ const char* SpaceName(CoordSpace s)
     return s == CoordSpace::Local ? "local" : "world";
 }
 
+/* Display-field equality — the same fields RowMap emits, minus the
+   row index (suffix rows legitimately shift index across an
+   insert/remove). Two rows equal here need no dataChanged. */
+bool SameDisplayRow(const EffectLayer& a, const EffectLayer& b)
+{
+    return a.primitive == b.primitive
+        && a.enabled   == b.enabled
+        && a.blend     == b.blend
+        && a.opacity   == b.opacity
+        && a.space     == b.space
+        && a.source    == b.source
+        && a.palette.stops.size() == b.palette.stops.size()
+        && a.path.size()          == b.path.size();
+}
+
 } /* anonymous namespace */
 
 EffectLayerModel::EffectLayerModel(QObject* parent)
@@ -118,34 +133,76 @@ QHash<int, QByteArray> EffectLayerModel::roleNames() const
 
 bool EffectLayerModel::SetStack(const std::vector<EffectLayer>& layers)
 {
-    if(layers.size() != rows.size())
+    if(layers.size() == rows.size())
     {
-        beginResetModel();
+        /* Same shape — diff each row's display fields so a scrub
+           preview updates the changed row without a reset (this is
+           the guarantee that keeps a pressed Slider delegate alive
+           mid-gesture). The new stack is assigned BEFORE the emits:
+           a delegate resolving dataChanged must read the new row,
+           not the stale one. */
+        std::vector<int> changed;
+        for(int i = 0; i < (int)rows.size(); i++)
+        {
+            if(RowMap(rows[i], i) != RowMap(layers[i], i))
+            {
+                changed.push_back(i);
+            }
+        }
+        if(changed.empty())
+        {
+            return false;
+        }
         rows = layers;
-        endResetModel();
+        for(int i : changed)
+        {
+            emit dataChanged(index(i), index(i));
+        }
         return true;
     }
-    /* Same shape — diff each row's display fields so a scrub
-       preview updates the changed row without a reset. The new
-       stack is assigned BEFORE the emits: a delegate resolving
-       dataChanged must read the new row, not the stale one. */
-    std::vector<int> changed;
-    for(int i = 0; i < (int)rows.size(); i++)
+    /* Shape change — express it as ONE contiguous insert/remove
+       run when the untouched rows keep their display content
+       (longest common prefix + suffix), so add/remove/reorder-by-
+       delete keeps surviving delegates alive too. A non-contiguous
+       rewrite still resets. */
+    const std::vector<EffectLayer>& small =
+        layers.size() < rows.size() ? layers : rows;
+    const std::vector<EffectLayer>& large =
+        layers.size() < rows.size() ? rows : layers;
+    int pre = 0;
+    while(pre < (int)small.size()
+          && SameDisplayRow(small[pre], large[pre]))
     {
-        if(RowMap(rows[i], i) != RowMap(layers[i], i))
+        ++pre;
+    }
+    int suf = 0;
+    while(suf < (int)small.size() - pre
+          && SameDisplayRow(small[small.size() - 1 - suf],
+                            large[large.size() - 1 - suf]))
+    {
+        ++suf;
+    }
+    if(pre + suf == (int)small.size())
+    {
+        if(layers.size() > rows.size())
         {
-            changed.push_back(i);
+            const int last = pre + (int)(layers.size() - rows.size()) - 1;
+            beginInsertRows(QModelIndex(), pre, last);
+            rows = layers;
+            endInsertRows();
         }
+        else
+        {
+            const int last = pre + (int)(rows.size() - layers.size()) - 1;
+            beginRemoveRows(QModelIndex(), pre, last);
+            rows = layers;
+            endRemoveRows();
+        }
+        return true;
     }
-    if(changed.empty())
-    {
-        return false;
-    }
+    beginResetModel();
     rows = layers;
-    for(int i : changed)
-    {
-        emit dataChanged(index(i), index(i));
-    }
+    endResetModel();
     return true;
 }
 

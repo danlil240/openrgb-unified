@@ -304,6 +304,14 @@ public:
         const std::vector<EffectLayer>& stack,
         const std::string& new_preset,
         const char* label = nullptr);
+    /* Look-shelf pick: adopts the named preset and clears the
+       authored inline stack as ONE record — the whole point of the
+       pick is the named look. A DIFFERENT id also takes a fresh
+       seed (the old playPreset contract); re-picking the same id
+       keeps the remix seed. Routing the pick through here makes
+       stack destruction undoable — undo restores the previous
+       stack, preset id AND seed together. */
+    std::optional<EditorEdit> SelectPreset(const std::string& preset_id);
 
     /* Per-layer ops — `i` indexes ws.effect.layers. */
     std::optional<EditorEdit> SetLayerEnabled(size_t i, bool on);

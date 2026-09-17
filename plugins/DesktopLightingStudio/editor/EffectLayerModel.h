@@ -16,7 +16,8 @@
 |||   Update path: SetStack() diffs against the snapshot    ||
 |||   and emits a row-granular dataChanged when the shape   ||
 |||   is unchanged (scrub preview keeps delegates alive),   ||
-|||   a full reset on add/remove/reorder.                   ||
+|||   a contiguous rowsInserted/rowsRemoved for add/remove, ||
+|||   a full reset only for non-contiguous rewrites.        ||
 |||                                                          ||
 |||   SPDX-License-Identifier: GPL-2.0-or-later               ||
 \*---------------------------------------------------------*/
@@ -64,7 +65,9 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     /* Replace the snapshot. Same-size stacks diff per row; a size
-       change resets. Returns true when the effective rows changed. */
+       change emits a contiguous rowsInserted/rowsRemoved when the
+       untouched rows keep their content (resets otherwise).
+       Returns true when the effective rows changed. */
     bool SetStack(const std::vector<EffectLayer>& layers);
 
     /* QML helpers — plain QVariantMap rows so the same panel code

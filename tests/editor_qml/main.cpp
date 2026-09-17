@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "../../plugins/DesktopLightingStudio/plugin/SceneBridge.h"
+#include "../../plugins/DesktopLightingStudio/editor/EffectLayerModel.h"
 
 namespace
 {
@@ -694,6 +695,126 @@ private slots:
         }
         QCOMPARE(transformDigest(), digest0);
         QVERIFY(!bridge->canUndo());
+    }
+
+    /* M5 review finding 2a — the REAL EffectLayerModel signal
+       contract: a same-shape SetStack (every scrub preview) must
+       row-diff -> dataChanged and NEVER modelReset, because the
+       reset is what destroyed the pressed Slider delegate and
+       leaked gestures. Shape changes must be begin/endInsertRows
+       or RemoveRows, not a reset. */
+    void effectLayerModel_rowDiff()
+    {
+        using studio::EffectLayer;
+        studio::EffectLayerModel m;
+        QSignalSpy resetSpy(&m, &QAbstractItemModel::modelReset);
+        QSignalSpy dataSpy (&m, &QAbstractItemModel::dataChanged);
+        QSignalSpy insSpy  (&m, &QAbstractItemModel::rowsInserted);
+        QSignalSpy remSpy  (&m, &QAbstractItemModel::rowsRemoved);
+
+        EffectLayer a;
+        a.primitive = "gradient";
+        a.opacity   = 1.0f;
+        EffectLayer b;
+        b.primitive = "wave";
+        b.opacity   = 0.5f;
+
+        /* Empty -> two rows: one contiguous insert, no reset. */
+        QVERIFY(m.SetStack({ a, b }));
+        QCOMPARE(m.rowCount(), 2);
+        QCOMPARE(insSpy.count(), 1);
+        QCOMPARE(insSpy.at(0).at(1).toInt(), 0);
+        QCOMPARE(insSpy.at(0).at(2).toInt(), 1);
+        QCOMPARE(resetSpy.count(), 0);
+
+        /* Same shape, one row's opacity changed — a scrub tick:
+           dataChanged on row 1 only, still no reset. */
+        EffectLayer b2 = b;
+        b2.opacity = 0.25f;
+        QVERIFY(m.SetStack({ a, b2 }));
+        QCOMPARE(resetSpy.count(), 0);
+        QCOMPARE(insSpy.count(), 1);
+        QCOMPARE(dataSpy.count(), 1);
+        QCOMPARE(dataSpy.at(0).at(0).toModelIndex().row(), 1);
+        QCOMPARE(m.rowAt(1)["opacity"].toFloat(), 0.25f);
+
+        /* Identical stack -> no signals at all. */
+        dataSpy.clear();
+        QVERIFY(!m.SetStack({ a, b2 }));
+        QCOMPARE(dataSpy.count(), 0);
+        QCOMPARE(resetSpy.count(), 0);
+
+        /* Drop the middle row -> rowsRemoved, not a reset. */
+        QVERIFY(m.SetStack({ a }));
+        QCOMPARE(remSpy.count(), 1);
+        QCOMPARE(remSpy.at(0).at(1).toInt(), 1);
+        QCOMPARE(resetSpy.count(), 0);
+        QCOMPARE(m.rowCount(), 1);
+
+        /* Append one -> rowsInserted at the tail. */
+        QVERIFY(m.SetStack({ a, b }));
+        QCOMPARE(insSpy.count(), 2);
+        QCOMPARE(insSpy.at(1).at(1).toInt(), 1);
+        QCOMPARE(resetSpy.count(), 0);
+    }
+
+    /* M5 review finding 2b — a real begin/preview/commit opacity
+       gesture through the REAL SceneBridge + REAL EffectLayerModel:
+       every preview must reach the live model as dataChanged with
+       zero resets (delegates survive), and the gesture lands as
+       exactly one undo record. */
+    void effectGesture_realBridge()
+    {
+        QAbstractItemModel* m = qobject_cast<QAbstractItemModel*>(
+            bridge->effectLayerModel());
+        QVERIFY(m != nullptr);
+
+        /* Seed one authored layer (add is itself an undo record —
+           cleaned up below). */
+        const bool undo0 = bridge->canUndo();
+        bridge->addEffectLayer(QStringLiteral("static"));
+        QCOMPARE(bridge->effectLayerCount(), 1);
+        QVERIFY(bridge->canUndo() != undo0);
+
+        QSignalSpy resetSpy(m, &QAbstractItemModel::modelReset);
+        QSignalSpy dataSpy (m, &QAbstractItemModel::dataChanged);
+        resetSpy.clear();
+        dataSpy.clear();
+
+        const double o0 =
+            bridge->effectLayer(0)["opacity"].toDouble();
+        bridge->beginEffectGesture();
+        for(int i = 1; i <= 6; i++)
+        {
+            /* Scrub DOWN — opacity clamps to 0..1, so moving off
+               the default upward would no-op and prove nothing. */
+            bridge->setEffectLayerOpacity(0, o0 - i * 0.05);
+            pump(20);   /* let the queued row signals land */
+        }
+        QVERIFY(bridge->effectGestureActive());
+        bridge->commitEffectGesture(QStringLiteral("test scrub"));
+
+        QCOMPARE(resetSpy.count(), 0);
+        QVERIFY2(dataSpy.count() > 0,
+                 "scrub previews never reached the live model");
+        QVERIFY(!bridge->effectGestureActive());
+        const double op =
+            bridge->effectLayer(0)["opacity"].toDouble();
+        QVERIFY2(std::fabs(op - (o0 - 0.30)) < 1e-4,
+                 qPrintable(QStringLiteral("opacity %1").arg(op)));
+
+        /* One record — undo returns the pre-gesture opacity... */
+        bridge->undo();
+        const double back =
+            bridge->effectLayer(0)["opacity"].toDouble();
+        QVERIFY2(std::fabs(back - o0) < 1e-4,
+                 qPrintable(QStringLiteral("undo opacity %1 vs %2")
+                    .arg(back).arg(o0)));
+        /* ...then undo the add too so the stack is clean. */
+        bridge->undo();
+        QCOMPARE(bridge->effectLayerCount(), 0);
+        QVERIFY(!bridge->canUndo());
+        bridge->setPlaying(false);
     }
 };
 

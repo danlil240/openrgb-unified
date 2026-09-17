@@ -1952,6 +1952,27 @@ EditorController::SetLayers(const std::vector<EffectLayer>& stack,
                             : "replace effect layers");
 }
 
+std::optional<EditorEdit>
+EditorController::SelectPreset(const std::string& preset_id)
+{
+    if(gesture.active || layer_gesture.active)
+    {
+        return std::nullopt;
+    }
+    last_error.clear();
+    const EffectDelta before = SnapEffect();
+    /* A different look starts on seed 0 (the pick is a fresh roll);
+       re-selecting the same look keeps the remix seed — matches
+       the pre-undoable playPreset contract exactly. */
+    if(preset_id != ws.effect.preset)
+    {
+        ws.effect.seed = 0;
+    }
+    ws.effect.preset = preset_id;
+    ws.effect.layers.clear();
+    return FinishEffectEdit(before, "select look");
+}
+
 /*---------------------------------------------------------*\
 || Per-layer ops                                            ||
 \*---------------------------------------------------------*/

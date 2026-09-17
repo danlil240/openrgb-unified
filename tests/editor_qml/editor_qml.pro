@@ -62,3 +62,8 @@ SOURCES += main.cpp \
     $$STUDIO/inputs/AudioLoopback.cpp \
     $$STUDIO/inputs/KeyHook.cpp \
     $$STUDIO/inputs/ScreenSampler.cpp
+
+# The bridge reads the packaged type/look libraries from
+# :/studio/presets/** — without the plugin qrc the harness
+# resolves on the desk-only fallback set and no device exists.
+RESOURCES += $$STUDIO/ui/studio.qrc
