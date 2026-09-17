@@ -3,7 +3,9 @@
 |||                                                           |
 |||   WH_KEYBOARD_LL low-level keyboard hook on a dedicated |
 |||   thread with its own message loop (LL hooks require    |
-|||   the installing thread to pump messages). Pushes       |
+|||   the installing thread to pump messages). Linux:       |
+|||   passive reads of /dev/input/event* keyboard nodes;    |
+|||   macOS: a listen-only CGEventTap. Pushes               |
 |||   transient "key" events carrying only the VK code —    |
 |||   the bridge resolves them to scene positions and the   |
 |||   code is then discarded. No typed-text history is      |
