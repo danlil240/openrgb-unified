@@ -562,6 +562,9 @@ void SceneBridge::setLive(bool on)
         return;
     }
     live_output = on;
+    /* Probes snapshot this (pausePushes): a real toggle mid-probe
+       must disarm the probe's restore. */
+    live_generation.fetch_add(1);
     emit liveChanged();
     if(on)
     {
@@ -591,12 +594,19 @@ bool SceneBridge::pausePushes()
        after probe_serial covers the probe that was queued behind an
        active one while shutdown began. */
     probe_active.fetch_add(1);
+    /* If the lock allocation throws the count would strand — the
+       dtor's drain loop counts on it. Disarmed once the probe is
+       registered; the counted exits below subtract directly. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{probe_active};
     if(shutting_down.load())
     {
         probe_active.fetch_sub(1);
+        spawn.armed = false;
         return false;
     }
     probe_serial_lock = std::make_unique<std::unique_lock<QMutex>>(probe_serial);
+    spawn.armed = false;
     if(shutting_down.load())
     {
         /* Move off the member before unlocking — see resumePushes(). */
@@ -613,6 +623,10 @@ bool SceneBridge::pausePushes()
        on the bridge thread; probe_serial is held first, so a second
        probe records probe_was_live only after the first restored it —
        overlapping probes can no longer leave live stuck off. */
+    /* Snapshot the toggle generation BEFORE the exchange: a
+       setLive that flips the flag in between still bumps the
+       generation, so resumePushes() can't restore over it. */
+    probe_live_generation = live_generation.load();
     probe_was_live = live_output.exchange(false);
     if(probe_was_live)
     {
@@ -649,17 +663,20 @@ void SceneBridge::resumePushes()
     lane0.reset();
     lane1.reset();
 
-    /* Restore only when the pause itself turned live off and nothing
-       else re-armed it meanwhile — a user toggle during the probe
-       wins over our stale snapshot. The flag store MUST be
-       synchronous here, before probe_serial is released: queueing
-       the whole setLive(true) let a second probe acquire
-       probe_serial and exchange() a still-false live_output, record
-       probe_was_live=false, and leave live output off forever after
-       both probes finished. The flag is atomic; only the GUI
-       side-effects (notify, first push, timer re-arm) may ride the
-       event queue. */
-    const bool restore = probe_was_live && !live_output.load();
+    /* Restore only when the pause itself turned live off and no
+       user toggle landed during the probe — the generation must
+       match the snapshot, because the flag alone can't tell "still
+       paused" from a user on->off sequence (both read false; the
+       old check re-enabled live against the user's last explicit
+       action). The flag store MUST be synchronous here, before
+       probe_serial is released: queueing the whole setLive(true)
+       let a second probe acquire probe_serial and exchange() a
+       still-false live_output, record probe_was_live=false, and
+       leave live output off forever after both probes finished.
+       The flag is atomic; only the GUI side-effects (notify,
+       first push, timer re-arm) may ride the event queue. */
+    const bool restore = probe_was_live && !live_output.load()
+        && live_generation.load() == probe_live_generation;
     if(restore)
     {
         live_output = true;
@@ -4097,6 +4114,11 @@ void SceneBridge::schedulePush()
     }
     const SceneDocument doc_copy = doc;
     push_workers.fetch_add(1);
+    /* If the thread ctor throws the count would strand — the
+       dtor's join counts on it. Once detached, the worker's own
+       ExitCount owns the decrement. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{push_workers};
     std::thread([this, doc_copy]()
     {
         /* Decrement on every exit — the dtor's join relies on it.
@@ -4138,6 +4160,7 @@ void SceneBridge::schedulePush()
             }, Qt::QueuedConnection);
         }
     }).detach();
+    spawn.armed = false;
 }
 
 void SceneBridge::scheduleLane(int lane)
@@ -4183,6 +4206,10 @@ void SceneBridge::scheduleLane(int lane)
     const SceneDocument doc_copy   = doc;
     const FrameColors   frame_copy = frame;
     push_workers.fetch_add(1);
+    /* Same ctor-throw guard as schedulePush — a stranded count
+       hangs the dtor's join. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{push_workers};
     std::thread([this, lane, doc_copy, frame_copy]()
     {
         /* Counted for the dtor's join; lane_in_flight stays the
@@ -4209,6 +4236,7 @@ void SceneBridge::scheduleLane(int lane)
                                       Qt::QueuedConnection);
         }
     }).detach();
+    spawn.armed = false;
 }
 
 bool SceneBridge::BindingIsI2C(const std::string& binding_id) const
@@ -4372,6 +4400,10 @@ void SceneBridge::pushLive(const std::string& object_id)
     const SceneDocument snapshot = doc;
     const std::string oid = object_id;
     push_workers.fetch_add(1);
+    /* Same ctor-throw guard as schedulePush — a stranded count
+       hangs the dtor's join. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{push_workers};
     std::thread([this, snapshot, oid]()
     {
         struct ExitCount { std::atomic<int>& c;
@@ -4400,6 +4432,7 @@ void SceneBridge::pushLive(const std::string& object_id)
             }, Qt::QueuedConnection);
         }
     }).detach();
+    spawn.armed = false;
 }
 
 void SceneBridge::pushLiveAll()
@@ -4410,6 +4443,10 @@ void SceneBridge::pushLiveAll()
     }
     const SceneDocument snapshot = doc;
     push_workers.fetch_add(1);
+    /* Same ctor-throw guard as schedulePush — a stranded count
+       hangs the dtor's join. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{push_workers};
     std::thread([this, snapshot]()
     {
         struct ExitCount { std::atomic<int>& c;
@@ -4432,6 +4469,7 @@ void SceneBridge::pushLiveAll()
             }, Qt::QueuedConnection);
         }
     }).detach();
+    spawn.armed = false;
 }
 
 void SceneBridge::rebuildMatrixLayouts()

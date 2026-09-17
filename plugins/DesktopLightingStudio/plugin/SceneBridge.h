@@ -616,6 +616,12 @@ private:
        GUI-side notify is queued); all other access stays on the
        bridge thread. */
     std::atomic<bool>           live_output { false };
+    /* Bumped by setLive on every real toggle; pausePushes()
+       snapshots it so resumePushes() can tell "still paused by
+       the probe" from "the user toggled during the probe" — the
+       flag alone can't (an on->off sequence reads false either
+       way). */
+    std::atomic<unsigned int>   live_generation { 0 };
     bool                        case_ghost  = false;
     QColor                      paint_color = Qt::white;
     QString                     status;
@@ -667,6 +673,7 @@ private:
     std::unique_ptr<std::unique_lock<QMutex>> probe_serial_lock;
     std::unique_ptr<std::unique_lock<QMutex>> probe_lane_locks[2];
     bool                                      probe_was_live = false;
+    unsigned int                              probe_live_generation = 0;
     std::atomic<int>                          probe_active  { 0 };
 
     /* Lifecycle quiesce: every detached push worker increments

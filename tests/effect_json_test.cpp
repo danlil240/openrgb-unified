@@ -455,6 +455,35 @@ static void TestValidation()
               "remix range crossing 0 on scale rejected");
     }
 
+    /* A finite-positive double that underflows to 0.0f at float
+       width still violates scale's "> 0" contract — the double-
+       domain bound check passes it, then narrowing produces the
+       divisor EvalWave/EvalPulse would divide by. */
+    {
+        nlohmann::ordered_json j = MinimalDoc();
+        j["layers"][0]["scale"] = 1e-46;
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "scale 1e-46 (narrows to 0.0f) rejected");
+        j = MinimalDoc();
+        j["layers"][0]["scale"] = {{"remix", {1e-46, 0.5}}};
+        CHECK(!EffectDocumentFromJson(j, d, &errs),
+              "remix lo bound 1e-46 on scale rejected");
+        /* Same check on the resolved inline-stack path — both go
+           through ParseLayer. */
+        json layer;
+        layer["primitive"] = "wave";
+        layer["scale"]     = 1e-46;
+        std::vector<EffectLayer> out;
+        CHECK(!EffectLayersFromJson(json::array({ layer }), out, &errs),
+              "inline scale 1e-46 rejected");
+        /* Positive control: a denormal-but-positive float survives
+           narrowing and stays a valid scale. */
+        layer["scale"] = 1e-40;
+        CHECK(EffectLayersFromJson(json::array({ layer }), out, &errs)
+              && out.size() == 1 && out[0].scale > 0.0f,
+              "inline scale 1e-40 (float-positive) accepted");
+    }
+
     /* remix range exceeding a bounded field */
     {
         nlohmann::ordered_json j = MinimalDoc();

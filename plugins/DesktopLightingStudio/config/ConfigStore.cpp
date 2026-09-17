@@ -96,6 +96,10 @@ bool ConfigStore::EnsureWorkspaceDir(QString* error)
             df.close();
             if(have == want)
             {
+                /* Heal the read-only bit even on a hit — an older
+                   build could have materialized a current-but-
+                   read-only file (presets path heals the same). */
+                make_writable(dst);
                 return;             /* already current */
             }
         }

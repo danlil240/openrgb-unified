@@ -770,10 +770,20 @@ bool ParseLayer(const J& j, EffectLayer& l, const std::string& path,
             }
             else
             {
-                /* Post-narrowing finiteness — see NumField. */
+                /* Post-narrowing checks at float width: a finite-
+                   positive double (1e-46) underflows to 0.0f and
+                   EvalWave/EvalPulse would divide by zero — re-test
+                   the >0 contract on the narrowed value AND the
+                   spec's implied low bound. Finiteness rule as in
+                   NumField. */
                 out.scale = (float)d;
-                if(!std::isfinite(out.scale)
-                   || !std::isfinite((float)ih))
+                if(out.scale <= 0.0f || (float)il <= 0.0f)
+                {
+                    AddErr(errs, p, "expected number > 0");
+                    ok = false;
+                }
+                else if(!std::isfinite(out.scale)
+                        || !std::isfinite((float)ih))
                 {
                     AddErr(errs, p, "expected float-finite number");
                     ok = false;

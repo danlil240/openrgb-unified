@@ -26,9 +26,9 @@ if not exist "%LOG%" (
     exit /b 1
 )
 type "%LOG%"
-findstr /c:"Totals:" "%LOG%" >nul
+findstr /r /c:"Totals: *[1-9][0-9]* passed" "%LOG%" >nul
 if errorlevel 1 (
-    echo FAIL: qmltestrunner log has no Totals line - silent pass impossible
+    echo FAIL: qmltestrunner log has no Totals line with a nonzero pass count
     exit /b 1
 )
 if not "%RC%"=="0" (

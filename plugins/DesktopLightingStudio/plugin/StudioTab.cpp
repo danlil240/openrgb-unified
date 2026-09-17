@@ -628,6 +628,11 @@ void StudioTab::diagFlash(int controller, int zone)
 
     const quint64 epoch = controller_epoch.load();
     probe_workers.fetch_add(1);
+    /* If the thread ctor throws the count would strand —
+       ~StudioTab's join counts on it. Once detached, the worker's
+       own ExitCount owns the decrement. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{probe_workers};
     std::thread([this, ctrl, zone_idx, epoch]()
     {
         /* Decrement on every exit — ~StudioTab's join counts on it,
@@ -678,6 +683,7 @@ void StudioTab::diagFlash(int controller, int zone)
         QMetaObject::invokeMethod(this, "AppendResult", Qt::QueuedConnection,
                                   Q_ARG(QString, done));
     }).detach();
+    spawn.armed = false;
 }
 
 /*---------------------------------------------------------*\
@@ -701,25 +707,16 @@ void StudioTab::diagMeasure()
     const quint64 epoch = controller_epoch.load();
     auto snapshot = controllers;
     probe_workers.fetch_add(1);
+    /* Same ctor-throw guard as diagFlash — disarm only once the
+       worker is running, or a QThread::create throw strands the
+       count and hangs ~StudioTab's join. */
+    struct SpawnCount { std::atomic<int>& c; bool armed = true;
+        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{probe_workers};
     QThread* worker = QThread::create([this, snapshot, epoch]()
     {
         struct ExitCount { std::atomic<int>& c;
             ~ExitCount() { c.fetch_sub(1); } } count{probe_workers};
         constexpr int SAMPLES = 15;
-
-        /* Exclusive hardware access: live pushes pause and drain
-           until the ProbeGuard resumes them at scope exit — any
-           exit path (abort, driver throw) included. held==false
-           means the bridge is closing: skip the run entirely. */
-        ProbeGuard paused(bridge);
-        if(!paused.held)
-        {
-            QMetaObject::invokeMethod(this, "AppendResult",
-                                      Qt::QueuedConnection,
-                                      Q_ARG(QString, QStringLiteral(
-                                          "measurement skipped — studio closing")));
-            return;
-        }
         QString tail_msg = QStringLiteral("measurement complete");
         auto abort_requested = [this, epoch]()
         {
@@ -814,6 +811,22 @@ void StudioTab::diagMeasure()
 
         try
         {
+            /* Exclusive hardware access: live pushes pause and
+               drain until the ProbeGuard resumes them at scope
+               exit — any exit path (abort, driver throw)
+               included. held==false means the bridge is closing:
+               skip the run entirely. Inside the try so a
+               pausePushes throw lands in the catch instead of
+               escaping the worker (that is std::terminate). */
+            ProbeGuard paused(bridge);
+            if(!paused.held)
+            {
+                QMetaObject::invokeMethod(this, "AppendResult",
+                                          Qt::QueuedConnection,
+                                          Q_ARG(QString, QStringLiteral(
+                                              "measurement skipped — studio closing")));
+                return;
+            }
         for(size_t ci = 0; ci < snapshot.size() && !abort_requested(); ci++)
         {
             RGBControllerInterface* ctrl = snapshot[ci];
@@ -949,6 +962,7 @@ void StudioTab::diagMeasure()
     });
     connect(worker, &QThread::finished, worker, &QThread::deleteLater);
     worker->start();
+    spawn.armed = false;
 }
 
 void StudioTab::PickColor()
