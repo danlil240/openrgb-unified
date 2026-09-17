@@ -343,6 +343,141 @@ void KeyHook::ThreadMain()
 
 } /* namespace studio */
 
+#elif defined(__APPLE__)
+
+#include "KeyTranslate.h"
+
+#include <ApplicationServices/ApplicationServices.h>
+
+#include <chrono>
+#include <thread>
+
+namespace studio
+{
+
+/* Pure C API — no .mm needed. The tap is listen-only: events are
+   observed, never consumed. */
+struct MacHook
+{
+    InputBus*       bus  = nullptr;
+    CFRunLoopRef    loop = nullptr;
+    CFMachPortRef   tap  = nullptr;
+    bool            down[256] = {};   /* auto-repeat suppression */
+};
+static MacHook g_mac;
+
+static CGEventRef MacKeyProc(CGEventTapProxy, CGEventType type,
+                             CGEventRef ev, void*)
+{
+    if(type == kCGEventTapDisabledByTimeout)
+    {   /* macOS may time-out the tap — re-arm instead of dying */
+        if(g_mac.tap != nullptr)
+        {
+            CGEventTapEnable(g_mac.tap, true);
+        }
+        return ev;
+    }
+    const int code = (int)CGEventGetIntegerValueField(
+                         ev, kCGKeyboardEventKeycode);
+    if(code >= 0 && code <= 255)
+    {
+        if(type == kCGEventKeyDown && !g_mac.down[code])
+        {
+            g_mac.down[code] = true;
+            const int vk = VkForMacCode(code);
+            if(vk > 0 && g_mac.bus != nullptr)
+            {
+                g_mac.bus->PushEvent("key", 1.0f, vk);
+            }
+        }
+        else if(type == kCGEventKeyUp)
+        {
+            g_mac.down[code] = false;
+        }
+    }
+    return ev;   /* listen-only — event is passed through */
+}
+
+bool KeyHook::Start(InputBus* b)
+{
+    if(running.load())
+    {
+        return false;
+    }
+    /* One system prompt up front; the tap itself reports the denied
+       status if the grant stays withheld. */
+    if(!CGPreflightListenEventAccess())
+    {
+        CGRequestListenEventAccess();
+    }
+    bus     = b;
+    running = true;
+    th = std::thread(&KeyHook::ThreadMain, this);
+    return true;
+}
+
+void KeyHook::Stop()
+{
+    if(!running.load())
+    {
+        return;
+    }
+    running = false;
+    /* The hook thread may not have published its run loop yet —
+       give it a moment, then wake it so CFRunLoopRun returns. */
+    for(int i = 0; i < 200 && g_mac.loop == nullptr && th.joinable(); i++)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    if(g_mac.loop != nullptr)
+    {
+        CFRunLoopStop(g_mac.loop);
+        CFRunLoopWakeUp(g_mac.loop);
+    }
+    if(th.joinable())
+    {
+        th.join();
+    }
+    bus = nullptr;
+}
+
+void KeyHook::ThreadMain()
+{
+    g_mac.loop = CFRunLoopGetCurrent();
+    g_mac.bus  = bus;
+
+    g_mac.tap = CGEventTapCreate(
+        kCGSessionEventTap, kCGHeadInsertEventTap,
+        kCGEventTapOptionListenOnly,
+        CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp),
+        MacKeyProc, nullptr);
+    if(g_mac.tap == nullptr)
+    {
+        SetStatus("keys: input-monitoring permission denied — enable in "
+                  "System Settings > Privacy");
+        g_mac.loop = nullptr;
+        running = false;
+        return;
+    }
+    CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(
+        kCFAllocatorDefault, g_mac.tap, 0);
+    CFRunLoopAddSource(g_mac.loop, src, kCFRunLoopCommonModes);
+    CGEventTapEnable(g_mac.tap, true);
+    SetStatus("keys: listening");
+
+    CFRunLoopRun();
+
+    CGEventTapEnable(g_mac.tap, false);
+    CFRunLoopRemoveSource(g_mac.loop, src, kCFRunLoopCommonModes);
+    CFRelease(src);
+    CFRelease(g_mac.tap);
+    g_mac = MacHook{};
+    SetStatus("keys: off");
+    running = false;
+}
+
+} /* namespace studio */
+
 #else /* unsupported platform — report honestly, never crash */
 
 namespace studio
