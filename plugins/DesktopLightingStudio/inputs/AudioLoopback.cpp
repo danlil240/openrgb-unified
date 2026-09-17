@@ -6,6 +6,61 @@
 
 #include "AudioLoopback.h"
 
+/*---------------------------------------------------------*\
+||| Shared lifecycle — identical on every platform; only  |
+|||   touches std:: members. ThreadMain/Pump stay inside    |
+|||   the per-OS blocks below.                              |
+\*---------------------------------------------------------*/
+namespace studio
+{
+
+AudioLoopback::~AudioLoopback()
+{
+    Stop();
+}
+
+std::string AudioLoopback::Status() const
+{
+    std::lock_guard<std::mutex> lock(status_mu);
+    return status;
+}
+
+void AudioLoopback::SetStatus(const std::string& s)
+{
+    std::lock_guard<std::mutex> lock(status_mu);
+    status = s;
+}
+
+bool AudioLoopback::Start(InputBus* b)
+{
+    if(running.load())
+    {
+        return false;
+    }
+    bus     = b;
+    running = true;
+    reinit  = false;
+    onset.Reset();
+    th = std::thread(&AudioLoopback::ThreadMain, this);
+    return true;
+}
+
+void AudioLoopback::Stop()
+{
+    if(!running.load())
+    {
+        return;
+    }
+    running = false;
+    if(th.joinable())
+    {
+        th.join();
+    }
+    bus = nullptr;
+}
+
+} /* namespace studio */
+
 #ifdef _WIN32
 
 #ifndef NOMINMAX
@@ -106,51 +161,6 @@ static bool ChunkEnergy(const BYTE* data, UINT32 frames,
     }
     energy = (float)(acc / (frames * (UINT32)ch));
     return true;
-}
-
-AudioLoopback::~AudioLoopback()
-{
-    Stop();
-}
-
-std::string AudioLoopback::Status() const
-{
-    std::lock_guard<std::mutex> lock(status_mu);
-    return status;
-}
-
-void AudioLoopback::SetStatus(const std::string& s)
-{
-    std::lock_guard<std::mutex> lock(status_mu);
-    status = s;
-}
-
-bool AudioLoopback::Start(InputBus* b)
-{
-    if(running.load())
-    {
-        return false;
-    }
-    bus     = b;
-    running = true;
-    reinit  = false;
-    onset.Reset();
-    th = std::thread(&AudioLoopback::ThreadMain, this);
-    return true;
-}
-
-void AudioLoopback::Stop()
-{
-    if(!running.load())
-    {
-        return;
-    }
-    running = false;
-    if(th.joinable())
-    {
-        th.join();
-    }
-    bus = nullptr;
 }
 
 void AudioLoopback::ThreadMain()
@@ -297,18 +307,286 @@ bool AudioLoopback::Pump()
 
 } /* namespace studio */
 
-#else /* non-Windows stub — the plugin only targets Windows today */
+#elif defined(__linux__)
+
+#include <pulse/pulseaudio.h>
+
+#include <chrono>
+#include <string>
+#include <thread>
 
 namespace studio
 {
 
-AudioLoopback::~AudioLoopback() { Stop(); }
-std::string AudioLoopback::Status() const { return "audio: unsupported platform"; }
-void AudioLoopback::SetStatus(const std::string&) {}
-bool AudioLoopback::Start(InputBus*) { return false; }
-void AudioLoopback::Stop() {}
-void AudioLoopback::ThreadMain() {}
-bool AudioLoopback::Pump() { return false; }
+/* One AudioLoopback exists per plugin instance; the session-scoped
+   PulseAudio handles live in this file-static so Pump() (whose
+   signature is fixed by the shared header) can reach them. */
+static pa_threaded_mainloop* s_ml  = nullptr;
+static pa_context*           s_ctx = nullptr;
+
+/*---------------------------------------------------------*\
+||| Same energy formula as ChunkEnergy — file-local copy  |
+|||   for float32 interleaved only (we request that         |
+|||   format ourselves).                                  |
+\*---------------------------------------------------------*/
+static float EnergyF32(const float* s, size_t frames, int ch)
+{
+    double acc = 0.0;
+    for(size_t i = 0; i < frames * (size_t)ch; i++)
+    {
+        acc += (double)s[i] * s[i];
+    }
+    return (float)(acc / (frames * (size_t)ch));
+}
+
+/* Default-sink changes reopen the stream — the same contract
+   the WASAPI DefaultDeviceNotifier provides. */
+static void ServerEventCb(pa_context*, pa_subscription_event_type_t t,
+                          uint32_t, void* ud)
+{
+    if((t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK) == PA_SUBSCRIPTION_EVENT_SERVER
+       && (t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) == PA_SUBSCRIPTION_EVENT_CHANGE)
+    {
+        static_cast<std::atomic<bool>*>(ud)->store(true);
+    }
+}
+
+static void ServerInfoCb(pa_context*, const pa_server_info* i, void* ud)
+{
+    *static_cast<std::string*>(ud) =
+        (i != nullptr && i->default_sink_name != nullptr)
+            ? i->default_sink_name : "";
+}
+
+/* Waits for a pa_operation to finish; the caller must NOT hold the
+   mainloop lock (completion is signalled on the mainloop thread). */
+static void WaitOp(pa_operation* op)
+{
+    while(op != nullptr
+          && pa_operation_get_state(op) == PA_OPERATION_RUNNING)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if(op != nullptr)
+    {
+        pa_operation_unref(op);
+    }
+}
+
+void AudioLoopback::ThreadMain()
+{
+    s_ml = pa_threaded_mainloop_new();
+    if(s_ml == nullptr)
+    {
+        SetStatus("audio: pulseaudio init failed");
+        running = false;
+        return;
+    }
+    s_ctx = pa_context_new(pa_threaded_mainloop_get_api(s_ml),
+                           "DesktopLightingStudio");
+    if(s_ctx == nullptr)
+    {
+        pa_threaded_mainloop_free(s_ml);
+        s_ml = nullptr;
+        SetStatus("audio: pulseaudio init failed");
+        running = false;
+        return;
+    }
+    pa_context_set_subscribe_callback(s_ctx, ServerEventCb, &reinit);
+
+    if(pa_context_connect(s_ctx, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0
+       || pa_threaded_mainloop_start(s_ml) < 0)
+    {
+        SetStatus("audio: no pulseaudio server");
+        running = false;
+        goto done;
+    }
+
+    /* Wait for the context handshake. */
+    for(;;)
+    {
+        const pa_context_state_t cs = pa_context_get_state(s_ctx);
+        if(cs == PA_CONTEXT_READY)
+        {
+            break;
+        }
+        if(cs == PA_CONTEXT_FAILED || cs == PA_CONTEXT_TERMINATED
+           || !running.load())
+        {
+            SetStatus("audio: no pulseaudio server");
+            running = false;
+            goto done;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    WaitOp(pa_context_subscribe(s_ctx, PA_SUBSCRIPTION_MASK_SERVER,
+                                nullptr, nullptr));
+
+    while(running.load())
+    {
+        if(!Pump())
+        {
+            break;
+        }
+        /* Session ended (device change or error) — brief backoff,
+           then reopen. */
+        for(int i = 0; i < 5 && running.load(); i++)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if(bus != nullptr)
+    {
+        bus->SetAudioLevel(0.0f);
+    }
+
+done:
+    if(s_ctx != nullptr)
+    {
+        pa_context_disconnect(s_ctx);
+        pa_context_unref(s_ctx);
+        s_ctx = nullptr;
+    }
+    pa_threaded_mainloop_stop(s_ml);
+    pa_threaded_mainloop_free(s_ml);
+    s_ml = nullptr;
+    if(!running.load())
+    {
+        SetStatus("audio: off");
+    }
+}
+
+bool AudioLoopback::Pump()
+{
+    /* — resolve default sink — */
+    std::string sink;
+    WaitOp(pa_context_get_server_info(s_ctx, ServerInfoCb, &sink));
+    if(sink.empty())
+    {
+        SetStatus("audio: no default sink");
+        return running.load();
+    }
+
+    /* — record stream on "<sink>.monitor" — */
+    const pa_sample_spec ss = { PA_SAMPLE_FLOAT32NE, 48000, 2 };
+    pa_channel_map cm;
+    pa_channel_map_init_stereo(&cm);
+    pa_stream* st = pa_stream_new(s_ctx, "DesktopLightingStudio", &ss, &cm);
+    if(st == nullptr)
+    {
+        SetStatus("audio: stream create failed");
+        return running.load();
+    }
+    const std::string src = sink + ".monitor";
+    const pa_buffer_attr ba = { (uint32_t)-1, (uint32_t)-1, (uint32_t)-1,
+                                (uint32_t)-1,
+                                (uint32_t)(48000 * 2 * 4 / 100) }; /* ~10ms */
+    if(pa_stream_connect_record(st, src.c_str(), &ba, PA_STREAM_NOFLAGS) < 0)
+    {
+        pa_stream_unref(st);
+        SetStatus("audio: monitor connect failed");
+        return running.load();
+    }
+
+    /* Wait for the stream to come up. */
+    for(;;)
+    {
+        const pa_stream_state_t ss_state = pa_stream_get_state(st);
+        if(ss_state == PA_STREAM_READY)
+        {
+            break;
+        }
+        if(ss_state == PA_STREAM_FAILED || ss_state == PA_STREAM_TERMINATED
+           || !running.load())
+        {
+            pa_stream_disconnect(st);
+            pa_stream_unref(st);
+            SetStatus("audio: monitor connect failed");
+            return running.load();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    SetStatus("audio: listening");
+    reinit = false;
+
+    /* Poll the record stream: peek -> energy -> drop, mirroring the
+       WASAPI GetBuffer loop. peek/drop need the mainloop lock. */
+    while(running.load() && !reinit.load())
+    {
+        pa_threaded_mainloop_lock(s_ml);
+        for(;;)
+        {
+            const void* data = nullptr;
+            size_t      len  = 0;
+            const int   rc   = pa_stream_peek(st, &data, &len);
+            if(rc < 0)
+            {
+                if(pa_context_errno(s_ctx) != PA_ERR_NODATA)
+                {
+                    reinit = true;
+                }
+                break;
+            }
+            pa_stream_drop(st);
+            const size_t frames = len / (2 * sizeof(float));
+            if(frames == 0)
+            {
+                continue;      /* timing-only chunk — nothing to feed */
+            }
+            /* data == nullptr means a hole — feed zero energy exactly
+               like AUDCLNT_BUFFERFLAGS_SILENT. */
+            const float energy =
+                (data != nullptr)
+                    ? EnergyF32(static_cast<const float*>(data),
+                                frames, 2)
+                    : 0.0f;
+            onset.SetSensitivity(sens.load());
+            const float hit = onset.Feed(energy, frames / 48000.0);
+            if(bus != nullptr)
+            {
+                bus->SetAudioLevel(onset.Level());
+                if(hit > 0.0f)
+                {
+                    /* Position-less event — the ripple layer's origin
+                       decides where shockwave rings spawn. */
+                    bus->PushEvent("audio", hit);
+                }
+            }
+        }
+        pa_threaded_mainloop_unlock(s_ml);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    pa_stream_disconnect(st);
+    pa_stream_unref(st);
+    if(!running.load())
+    {
+        SetStatus("audio: off");
+    }
+    else
+    {
+        SetStatus("audio: reinitializing");
+    }
+    return running.load();
+}
+
+} /* namespace studio */
+
+#else /* unsupported platform — report honestly, never crash */
+
+namespace studio
+{
+
+void AudioLoopback::ThreadMain()
+{
+    SetStatus("audio: unsupported platform");
+    running = false;
+}
+
+bool AudioLoopback::Pump()
+{
+    return false;
+}
 
 } /* namespace studio */
 

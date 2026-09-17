@@ -5,6 +5,9 @@
 |||   render endpoint, on its own thread. Computes chunk    |
 |||   energy, feeds the OnsetDetect, and pushes onset       |
 |||   events + a smoothed level into the InputBus.          |
+|||   Linux: PulseAudio record stream on the default        |
+|||   sink's monitor (PipeWire systems serve this via       |
+|||   pipewire-pulse).                                      |
 |||                                                           |
 |||   Silence buffers feed zero energy (the level decays    |
 |||   and effects fall back to their base layer). Default-  |
