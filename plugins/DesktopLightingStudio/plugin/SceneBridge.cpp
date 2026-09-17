@@ -594,25 +594,53 @@ bool SceneBridge::pausePushes()
        after probe_serial covers the probe that was queued behind an
        active one while shutdown began. */
     probe_active.fetch_add(1);
-    /* If the lock allocation throws the count would strand — the
-       dtor's drain loop counts on it. Disarmed once the probe is
-       registered; the counted exits below subtract directly. */
-    struct SpawnCount { std::atomic<int>& c; bool armed = true;
-        ~SpawnCount() { if(armed) c.fetch_sub(1); } } spawn{probe_active};
+    /* A throw anywhere below — lock allocation, the queued
+       invokeMethod, a lane-lock make_unique — must not strand what
+       the probe already took: probe_active (the dtor's drain loop
+       spins on it), probe_serial (every later probe deadlocks), or
+       live_output (live stuck off). The guard stays armed until the
+       probe is fully registered and unwinds in reverse order — lane
+       locks, live flag, serial lock, count — mirroring
+       resumePushes(); the counted exits just disarm via return. */
+    struct PauseGuard {
+        SceneBridge* b;
+        bool armed          = true;
+        bool live_exchanged = false;
+        ~PauseGuard()
+        {
+            if(!armed)
+            {
+                return;
+            }
+            /* Move off the members before resetting — the same
+               happen-before ordering resumePushes() relies on. */
+            auto lane0  = std::move(b->probe_lane_locks[0]);
+            auto lane1  = std::move(b->probe_lane_locks[1]);
+            auto serial = std::move(b->probe_serial_lock);
+            lane0.reset();
+            lane1.reset();
+            /* Restore while probe_serial is still held: a probe
+               queued behind this one must not exchange() a still-false
+               live_output and record probe_was_live=false (live stuck
+               off, plus a member race). Same restore condition as
+               resumePushes() — a user toggle during the pause wins. */
+            if(live_exchanged && b->probe_was_live
+               && !b->live_output.load()
+               && b->live_generation.load() == b->probe_live_generation)
+            {
+                b->live_output = true;
+            }
+            serial.reset();
+            b->probe_active.fetch_sub(1);
+        }
+    } pause{this};
     if(shutting_down.load())
     {
-        probe_active.fetch_sub(1);
-        spawn.armed = false;
         return false;
     }
     probe_serial_lock = std::make_unique<std::unique_lock<QMutex>>(probe_serial);
-    spawn.armed = false;
     if(shutting_down.load())
     {
-        /* Move off the member before unlocking — see resumePushes(). */
-        auto serial = std::move(probe_serial_lock);
-        serial.reset();
-        probe_active.fetch_sub(1);
         return false;
     }
 
@@ -628,6 +656,7 @@ bool SceneBridge::pausePushes()
        generation, so resumePushes() can't restore over it. */
     probe_live_generation = live_generation.load();
     probe_was_live = live_output.exchange(false);
+    pause.live_exchanged = true;
     if(probe_was_live)
     {
         if(QThread::currentThread() == thread())
@@ -647,6 +676,7 @@ bool SceneBridge::pausePushes()
        workers and blocks any straggler that slipped the gate. */
     probe_lane_locks[0] = std::make_unique<std::unique_lock<QMutex>>(io_mutex);
     probe_lane_locks[1] = std::make_unique<std::unique_lock<QMutex>>(fast_io_mutex);
+    pause.armed = false;
     return true;
 }
 
