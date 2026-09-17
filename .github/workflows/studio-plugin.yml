@@ -1,0 +1,51 @@
+name: studio-plugin
+on: [push, pull_request]
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-24.04,    qt_arch: linux_gcc_64,       cc: gcc   }
+          - { os: macos-14,        qt_arch: clang_64,           cc: clang }
+          - { os: windows-latest,  qt_arch: win64_msvc2022_64,  cc: msvc  }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true          # OpenRGB headers needed
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: ${{ matrix.qt_arch }}
+          modules: 'qtquick3d'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev libgl-dev
+      - name: Build plugin (unix)
+        if: runner.os != 'Windows'
+        working-directory: plugins/DesktopLightingStudio
+        run: |
+          mkdir -p build
+          qmake DesktopLightingStudio.pro -o build/Makefile
+          make -C build -j4
+      - name: Build plugin (windows)
+        if: runner.os == 'Windows'
+        working-directory: plugins/DesktopLightingStudio
+        run: |
+          qmake DesktopLightingStudio.pro
+          jom
+      - name: Unit tests (unix)
+        if: runner.os != 'Windows'
+        run: bash tests/build-studio-tests.sh
+      - name: Unit tests (windows, mingw g++)
+        if: runner.os == 'Windows'
+        # build-studio-tests.sh drives GCC-style flags; use the runner's
+        # bundled MSYS2 g++ rather than cl for the Qt-free suites.
+        run: |
+          echo "C:/msys64/mingw64/bin" >> "$GITHUB_PATH"
+          bash tests/build-studio-tests.sh
+        env:
+          CXX: g++
+        shell: bash
