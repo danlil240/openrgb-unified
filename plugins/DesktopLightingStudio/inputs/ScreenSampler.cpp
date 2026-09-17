@@ -20,6 +20,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <CoreGraphics/CoreGraphics.h>
 #endif
 
 namespace studio
@@ -116,6 +118,11 @@ void ScreenSampler::Start(int index)
 {
     screen_index = index;
     status.clear();
+#if defined(__APPLE__)
+    /* Trigger the TCC prompt once up front; Grab() then reports
+       the grant state honestly each tick. */
+    CGRequestScreenCaptureAccess();
+#endif
     timer->start();
     Grab();
 }
@@ -146,6 +153,25 @@ void ScreenSampler::SetScreenIndex(int index)
 
 void ScreenSampler::Grab()
 {
+#if defined(__linux__)
+    if(QGuiApplication::platformName().contains(QStringLiteral("wayland"),
+                                               Qt::CaseInsensitive))
+    {
+        status = QStringLiteral("screen: unsupported on Wayland");
+        if(bus != nullptr) { bus->ClearScreenGrid(); }
+        return;
+    }
+#elif defined(__APPLE__)
+    if(!CGPreflightScreenCaptureAccess())
+    {
+        status = QStringLiteral(
+            "screen: grant Screen Recording to OpenRGB "
+            "(System Settings > Privacy & Security)");
+        if(bus != nullptr) { bus->ClearScreenGrid(); }
+        return;
+    }
+#endif
+
     const auto screens = QGuiApplication::screens();
     if(screen_index < 0 || screen_index >= screens.size())
     {
