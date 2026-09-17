@@ -58,6 +58,103 @@ static bool Near(float a, float b, float eps = 1e-6f)
 }
 
 /*---------------------------------------------------------*\
+|||| Tolerant parity compare — the fixture oracle was     |
+|||| captured under MSVC. Other toolchains produce ULP-   |
+|||| level drift in float math (libm trig + fp            |
+|||| contraction), so bit-exact JSON equality is not      |
+|||| portable. A ~1e-5 relative tolerance still fails on  |
+|||| any semantic regression (wrong primitive, missing    |
+|||| layer, palette change) while absorbing FP noise.     |
+|\*---------------------------------------------------------*/
+static bool JsonNear(const json& a, const json& b, double eps = 1e-5)
+{
+    if(a.is_number() && b.is_number())
+    {
+        const double x = a.get<double>(), y = b.get<double>();
+        const double m = std::fabs(x) > std::fabs(y)
+                       ? std::fabs(x) : std::fabs(y);
+        return std::fabs(x - y) <= eps * (m > 1.0 ? m : 1.0);
+    }
+    if(a.is_array() && b.is_array() && a.size() == b.size())
+    {
+        for(size_t i = 0; i < a.size(); ++i)
+        {
+            if(!JsonNear(a[i], b[i], eps))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    if(a.is_object() && b.is_object() && a.size() == b.size())
+    {
+        for(auto it = a.begin(); it != a.end(); ++it)
+        {
+            if(!b.contains(it.key())
+               || !JsonNear(it.value(), b[it.key()], eps))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    return a == b;
+}
+
+/* Frame colors serialize as "#RRGGBB" — quantized to integer
+   channels, so ULP drift can only flip a channel by one count.
+   Treat a per-channel delta of <= 1 as parity. */
+static bool HexNear(const std::string& a, const std::string& b)
+{
+    if(a == b)
+    {
+        return true;
+    }
+    if(a.size() != 7 || b.size() != 7 || a[0] != '#' || b[0] != '#')
+    {
+        return false;
+    }
+    for(size_t i = 1; i < 7; i += 2)
+    {
+        const long ca = std::strtol(a.substr(i, 2).c_str(), nullptr, 16);
+        const long cb = std::strtol(b.substr(i, 2).c_str(), nullptr, 16);
+        if(std::labs(ca - cb) > 1)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool FramesNear(const json& want, const json& got)
+{
+    if(!want.is_object() || !got.is_object()
+       || want.size() != got.size())
+    {
+        return false;
+    }
+    for(auto it = want.begin(); it != want.end(); ++it)
+    {
+        const json gw = got.value(it.key(), json());
+        if(!gw.is_array() || !it.value().is_array()
+           || gw.size() != it.value().size())
+        {
+            return false;
+        }
+        for(size_t i = 0; i < it.value().size(); ++i)
+        {
+            if(!it.value()[i].is_string() || !gw[i].is_string()
+               || !HexNear(it.value()[i].get<std::string>(),
+                           gw[i].get<std::string>()))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/*---------------------------------------------------------*\
 ||| Paths — fixtures + packaged effect files resolve       |
 ||| relative to the test cwd (tests/) with env overrides   |
 ||| for unusual layouts. NEVER touch %APPDATA%.            |
@@ -235,7 +332,7 @@ static void TestFixtureParity()
                 (unsigned int)std::stoul(it.key());
             const std::vector<EffectLayer> built = BuildPreset(id, seed);
             const json got = EffectLayersToJson(built);
-            if(got != it.value())
+            if(!JsonNear(got, it.value()))
             {
                 ++failures;
                 std::printf("FAIL: stack parity %s seed %s\n",
@@ -245,7 +342,7 @@ static void TestFixtureParity()
                 for(size_t i = 0; i < got.size()
                                  && i < it.value().size(); i++)
                 {
-                    if(got[i] != it.value()[i])
+                    if(!JsonNear(got[i], it.value()[i]))
                     {
                         std::printf("  layer %d:\n    want %s\n"
                                     "    got  %s\n", (int)i,
@@ -284,7 +381,9 @@ static void TestFixtureParity()
             ++cases_total;
             const std::string want_hash = c.value("frame_hash", std::string());
             const std::string got_hash  = HashFrame(frame);
-            if(got_hash != want_hash)
+            if(got_hash != want_hash
+               && !FramesNear(c.value("frames", json::object()),
+                              FramesJson(frame)))
             {
                 ++failures;
                 std::printf("FAIL: frame hash %s seed %u t %.2f\n"
@@ -297,12 +396,17 @@ static void TestFixtureParity()
                 for(auto it = want.begin(); it != want.end(); ++it)
                 {
                     const json gw = got.value(it.key(), json::array());
-                    if(gw != it.value())
+                    if(!gw.is_array() || it.value().size() != gw.size()
+                       || !FramesNear(json::object({{it.key(), it.value()}}),
+                                      json::object({{it.key(), gw}})))
                     {
                         for(size_t i = 0; i < it.value().size()
                                          && i < gw.size(); i++)
                         {
-                            if(gw[i] != it.value()[i])
+                            if(!gw[i].is_string()
+                               || !it.value()[i].is_string()
+                               || !HexNear(gw[i].get<std::string>(),
+                                           it.value()[i].get<std::string>()))
                             {
                                 std::printf("    %s[%d] want %s"
                                             " got %s\n",
