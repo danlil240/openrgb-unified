@@ -572,6 +572,9 @@ bool AudioLoopback::Pump()
 
 } /* namespace studio */
 
+#elif defined(__APPLE__)
+/* macOS backend lives in inputs/AudioLoopback_mac.mm */
+
 #else /* unsupported platform — report honestly, never crash */
 
 namespace studio

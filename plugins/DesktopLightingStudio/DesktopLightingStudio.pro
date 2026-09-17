@@ -19,6 +19,7 @@ unix:!macx {
 macx {
     LIBS    += -framework ApplicationServices -framework CoreAudio \
                -framework CoreFoundation -framework CoreGraphics
+    OBJECTIVE_SOURCES += inputs/AudioLoopback_mac.mm
     QMAKE_MACOSX_DEPLOYMENT_TARGET = 12.0
 }
 
